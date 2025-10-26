@@ -1,8 +1,8 @@
 # ReDeFin
 
 <div align="center">
-  <img src="<img width="1024" height="1024" src="https://github.com/user-attachments/assets/e51b197e-90cd-4b48-b5a2-a054400e910c" />
-" width="640" height="640" alt="image">
+  <img src="https://github.com/user-attachments/assets/e51b197e-90cd-4b48-b5a2-a054400e910c"
+       width="640" height="640" alt="image">
 </div>
 
 
