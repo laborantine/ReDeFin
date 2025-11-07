@@ -25,7 +25,6 @@
 [![Stargazers][stars-shield]][stars-url]
 [![Issues][issues-shield]][issues-url]
 [![Unlicense License][license-shield]][license-url]
-[![LinkedIn][linkedin-shield]][linkedin-url]
 
 
 
@@ -245,17 +244,15 @@ Use this space to list resources you find helpful and would like to give credit 
 <!-- MARKDOWN LINKS & IMAGES -->
 <!-- https://www.markdownguide.org/basic-syntax/#reference-style-links -->
 [contributors-shield]: https://img.shields.io/github/contributors/Laborantine/ReDeFin.svg?style=for-the-badge
-[contributors-url]: https://github.com/laborantine/ReDeFin/network/dependencies
-[forks-shield]: https://img.shields.io/github/forks/othneildrew/Best-README-Template.svg?style=for-the-badge
-[forks-url]: https://github.com/othneildrew/Best-README-Template/network/members
-[stars-shield]: https://img.shields.io/github/stars/othneildrew/Best-README-Template.svg?style=for-the-badge
-[stars-url]: https://github.com/othneildrew/Best-README-Template/stargazers
-[issues-shield]: https://img.shields.io/github/issues/othneildrew/Best-README-Template.svg?style=for-the-badge
-[issues-url]: https://github.com/othneildrew/Best-README-Template/issues
-[license-shield]: https://img.shields.io/github/license/othneildrew/Best-README-Template.svg?style=for-the-badge
-[license-url]: https://github.com/othneildrew/Best-README-Template/blob/master/LICENSE.txt
-[linkedin-shield]: https://img.shields.io/badge/-LinkedIn-black.svg?style=for-the-badge&logo=linkedin&colorB=555
-[linkedin-url]: https://linkedin.com/in/othneildrew
+[contributors-url]: https://github.com/Laborantine/ReDeFin/network/dependencies
+[forks-shield]: https://img.shields.io/github/forks/Laborantine/ReDeFin.svg?style=for-the-badge
+[forks-url]: https://github.com/Laborantine/ReDeFin/network/members
+[stars-shield]: https://img.shields.io/github/stars/Laborantine/ReDeFin.svg?style=for-the-badge
+[stars-url]: https://github.com/Laborantine/ReDeFin/stargazers
+[issues-shield]: https://img.shields.io/github/issues/Laborantine/ReDeFin.svg?style=for-the-badge
+[issues-url]: https://github.com/Laborantine/ReDeFin/issues
+[license-shield]: https://img.shields.io/github/license/Laborantine/ReDeFin.svg?style=for-the-badge
+[license-url]: https://github.com/othneildrew/ReDeFin/blob/master/LICENSE.txt
 [product-screenshot]: images/screenshot.png
 [Next.js]: https://img.shields.io/badge/next.js-000000?style=for-the-badge&logo=nextdotjs&logoColor=white
 [Next-url]: https://nextjs.org/
