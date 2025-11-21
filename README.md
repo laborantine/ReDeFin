@@ -36,10 +36,12 @@
   </a>
 
 
-  <h3 align="center">Best-README-Template</h3>
+  <h3 align="center">Un client Jellyfin non officiel pour lire votre bibliothèque sur Freebox</h3>
 
   <p align="center">
-    An awesome README template to jumpstart your projects!
+  ReDeFin est un client non officiel Jellyfin pensé spécialement pour les Freebox Player (Révolution / Devialet).
+ 
+  Son objectif : Profiter de votre médiathèque comme sur une grande plateforme de streaming avec votre serveur, vos fichiers, votre Freebox.
     <br />
     <a href="https://github.com/othneildrew/Best-README-Template"><strong>Explore the docs »</strong></a>
     <br />
