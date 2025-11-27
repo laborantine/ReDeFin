@@ -91,17 +91,29 @@ ReDeFin est un client Jellyfin NON OFFICIEL codé en QML et JavaScript, compatib
 
 L'objectif souhaité est de se rapprocher visuellement et fonctionnellement de ce que le client officiel Android TV est capable de faire.
 
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
+<p align="right">(<a href="#readme-top">Retour en haut de page</a>)</p>
 
 
 
 ### Fabriqué avec
 
-This section should list any major frameworks/libraries used to bootstrap your project. Leave any add-ons/plugins for the acknowledgements section. Here are a few examples.
-
 * [![chatgpt.com][chatgpt.com]][chatgpt-url]
+  
+Ce projet a été intégralement fabriqué à partir de ChatGPT depuis 2024. Il a été fabriqué à partir des modèles de langages suivants :
+  
+Travaux préliminaires (2024 - mars 2025) :
 
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
+- GPT 3.5
+- GPT 4
+- GPT-4o
+
+Travaux principaux (avril 2025 - maintenant) :
+
+- GPT 4.5
+- GPT 5
+- GPT 5.1
+
+<p align="right">(<a href="#readme-top">Retour en haut de page</a>)</p>
 
 
 
@@ -142,7 +154,7 @@ _Below is an example of how you can instruct your audience on installing and set
    git remote -v # confirm the changes
    ```
 
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
+<p align="right">(<a href="#readme-top">Retour en haut de page</a>)</p>
 
 
 
@@ -153,7 +165,7 @@ Use this space to show useful examples of how a project can be used. Additional 
 
 _For more examples, please refer to the [Documentation](https://example.com)_
 
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
+<p align="right">(<a href="#readme-top">Retour en haut de page</a>)</p>
 
 
 
@@ -170,7 +182,7 @@ _For more examples, please refer to the [Documentation](https://example.com)_
 
 See the [open issues](https://github.com/othneildrew/Best-README-Template/issues) for a full list of proposed features (and known issues).
 
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
+<p align="right">(<a href="#readme-top">Retour en haut de page</a>)</p>
 
 
 
@@ -194,7 +206,7 @@ Don't forget to give the project a star! Thanks again!
   <img src="https://contrib.rocks/image?repo=othneildrew/Best-README-Template" alt="contrib.rocks image" />
 </a>
 
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
+<p align="right">(<a href="#readme-top">Retour en haut de page</a>)</p>
 
 
 
@@ -203,7 +215,7 @@ Don't forget to give the project a star! Thanks again!
 
 Distributed under the Unlicense License. See `LICENSE.txt` for more information.
 
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
+<p align="right">(<a href="#readme-top">Retour en haut de page</a>)</p>
 
 
 
@@ -214,7 +226,7 @@ Your Name - [@your_twitter](https://twitter.com/your_username) - email@example.c
 
 Project Link: [https://github.com/your_username/repo_name](https://github.com/your_username/repo_name)
 
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
+<p align="right">(<a href="#readme-top">Retour en haut de page</a>)</p>
 
 
 
@@ -232,7 +244,7 @@ Use this space to list resources you find helpful and would like to give credit 
 * [Font Awesome](https://fontawesome.com)
 * [React Icons](https://react-icons.github.io/react-icons/search)
 
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
+<p align="right">(<a href="#readme-top">Retour en haut de page</a>)</p>
 
 
 
