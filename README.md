@@ -43,14 +43,14 @@
  
   Son objectif : Profiter de votre bibliothèque comme sur une grande plateforme de streaming avec votre serveur, vos fichiers, votre Freebox.
     <br />
-    <a href="https://github.com/othneildrew/Best-README-Template"><strong>Explore the docs »</strong></a>
+    <a href="https://github.com/laborantine/ReDeFin"><strong>Voir la documentation</strong></a>
     <br />
     <br />
-    <a href="https://github.com/othneildrew/Best-README-Template">View Demo</a>
+    <a href="https://github.com/laborantine/ReDeFin">Voir Démo</a>
     &middot;
-    <a href="https://github.com/othneildrew/Best-README-Template/issues/new?labels=bug&template=bug-report---.md">Report Bug</a>
+    <a href="https://github.com/laborantine/ReDeFin/issues/new?labels=bug&template=bug-report---.md">Rapporter un bug</a>
     &middot;
-    <a href="https://github.com/othneildrew/Best-README-Template/issues/new?labels=enhancement&template=feature-request---.md">Request Feature</a>
+    <a href="https://github.com/laborantine/ReDeFin/issues/new?labels=enhancement&template=feature-request---.md">Suggérer une nouvelle fonctionnalité</a>
   </p>
 </div>
 
