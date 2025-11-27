@@ -95,7 +95,7 @@ L'objectif souhaité est de se rapprocher visuellement et fonctionnellement de c
 
 
 
-### Fabriqué avec
+## Fabriqué avec
 
 * [![chatgpt.com][chatgpt.com]][chatgpt-url]
   
@@ -120,39 +120,31 @@ Travaux principaux (avril 2025 - maintenant) :
 <!-- GETTING STARTED -->
 ## Introduction
 
-This is an example of how you may give instructions on setting up your project locally.
-To get a local copy up and running follow these simple example steps.
+Le projet est actuellement en phase bêta fermé. Pour candidater en tant que bêta-testeur, il faudra vous munir de votre n° d'abonnés Freebox (commençant la plupart du temps par fbxXXX) que vous retrouvez sur votre espace client Freebox. Une fois que vous aurez cette information, veuillez envoyer un mail à : application.redefin@proton.me. 
 
 ### Prérequis
 
-This is an example of how to list things you need to use the software and how to install them.
-* npm
-  ```sh
-  npm install npm@latest -g
-  ```
+Vous devez disposer au moins de l'un des produits suivants pour bénéficier de cette application :
+
+* Freebox Révolution
+ <div align="left">
+  <a href="https://github.com/user-attachments/assets/691c2ed2-626e-4702-8277-9750ef365264">
+    <img src="https://github.com/user-attachments/assets/691c2ed2-626e-4702-8277-9750ef365264" alt="Logo" width="320" height="320">
+  </a>
+
+  * Freebox Delta-Devialet
+  <div align="left">
+  <a href="https://github.com/user-attachments/assets/ee7d6788-fa02-4e52-aed8-ad6201c4454c">
+    <img src="https://github.com/user-attachments/assets/ee7d6788-fa02-4e52-aed8-ad6201c4454c" alt="Logo" width="320" height="320">
+  </a>
+
+IMPORTANT : Dans le cas où vous auriez une Freebox Devialet, il faut que cette dernière puisse être rattachée à un abonnement chez Free pour avoir la capacité de télécharger des application dans le Free Store, endroit où se trouve l'application en production.
 
 ### Installation
 
-_Below is an example of how you can instruct your audience on installing and setting up your app. This template doesn't rely on any external dependencies or services._
+Une fois votre mail envoyé à application.redefin@proton.me pour candidater en qualité de bêta-testeur, vous aurez un mail vous confirmant la prise en compte de votre mail et la déclaration de votre n° d'abonné (identifiant Freebox) dans la liste des bêta-testeurs.
 
-1. Get a free API Key at [https://example.com](https://example.com)
-2. Clone the repo
-   ```sh
-   git clone https://github.com/github_username/repo_name.git
-   ```
-3. Install NPM packages
-   ```sh
-   npm install
-   ```
-4. Enter your API in `config.js`
-   ```js
-   const API_KEY = 'ENTER YOUR API';
-   ```
-5. Change git remote url to avoid accidental pushes to base project
-   ```sh
-   git remote set-url origin github_username/repo_name
-   git remote -v # confirm the changes
-   ```
+Vous pourrez alors vous rendre dans le Free Store sur votre Freebox Player afin de télécharger ReDeFin.
 
 <p align="right">(<a href="#readme-top">Retour en haut de page</a>)</p>
 
@@ -161,9 +153,9 @@ _Below is an example of how you can instruct your audience on installing and set
 <!-- USAGE EXAMPLES -->
 ## Usage
 
-Use this space to show useful examples of how a project can be used. Additional screenshots, code examples and demos work well in this space. You may also link to more resources.
+Cette application vous permet de lire vos épisodes de séries et vos films de votre bibliothèque Jellyfin. Le support de la bibliothèque musicale et des chaines TV sont à l'étude.
 
-_For more examples, please refer to the [Documentation](https://example.com)_
+_Pour plus d'exemples, Référez-vous à la [documentation officielle de Jellyfin](https://jellyfin.org/docs/)_
 
 <p align="right">(<a href="#readme-top">Retour en haut de page</a>)</p>
 
@@ -172,15 +164,11 @@ _For more examples, please refer to the [Documentation](https://example.com)_
 <!-- ROADMAP -->
 ## Roadmap
 
-- [x] Add Changelog
-- [x] Add back to top links
-- [ ] Add Additional Templates w/ Examples
-- [ ] Add "components" document to easily copy & paste sections of the readme
-- [ ] Multi-language Support
-    - [ ] Chinese
-    - [ ] Spanish
+- [x] Support de la bibliothèque Séries et Films
+- [x] Lecteur vidéo compatible DirectPlay/Remux/DirectStream/Transcodage
+- [x] Support multi-profil
 
-See the [open issues](https://github.com/othneildrew/Best-README-Template/issues) for a full list of proposed features (and known issues).
+Voir [open issues](https://github.com/laborantine/ReDeFin/issues) pour un aperçu complet des nouvelles fonctionnalités (et des problèmes connus).
 
 <p align="right">(<a href="#readme-top">Retour en haut de page</a>)</p>
 
@@ -189,12 +177,13 @@ See the [open issues](https://github.com/othneildrew/Best-README-Template/issues
 <!-- CONTRIBUTING -->
 ## Contributeurs
 
-Contributions are what make the open source community such an amazing place to learn, inspire, and create. Any contributions you make are **greatly appreciated**.
+Les contributions font de la communauté open source un lieu exceptionnel pour apprendre, s'inspirer et créer. Toute contribution est **gratuitement appréciée**.
 
-If you have a suggestion that would make this better, please fork the repo and create a pull request. You can also simply open an issue with the tag "enhancement".
-Don't forget to give the project a star! Thanks again!
+Si vous avez une suggestion pour améliorer ce projet, n'hésitez pas à forker le dépôt et à créer une pull request. Vous pouvez également ouvrir une issue avec l'étiquette « enhancement ».
 
-1. Fork the Project
+Pensez à mettre une étoile au projet ! Merci encore ;)
+
+1. Forkez le projet
 2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
 3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
 4. Push to the Branch (`git push origin feature/AmazingFeature`)
