@@ -41,7 +41,7 @@
   <p align="center">
   ReDeFin est un client non officiel Jellyfin pensé spécialement pour les Freebox Player (Révolution / Devialet).
  
-  Son objectif : Profiter de votre médiathèque comme sur une grande plateforme de streaming avec votre serveur, vos fichiers, votre Freebox.
+  Son objectif : Profiter de votre bibliothèque comme sur une grande plateforme de streaming avec votre serveur, vos fichiers, votre Freebox.
     <br />
     <a href="https://github.com/othneildrew/Best-README-Template"><strong>Explore the docs »</strong></a>
     <br />
@@ -56,29 +56,29 @@
 
 
 
-<!-- TABLE OF CONTENTS -->
+<!-- TABLE DES MATIERES -->
 <details>
-  <summary>Table of Contents</summary>
+  <summary>Table des matières</summary>
   <ol>
     <li>
-      <a href="#about-the-project">About The Project</a>
+      <a href="About-this-project">A propos de ce projet</a>
       <ul>
-        <li><a href="#built-with">Built With</a></li>
+        <li><a href="built-with">Fabriqué avec</a></li>
       </ul>
     </li>
     <li>
-      <a href="#getting-started">Getting Started</a>
+      <a href="getting-started">Introduction</a>
       <ul>
-        <li><a href="#prerequisites">Prerequisites</a></li>
-        <li><a href="#installation">Installation</a></li>
+        <li><a href="prerequisites">Prérequis</a></li>
+        <li><a href="installation">Installation</a></li>
       </ul>
     </li>
-    <li><a href="#usage">Usage</a></li>
-    <li><a href="#roadmap">Roadmap</a></li>
-    <li><a href="#contributing">Contributing</a></li>
-    <li><a href="#license">License</a></li>
-    <li><a href="#contact">Contact</a></li>
-    <li><a href="#acknowledgments">Acknowledgments</a></li>
+    <li><a href="usage">Usage</a></li>
+    <li><a href="roadmap">Roadmap</a></li>
+    <li><a href="contributing">Contributeurs</a></li>
+    <li><a href="license">Licence</a></li>
+    <li><a href="contact">Contact</a></li>
+    <li><a href="acknowledgments">Remerciements</a></li>
   </ol>
 </details>
 
@@ -95,7 +95,7 @@ L'objectif souhaité est de se rapprocher visuellement et fonctionnellement de c
 
 
 
-### Built With
+### Fabriqué avec
 
 This section should list any major frameworks/libraries used to bootstrap your project. Leave any add-ons/plugins for the acknowledgements section. Here are a few examples.
 
@@ -106,12 +106,12 @@ This section should list any major frameworks/libraries used to bootstrap your p
 
 
 <!-- GETTING STARTED -->
-## Getting Started
+## Introduction
 
 This is an example of how you may give instructions on setting up your project locally.
 To get a local copy up and running follow these simple example steps.
 
-### Prerequisites
+### Prérequis
 
 This is an example of how to list things you need to use the software and how to install them.
 * npm
@@ -175,7 +175,7 @@ See the [open issues](https://github.com/othneildrew/Best-README-Template/issues
 
 
 <!-- CONTRIBUTING -->
-## Contributing
+## Contributeurs
 
 Contributions are what make the open source community such an amazing place to learn, inspire, and create. Any contributions you make are **greatly appreciated**.
 
@@ -199,7 +199,7 @@ Don't forget to give the project a star! Thanks again!
 
 
 <!-- LICENSE -->
-## License
+## Licence
 
 Distributed under the Unlicense License. See `LICENSE.txt` for more information.
 
@@ -219,7 +219,7 @@ Project Link: [https://github.com/your_username/repo_name](https://github.com/yo
 
 
 <!-- ACKNOWLEDGMENTS -->
-## Acknowledgments
+## Remerciements
 
 Use this space to list resources you find helpful and would like to give credit to. I've included a few of my favorites to kick things off!
 
