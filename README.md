@@ -185,7 +185,7 @@ Pensez à mettre une étoile au projet ! Merci encore ;)
 
 ### Top contributors:
 
-<a href="https://github.com/laborantine/ReDeFin/graphs/contributors"</a>
+<a href="https://github.com/laborantine/ReDeFin/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=othneildrew/Best-README-Template" alt="contrib.rocks image" />
 </a>
 
