@@ -183,15 +183,9 @@ Si vous avez une suggestion pour améliorer ce projet, n'hésitez pas à forker 
 
 Pensez à mettre une étoile au projet ! Merci encore ;)
 
-1. Forkez le projet
-2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the Branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
 ### Top contributors:
 
-<a href="https://github.com/othneildrew/Best-README-Template/graphs/contributors">
+<a href=https://github.com/laborantine/ReDeFin/graph/contributors">
   <img src="https://contrib.rocks/image?repo=othneildrew/Best-README-Template" alt="contrib.rocks image" />
 </a>
 
