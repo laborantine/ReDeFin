@@ -46,8 +46,6 @@
     <a href="https://github.com/laborantine/ReDeFin"><strong>Voir la documentation</strong></a>
     <br />
     <br />
-    <a href="https://github.com/laborantine/ReDeFin">Voir Démo</a>
-    &middot;
     <a href="https://github.com/laborantine/ReDeFin/issues/new?labels=bug&template=bug-report---.md">Rapporter un bug</a>
     &middot;
     <a href="https://github.com/laborantine/ReDeFin/issues/new?labels=enhancement&template=feature-request---.md">Suggérer une nouvelle fonctionnalité</a>
