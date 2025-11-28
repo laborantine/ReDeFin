@@ -186,7 +186,7 @@ Pensez à mettre une étoile au projet ! Merci encore ;)
 ### Top contributors:
 
 <a href="https://github.com/laborantine/ReDeFin/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=othneildrew/Best-README-Template" alt="contrib.rocks image" />
+  <img src="https://contrib.rocks/image?repo=laborantine/ReDeFin" alt="contrib.rocks image" />
 </a>
 
 <p align="right">(<a href="#readme-top">Retour en haut de page</a>)</p>
@@ -196,7 +196,7 @@ Pensez à mettre une étoile au projet ! Merci encore ;)
 <!-- LICENSE -->
 ## Licence
 
-Distributed under the Unlicense License. See `LICENSE.txt` for more information.
+Distribuée sous la licence GPL 3.0. Regardez le fichier `LICENSE.txt` pour plus d'informations.
 
 <p align="right">(<a href="#readme-top">Retour en haut de page</a>)</p>
 
@@ -205,9 +205,9 @@ Distributed under the Unlicense License. See `LICENSE.txt` for more information.
 <!-- CONTACT -->
 ## Contact
 
-Your Name - [@your_twitter](https://twitter.com/your_username) - email@example.com
+Laborantine - (https://github.com/laborantine/ReDeFin/issues) - application.redefin@proton.me
 
-Project Link: [https://github.com/your_username/repo_name](https://github.com/your_username/repo_name)
+Lien officiel du projet : [https://github.com/laborantine/ReDeFin](https://github.com/laborantine/ReDeFin)
 
 <p align="right">(<a href="#readme-top">Retour en haut de page</a>)</p>
 
@@ -216,16 +216,11 @@ Project Link: [https://github.com/your_username/repo_name](https://github.com/yo
 <!-- ACKNOWLEDGMENTS -->
 ## Remerciements
 
-Use this space to list resources you find helpful and would like to give credit to. I've included a few of my favorites to kick things off!
+Un grand merci à :
 
-* [Choose an Open Source License](https://choosealicense.com)
-* [GitHub Emoji Cheat Sheet](https://www.webpagefx.com/tools/emoji-cheat-sheet)
-* [Malven's Flexbox Cheatsheet](https://flexbox.malven.co/)
-* [Malven's Grid Cheatsheet](https://grid.malven.co/)
-* [Img Shields](https://shields.io)
-* [GitHub Pages](https://pages.github.com)
-* [Font Awesome](https://fontawesome.com)
-* [React Icons](https://react-icons.github.io/react-icons/search)
+- L'équipe de Free
+- L'équipe des beta-testeurs
+- OpenAI
 
 <p align="right">(<a href="#readme-top">Retour en haut de page</a>)</p>
 
