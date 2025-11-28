@@ -237,7 +237,7 @@ Un grand merci à :
 [issues-shield]: https://img.shields.io/github/issues/laborantine/ReDeFin.svg?style=for-the-badge
 [issues-url]: https://github.com/laborantine/ReDeFin/issues
 [license-shield]: https://img.shields.io/github/license/laborantine/ReDeFin.svg?style=for-the-badge
-[license-url]: https://github.com/laborantine/ReDeFin/blob/master/LICENSE.txt
+[license-url]: https://github.com/laborantine/ReDeFin/blob/main/LICENSE
 [product-screenshot]: images/screenshot.png
 [chatgpt.com]: https://img.shields.io/badge/chatGPT-74aa9c?style=for-the-badge&logo=openai&logoColor=white
 [chatgpt-url]: https://chatgpt.com/fr-FR 
