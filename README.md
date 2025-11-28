@@ -136,11 +136,11 @@ Vous devez disposer au moins de l'un des produits suivants pour bénéficier de 
     <img src="https://github.com/user-attachments/assets/ee7d6788-fa02-4e52-aed8-ad6201c4454c" alt="Logo" width="320" height="320">
   </a>
 
-IMPORTANT : Dans le cas où vous auriez une Freebox Devialet, il faut que cette dernière puisse être rattachée à un abonnement chez Free pour avoir la capacité de télécharger des application dans le Free Store, endroit où se trouve l'application en production.
+IMPORTANT : Dans le cas où vous auriez une Freebox Devialet, il faut que cette dernière puisse être rattachée à un abonnement chez Free pour avoir la capacité de télécharger des applications dans le Free Store, endroit où se trouve l'application en production.
 
 ### Installation
 
-Une fois votre mail envoyé à application.redefin@proton.me pour candidater en qualité de bêta-testeur, vous aurez un mail vous confirmant la prise en compte de votre mail et la déclaration de votre n° d'abonné (identifiant Freebox) dans la liste des bêta-testeurs.
+Une fois votre mail envoyé à application.redefin@proton.me pour candidater en qualité de bêta-testeur, vous aurez une réponse vous confirmant la prise en compte de votre mail et la déclaration de votre n° d'abonné (identifiant Freebox) dans la liste des bêta-testeurs.
 
 Vous pourrez alors vous rendre dans le Free Store sur votre Freebox Player afin de télécharger ReDeFin.
 
