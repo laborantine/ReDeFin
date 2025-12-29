@@ -110,7 +110,8 @@ Travaux principaux (avril 2025 - maintenant) :
 - GPT 4.5
 - GPT 5
 - GPT 5.1
-
+- GPT 5.2
+  
 <p align="right">(<a href="#readme-top">Retour en haut de page</a>)</p>
 
 
