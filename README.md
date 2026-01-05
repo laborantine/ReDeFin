@@ -119,7 +119,14 @@ Travaux principaux (avril 2025 - maintenant) :
 <!-- GETTING STARTED -->
 ## Introduction
 
-Le projet est actuellement en phase bêta fermé. Pour candidater en tant que bêta-testeur, il faudra vous munir de votre n° d'abonnés Freebox (commençant la plupart du temps par fbxXXX) que vous retrouvez sur votre espace client Freebox. Une fois que vous aurez cette information, veuillez envoyer un mail à : application.redefin@proton.me. 
+Le projet est actuellement en phase bêta fermé.
+
+Disponibilité bêta-testeur Freebox Devialet : ![Status](https://img.shields.io/badge/status-ok-brightgreen)
+
+Disponibilité bêta-testeur Freebox Revolution :
+![Status](https://img.shields.io/badge/status-fail-red) Complet temporairement.
+
+Pour candidater en tant que bêta-testeur, il faut vous munir de votre n° d'abonné Freebox (commençant la plupart du temps par fbxXXX) que vous retrouvez sur votre espace client Freebox. Une fois que vous avez cette information, veuillez envoyer un mail en précisant êgalement la Freebox que vous avez et envoyez le tout à : application.redefin@proton.me. 
 
 ### Prérequis
 
