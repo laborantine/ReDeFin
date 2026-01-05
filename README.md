@@ -124,7 +124,7 @@ Le projet est actuellement en phase bêta fermé.
 Disponibilité bêta-testeur Freebox Devialet : ![Status](https://img.shields.io/badge/status-ok-brightgreen)
 
 Disponibilité bêta-testeur Freebox Revolution :
-![Status](https://img.shields.io/badge/status-fail-red) Complet temporairement.
+![Status](https://img.shields.io/badge/status-fail-red) Complet temporairement (Instabilité de la version beta sur ce player. Correction en cours).
 
 Pour candidater en tant que bêta-testeur, il faut vous munir de votre n° d'abonné Freebox (commençant la plupart du temps par fbxXXX) que vous retrouvez sur votre espace client Freebox. Une fois que vous avez cette information, veuillez envoyer un mail en précisant êgalement la Freebox que vous avez et envoyez le tout à : application.redefin@proton.me. 
 
