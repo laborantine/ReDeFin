@@ -137,13 +137,13 @@ Vous devez disposer au moins de l'un des produits suivants pour bénéficier de 
 * Freebox Révolution
  <div align="left">
   <a href="https://github.com/user-attachments/assets/691c2ed2-626e-4702-8277-9750ef365264">
-    <img src="https://github.com/user-attachments/assets/691c2ed2-626e-4702-8277-9750ef365264" alt="Logo" width="320" height="320">
+    <img src="https://github.com/user-attachments/assets/691c2ed2-626e-4702-8277-9750ef365264" alt="Logo" width="576" height="320">
   </a>
 
   * Freebox Delta-Devialet
   <div align="left">
   <a href="https://github.com/user-attachments/assets/ee7d6788-fa02-4e52-aed8-ad6201c4454c">
-    <img src="https://github.com/user-attachments/assets/ee7d6788-fa02-4e52-aed8-ad6201c4454c" alt="Logo" width="320" height="320">
+    <img src="https://github.com/user-attachments/assets/ee7d6788-fa02-4e52-aed8-ad6201c4454c" alt="Logo" width="576" height="320">
   </a>
 
 IMPORTANT : Dans le cas où vous auriez une Freebox Devialet, il faut que cette dernière puisse être rattachée à un abonnement chez Free pour avoir la capacité de télécharger des applications dans le Free Store, endroit où se trouve l'application en production.
