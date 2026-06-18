@@ -172,7 +172,7 @@ _Pour plus d'exemples, Référez-vous à la [documentation officielle de Jellyfi
 <!-- ROADMAP -->
 ## Roadmap
 
-- [x] Support de la bibliothèque Séries et Films
+- [x] Support de la bibliothèque Séries, Films et Collections
 - [x] Lecteur vidéo compatible DirectPlay/Remux/DirectStream/Transcodage
 - [x] Support multi-profil
 
