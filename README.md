@@ -80,7 +80,8 @@
   </ol>
 </details>
 
-
+> [!NOTE]
+> Hommage.
 
 <!-- A propos de ce PROJET -->
 ## A propos de ce projet
