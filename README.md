@@ -101,18 +101,19 @@ Ce projet a été intégralement fabriqué à partir de ChatGPT depuis 2024. Il 
   
 Travaux préliminaires (2024 - mars 2025) :
 
-- GPT 3.5
-- GPT 4
+- GPT-3.5
+- GPT-4
 - GPT-4o
 
 Travaux principaux (avril 2025 - maintenant) :
 
-- GPT 4.5
-- GPT 5
-- GPT 5.1
-- GPT 5.2
-- GPT 5.4
-- GPT 5.5
+- GPT-4.5
+- GPT-5
+- GPT-5.1
+- GPT-5.2
+- GPT-5.4
+- GPT-5.5
+- GPT-5.6 Sol
   
 <p align="right">(<a href="#readme-top">Retour en haut de page</a>)</p>
 
