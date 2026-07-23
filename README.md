@@ -81,7 +81,7 @@
 </details>
 
 > [!NOTE]
-> Hommage.
+> Hommage à Joshua Boniface, Anthony Lavado et Andrew Rabert qui 
 
 <!-- A propos de ce PROJET -->
 ## A propos de ce projet
