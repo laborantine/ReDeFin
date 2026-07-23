@@ -81,7 +81,7 @@
 </details>
 
 > [!NOTE]
-> Hommage à Joshua Boniface, Anthony Lavado et Andrew Rabert qui 
+> Hommage à Joshua Boniface, Anthony Lavado et Andrew Rabert qui ont quitté le projet Jellyfin pour des raisons personnelles. Ils ont grandement contribué au projet et je leur souhaite le meilleur.
 
 <!-- A propos de ce PROJET -->
 ## A propos de ce projet
