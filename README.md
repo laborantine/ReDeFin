@@ -129,12 +129,12 @@ Le projet est actuellement en phase bêta fermé.
 
 Disponibilité des places pour candidater en tant que beta-testeur sur la Freebox Devialet :
 
-![Bêta Devialet](https://img.shields.io/badge/Devialet-38%2F60%20occup%C3%A9es-orange?style=for-the-badge)
+![Bêta Devialet](https://img.shields.io/badge/Devialet-39%2F60%20occup%C3%A9es-orange?style=for-the-badge)
 
 Disponibilité des places pour candidater en tant que beta-testeur sur la Freebox Revolution :
 
 
-![Bêta Révolution](https://img.shields.io/badge/R%C3%A9volution-17%2F60%20occup%C3%A9es-brightgreen?style=for-the-badge)
+![Bêta Révolution](https://img.shields.io/badge/R%C3%A9volution-19%2F60%20occup%C3%A9es-brightgreen?style=for-the-badge)
 
 
 Pour candidater en tant que bêta-testeur, il faut vous munir de votre n° d'abonné Freebox (commençant la plupart du temps par fbxXXX) que vous retrouvez sur votre espace client Freebox. Une fois que vous avez cette information, veuillez envoyer un mail en précisant êgalement la Freebox que vous avez et envoyez le tout à : application.redefin@proton.me. 
