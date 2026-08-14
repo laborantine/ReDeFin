@@ -26,7 +26,11 @@
 [![Issues][issues-shield]][issues-url]
 [![Unlicense License][license-shield]][license-url]
 
-
+> [!CAUTION]
+> **Anomalie connue**
+>
+> Une anomalie peut actuellement affecter certaines fonctionnalités de ReDeFin.
+> Une correction est en cours.
 
 <!-- PROJECT LOGO -->
 <br />
