@@ -137,7 +137,7 @@ Travaux principaux (avril 2025 - maintenant) :
 <!-- GETTING STARTED -->
 ## Introduction
 
-![Places bêta](https://img.shields.io/badge/Places-62%20places%20restantes-brightgreen?style=for-the-badge)
+![Places bêta](https://img.shields.io/badge/Places-66%20places%20restantes-brightgreen?style=for-the-badge)
 
 Le projet est actuellement en phase bêta fermé.
 
@@ -148,7 +148,7 @@ Disponibilité des places pour candidater en tant que beta-testeur sur la Freebo
 Disponibilité des places pour candidater en tant que beta-testeur sur la Freebox Revolution :
 
 
-![Bêta Révolution](https://img.shields.io/badge/R%C3%A9volution-19%2F60%20occup%C3%A9es-brightgreen?style=for-the-badge)
+![Bêta Révolution](https://img.shields.io/badge/R%C3%A9volution-22%2F60%20occup%C3%A9es-brightgreen?style=for-the-badge)
 
 
 Pour candidater en tant que bêta-testeur, il faut vous munir de votre n° d'abonné Freebox (commençant la plupart du temps par fbxXXX) que vous retrouvez sur votre espace client Freebox. Une fois que vous avez cette information, veuillez envoyer un mail en précisant êgalement la Freebox que vous avez et envoyez le tout à : application.redefin@proton.me. 
