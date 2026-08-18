@@ -143,7 +143,7 @@ Le projet est actuellement en phase bêta fermé.
 
 Disponibilité des places pour candidater en tant que beta-testeur sur la Freebox Devialet :
 
-![Bêta Devialet](https://img.shields.io/badge/Devialet-46%2F60%20occup%C3%A9es-orange?style=for-the-badge)
+![Bêta Devialet](https://img.shields.io/badge/Devialet-46%2F60%20occup%C3%A9es-DC2626?style=for-the-badge)
 
 Disponibilité des places pour candidater en tant que beta-testeur sur la Freebox Revolution :
 
