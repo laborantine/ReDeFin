@@ -137,13 +137,13 @@ Travaux principaux (avril 2025 - maintenant) :
 <!-- GETTING STARTED -->
 ## Introduction
 
-![Places bêta](https://img.shields.io/badge/Places-52%20places%20restantes-orange?style=for-the-badge)
+![Places bêta](https://img.shields.io/badge/Places-50%20places%20restantes-orange?style=for-the-badge)
 
 Le projet est actuellement en phase bêta fermé.
 
 Disponibilité des places pour candidater en tant que beta-testeur sur la Freebox Devialet :
 
-![Bêta Devialet](https://img.shields.io/badge/Devialet-46%2F60%20occup%C3%A9es-DC2626?style=for-the-badge)
+![Bêta Devialet](https://img.shields.io/badge/Devialet-48%2F60%20occup%C3%A9es-DC2626?style=for-the-badge)
 
 Disponibilité des places pour candidater en tant que beta-testeur sur la Freebox Revolution :
 
