@@ -1,7 +1,6 @@
 {
     "schemaVersion": 1,
     "appId": "com.lab.redefin",
-
     "channels": {
         "stable": {
             "published": false,
@@ -9,12 +8,11 @@
             "releasedAt": "",
             "notes": ""
         },
-
         "beta": {
             "published": true,
             "version": "0.53",
             "releasedAt": "",
-            "notes": "ReDeFin V4 bêta."
+            "notes": "• Nouvelle fenêtre de mise à jour plus compacte.\n• Accès direct au Free Store depuis la notification.\n• Corrections et améliorations de la V4 bêta."
         }
     }
 }
