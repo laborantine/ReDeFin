@@ -1,0 +1,20 @@
+{
+    "schemaVersion": 1,
+    "appId": "com.lab.redefin",
+
+    "channels": {
+        "stable": {
+            "published": false,
+            "version": "1.0",
+            "releasedAt": "",
+            "notes": ""
+        },
+
+        "beta": {
+            "published": true,
+            "version": "0.50-beta",
+            "releasedAt": "2026-09-09T22:30:00Z",
+            "notes": "ReDeFin 0.9.4 - V4 bêta."
+        }
+    }
+}
