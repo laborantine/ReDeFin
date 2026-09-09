@@ -12,9 +12,9 @@
 
         "beta": {
             "published": true,
-            "version": "0.49",
+            "version": "0.51",
             "releasedAt": "",
-            "notes": "ReDeFin V3 bêta."
+            "notes": "ReDeFin V4 bêta."
         }
     }
 }
