@@ -29,10 +29,9 @@
 <!-- PROJECT LOGO -->
 <br />
 <div align="center">
-  <a href="https://github.com/user-attachments/assets/f98e8d11-0379-4a08-91a8-5ceaf16763c4">
-    <img src="https://github.com/user-attachments/assets/f98e8d11-0379-4a08-91a8-5ceaf16763c4" alt="Logo" width="480" height="480">
+  <a href="https://github.com/user-attachments/assets/c14346df-2e99-482b-9c6d-d064583890bd">
+    <img src="https://github.com/user-attachments/assets/c14346df-2e99-482b-9c6d-d064583890bd" alt="Logo" width="480" height="480">
   </a>
-
 
   <h3 align="center">Un client Jellyfin non officiel pour lire votre bibliothèque sur Freebox</h3>
 
