@@ -118,7 +118,7 @@ Travaux principaux (avril 2025 - maintenant) :
 <!-- GETTING STARTED -->
 ## Introduction
 
-![Places bêta](https://img.shields.io/badge/Places-50%20places%20restantes-orange?style=for-the-badge)
+![Places bêta](https://img.shields.io/badge/Places-44%20places%20restantes-orange?style=for-the-badge)
 
 Le projet est actuellement en phase bêta fermé.
 
