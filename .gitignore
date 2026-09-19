@@ -1,0 +1,7 @@
+# Artefacts de build générés localement (paquets .fbxqml, etc.)
+build/
+
+# Outillage de vérification (tests/, check.sh)
+node_modules/
+__pycache__/
+*.pyc

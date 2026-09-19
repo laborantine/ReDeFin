@@ -1,0 +1,21 @@
+# Stub de test du module Qt 5 « QtGraphicalEffects ».
+#
+# ReDeFin cible Qt 5.15, où QtGraphicalEffects 1.15 est un module standard.
+# L'outillage de vérification tourne sous Qt 6 (PySide6), où ce module a été
+# retiré (remplacé par Qt5Compat.GraphicalEffects, absent de
+# PySide6-Essentials). Sans ce stub, aucun fichier de qml/pages ne peut être
+# ni linté proprement ni instancié dans un test Qt Quick Test.
+#
+# Les trois types stubbés sont les seuls utilisés par le dépôt
+# (OpacityMask, DropShadow, FastBlur). Ce sont des enveloppes NEUTRES : elles
+# acceptent les mêmes propriétés que les vrais effets mais ne rendent rien.
+# Un test ne doit donc jamais rien conclure du rendu de ces effets.
+#
+# Jamais embarqué dans le paquet .fbxqml (build.sh ignore tests/).
+module QtGraphicalEffects
+# Les types sont déclarés en 1.15 : le projet écrit « import
+# QtGraphicalEffects 1.15 », et un module de répertoire n'annonce que les
+# versions effectivement déclarées ici.
+OpacityMask 1.15 OpacityMask.qml
+DropShadow 1.15 DropShadow.qml
+FastBlur 1.15 FastBlur.qml

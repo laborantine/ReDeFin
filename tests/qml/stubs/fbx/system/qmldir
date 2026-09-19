@@ -1,0 +1,11 @@
+# Stub de test du module firmware « fbx.system ».
+#
+# Ce module N'EXISTE PAS dans libfbxqml (https://github.com/fbx/libfbxqml) :
+# il n'est fourni que par le runtime du Freebox Player. ReDeFin l'importe
+# pourtant (main.qml, qml/pages/ShellPage.qml) pour lire le singleton Device.
+#
+# Ce stub permet à qmllint et aux tests Qt Quick Test de résoudre l'import.
+# Il n'est jamais embarqué dans le paquet .fbxqml (build.sh n'emporte que la
+# liste blanche de ReDeFin.fbxproject, qui ignore tests/).
+module fbx.system
+singleton Device 1.0 Device.qml
