@@ -1,0 +1,57 @@
+import QmlProject 1.1
+
+Project {
+    mainFile: "main.qml"
+
+    /*
+     * ReDeFin / Freebox
+     *
+     * Liste blanche par répertoire fonctionnel : l'export ne parcourt plus toute
+     * l'arborescence du dépôt. Le package doit néanmoins toujours être généré
+     * depuis un checkout/staging propre puis inspecté avant FreeStore.
+     */
+
+    // Point d'entrée uniquement à la racine.
+    QmlFiles {
+        directory: "."
+        recursive: false
+    }
+
+    // Composants et pages QML réellement exécutés.
+    QmlFiles {
+        directory: "qml/components"
+        recursive: false
+    }
+    QmlFiles {
+        directory: "qml/pages"
+        recursive: false
+    }
+
+    // Bibliothèques JavaScript de l'application.
+    JavaScriptFiles {
+        directory: "qml/js"
+        recursive: false
+    }
+
+    // Ressources graphiques publiables uniquement.
+    ImageFiles {
+        directory: "qml/images"
+        recursive: false
+    }
+
+    // Déclaration des singletons/composants QML.
+    Files {
+        directory: "qml/components"
+        recursive: false
+        filter: "qmldir"
+    }
+
+    // Le manifeste FreeStore reste explicitement inclus à la racine.
+    Files {
+        directory: "."
+        recursive: false
+        filter: "manifest.json"
+    }
+
+    // importPaths: [ "../libfbxqml" ]
+}

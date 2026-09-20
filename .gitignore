@@ -1,0 +1,126 @@
+# =============================================================================
+# ReDeFin / Freebox / QML
+# =============================================================================
+
+# Fichiers locaux QtCreator / Freebox SDK
+*.user
+*.fbxproject.user
+*.autosave
+
+# =============================================================================
+# Logs / traces / debug
+# =============================================================================
+
+*.log
+logs/
+debug/
+captures/
+traces/
+*.trace
+qmlscene.log
+
+# Dumps contenant potentiellement des secrets
+*token*.log
+*token*.txt
+*token*.json
+*Token*.log
+*Token*.txt
+*Token*.json
+*accessToken*.log
+*accessToken*.txt
+*accessToken*.json
+*AccessToken*.log
+*AccessToken*.txt
+*AccessToken*.json
+*api_key*.log
+*api_key*.txt
+*api_key*.json
+*ApiKey*.log
+*ApiKey*.txt
+*ApiKey*.json
+
+# =============================================================================
+# Archives / exports temporaires
+# =============================================================================
+
+*.zip
+*_debug.zip
+*_logs.zip
+*_trace.zip
+*_backup.zip
+backup/
+backups/
+tmp/
+temp/
+
+# =============================================================================
+# Secrets / configuration locale
+# =============================================================================
+
+.env
+.env.*
+secrets.js
+secret.js
+config.local.js
+local.config.js
+settings.local.js
+credentials.js
+tokens.js
+token.local.js
+auth.local.js
+
+# =============================================================================
+# Fichiers OS
+# =============================================================================
+
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# =============================================================================
+# Éditeurs / IDE
+# =============================================================================
+
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# =============================================================================
+# Cache / compilation éventuelle
+# =============================================================================
+
+*.qmlc
+*.jsc
+*.cache
+.cache/
+build/
+dist/
+out/
+
+# =============================================================================
+# Node / outils éventuels autour du projet
+# =============================================================================
+
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# =============================================================================
+# Python éventuel pour scripts locaux
+# =============================================================================
+
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# =============================================================================
+# Sécurité Git
+# =============================================================================
+
+# Ne pas ajouter de règles de ré-inclusion globales du type !qml/**/*.js ici.
+# Elles peuvent réinclure un futur qml/js/secrets.js, credentials.js, tokens.js,
+# etc. Les sources normales du projet ne sont pas ignorées globalement et n'ont
+# donc besoin d'aucune exception.
