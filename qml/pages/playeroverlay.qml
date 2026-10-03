@@ -2083,6 +2083,33 @@ FocusScope {
     function mediaPause(){ mp.pause(); return true }
     function mediaStop(){ return finalizePlaybackAndExit("mediaStop") }
     function mediaToggle(){ transportToggle("mediaToggle"); return true }
+    /* ===== API publique du pilotage à distance (Components.RemoteControl) =====
+       Les commandes Jellyfin (Unpause, Seek, SetAudioStreamIndex…) passent par
+       ces enveloppes pour réutiliser les mêmes chemins que la télécommande physique. */
+    function mediaPlay(){ _cancelStartupPlay("remote-play"); resetControlsTimer(); try { mp.play() } catch(e) {} return true }
+    function mediaIsPaused(){ try { return mp.playbackState !== MediaPlayer.PlayingState } catch(e) { return true } }
+    function mediaSeekToMs(ms){
+        var target = Math.max(0, Number(ms) || 0)
+        var dur = durationMs()
+        if (dur > 0) target = Math.min(target, dur)
+        resetControlsTimer()
+        return _seekToChapterMs(target)
+    }
+    function mediaSetAudioStream(streamIdx){
+        var ui = _indexInStreamMap(audioStreamIndexMap, streamIdx)
+        if (ui < 0) return false
+        handleAudioPick(Number(streamIdx), ui)
+        return true
+    }
+    function mediaSetSubtitleStream(streamIdx){
+        if (!(streamIdx >= 0)) { handleSubsOff(); return true }
+        var ui = _indexInStreamMap(subtitleStreamIndexMap, streamIdx)
+        if (ui < 0) return false
+        if (subtitleIsTextMap && subtitleIsTextMap.length > ui && subtitleIsTextMap[ui]) handleSubsText(Number(streamIdx), ui)
+        else handleSubsImage(Number(streamIdx), ui)
+        return true
+    }
+    function mediaReportState(reason){ return _sendPlaybackCheckpoint(reason || "remote", mediaIsPaused(), true) }
     function stopScrubCommitTimer(){ scrubCommitTimer.stop() }
     function transportPrev(origin){ return playRelative(-1, origin || "prev") }
     function transportNext(origin){ return playRelative( 1, origin || "next") }

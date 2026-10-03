@@ -17,6 +17,8 @@ QtObject {
     // smart      : règles de sélection/remux ReDeFin.
     // directplay : priorité au fichier original, contraintes matérielles conservées.
     property string playbackMode: "smart"
+    // Pilotage à distance depuis les autres clients Jellyfin (icône Cast).
+    property bool remoteControlEnabled: true
 
     property bool _syncing: false
     property bool _syncScheduled: false
@@ -75,9 +77,11 @@ QtObject {
         if (!_ctxOk()) return
         var clock = !!get("showClock", true)
         var mode = normalizePlaybackMode(get("playbackMode", "smart"))
+        var remote = !!get("remoteControlEnabled", true)
         _syncing = true
         if (showClock !== clock) showClock = clock
         if (playbackMode !== mode) playbackMode = mode
+        if (remoteControlEnabled !== remote) remoteControlEnabled = remote
         _syncing = false
     }
 
@@ -152,7 +156,18 @@ QtObject {
                 playbackMode = mode
                 _syncing = false
             }
+        } else if (name === "remoteControlEnabled") {
+            var remote = !!val
+            if (remoteControlEnabled !== remote) {
+                _syncing = true
+                remoteControlEnabled = remote
+                _syncing = false
+            }
         }
+    }
+
+    onRemoteControlEnabledChanged: {
+        if (!_syncing && _ctxOk()) set("remoteControlEnabled", remoteControlEnabled)
     }
 
     onShowClockChanged: {

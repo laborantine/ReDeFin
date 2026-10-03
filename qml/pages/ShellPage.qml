@@ -1813,6 +1813,83 @@ FocusScope {
         }
     }
 
+    /* ===================== PILOTAGE À DISTANCE (Cast Jellyfin) ===== */
+    // Vit pendant toute la session connectée, survit aux changements de page et
+    // au lecteur. Désactivé par l'option « Télécommande » des réglages, ou dès
+    // que la session n'est plus valide (le WebSocket est alors fermé).
+    Components.RemoteControl {
+        id: remoteControl
+        shell: shell
+        enabled: shell._hasValidSessionContext()
+                 && (Components.AppSettings ? Components.AppSettings.remoteControlEnabled !== false : true)
+        serverUrl: shell.sessionServerUrl
+        accessToken: shell.sessionAccessToken
+        userId: shell.sessionUserId
+        deviceId: ClientId.clientId()
+        player: shell.playerActive ? playerOverlayLoader.item : null
+    }
+
+    // Lecture demandée par un autre client Jellyfin (commande « Play »).
+    // Un seul élément hors lecture : même chemin qu'un requestPlay de page (reprise
+    // Jellyfin respectée). Plusieurs éléments, ou lecteur déjà actif : on passe
+    // par la playlist, qui sait enchaîner et basculer le lecteur en cours.
+    function remotePlay(itemIds, startTicks, startIndex, audioStreamIndex, subtitleStreamIndex) {
+        var ids = (itemIds || [])
+                .map(function(id) { return String(id || "") })
+                .filter(function(id) { return id.length > 0 })
+        if (!ids.length || !_hasValidSessionContext()) return false
+        var idx = Math.max(0, Math.min((startIndex | 0), ids.length - 1))
+        var first = ids[idx]
+        var startMs = Math.floor((Number(startTicks) || 0) / 10000)
+        if (startMs > 0) {
+            // Même contrat que « Lire depuis un chapitre » : position explicite, valable 30 s.
+            try {
+                shared.__redefinExplicitPlaybackStart = {
+                    source: "chapter", itemId: first,
+                    serverUrl: sessionServerUrl, userId: sessionUserId,
+                    startMs: startMs, ts: Date.now()
+                }
+            } catch(eStart) {}
+        }
+        if (ids.length > 1 || playerActive) {
+            _startRequestedPlaylist(ids.slice(idx), sessionAccessToken, sessionUserId, sessionServerUrl, "")
+            // Un seul élément : la reprise Jellyfin doit s'appliquer comme pour une fiche.
+            if (ids.length === 1) shell.playerPlaylistStartAtZero = false
+            return true
+        }
+        _snapshotSeasonHintsFromPage()
+        playlist.list = []
+        playerPlaylist = []
+        playerPlaylistTitle = ""
+        playerPlaylistStartAtZero = false
+        playerItemId = first
+        playerAccessToken = sessionAccessToken
+        playerUserId = sessionUserId
+        playerServerUrl = sessionServerUrl
+        playerItemTitle = ""
+        return _requestPlayerLaunch()
+    }
+
+    // « PlayNext » / « PlayLast » : insertion dans la file en cours. Renvoie false
+    // s'il n'y a pas de lecture en cours, l'appelant lit alors immédiatement.
+    function remoteEnqueue(itemIds, playNext) {
+        if (!playerActive) return false
+        try {
+            var current = (playlist.list || []).slice(0)
+            if (!current.length) return false
+            var ids = (itemIds || []).map(function(id) { return String(id || "") })
+                                     .filter(function(id) { return id.length > 0 })
+            if (!ids.length) return false
+            var at = playNext ? Math.min(current.length, ((playlist.index | 0) + 1)) : current.length
+            Array.prototype.splice.apply(current, [at, 0].concat(ids))
+            playlist.list = current
+            shell.playerPlaylist = current.slice(0)
+            return true
+        } catch(eQueue) {
+            return false
+        }
+    }
+
     /* ===================== CONTRAT DES PAGES CHARGÉES ============ */
     // ShellPage reste l'autorité de navigation/session. Les pages exposent des
     // capacités optionnelles (signaux/propriétés) que Shell branche ici. Le

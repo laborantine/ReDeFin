@@ -37,6 +37,33 @@ FocusScope {
     /* === Option: Mode de lecture (Original / Intelligent) === */
     property string playbackMode: "smart"
 
+    /* === Option: Télécommande (pilotage depuis les autres clients Jellyfin) === */
+    property bool remoteControlEnabled: true
+
+    function _syncRemoteControlFromSettings() {
+        var on = true;
+        try {
+            if (Components.AppSettings && Components.AppSettings.remoteControlEnabled !== undefined)
+                on = Components.AppSettings.remoteControlEnabled !== false;
+        } catch (e) {}
+        if (panel.remoteControlEnabled !== on)
+            panel.remoteControlEnabled = on;
+    }
+
+    function _setRemoteControl(value) {
+        var on = !!value;
+        if (panel.remoteControlEnabled !== on)
+            panel.remoteControlEnabled = on;
+        try {
+            if (Components.AppSettings) {
+                if (typeof Components.AppSettings.set === "function")
+                    Components.AppSettings.set("remoteControlEnabled", on);
+                if (Components.AppSettings.remoteControlEnabled !== on)
+                    Components.AppSettings.remoteControlEnabled = on;
+            }
+        } catch (e) {}
+    }
+
     // Télécommande Freebox : la touche « i / Infos » du Player est remontée
     // par le runtime Freebox comme Qt.Key_Help (0x01000058 / 16777304).
     // Les autres variantes restent acceptées pour les autres Players et claviers.
@@ -130,6 +157,7 @@ FocusScope {
     /* === Ouverture / fermeture === */
     function open() {
         _syncPlaybackModeFromSettings();
+        _syncRemoteControlFromSettings();
         _playbackInfoOpen = false;
         _playbackInfoKeyHeld = false;
         _open = true;
@@ -483,7 +511,7 @@ FocusScope {
                         clockRow.forceActiveFocus();
                         event.accepted = true;
                     } else if (event.key === Qt.Key_Down) {
-                        aboutTitle.forceActiveFocus();
+                        remoteRow.forceActiveFocus();
                         event.accepted = true;
                     }
                 }
@@ -506,14 +534,111 @@ FocusScope {
 
             Rectangle { width: parent.width; height: 2; color: "#e0d200" }
 
+            /* ===== Section: Télécommande ===== */
+            Text { text: "Télécommande"; color: "#cfd6ff"; font.pixelSize: 16; font.bold: true }
+
+            /* Rangée: "Piloter depuis l’appli Jellyfin" (icône Cast des autres clients) */
+            FocusScope {
+                id: remoteRow
+                width: parent.width
+                height: 52
+
+                Rectangle {
+                    anchors.fill: parent
+                    anchors.margins: 6
+                    radius: 12
+                    color: remoteRow.activeFocus ? "#1b2142" : "transparent"
+                    opacity: remoteRow.activeFocus ? 1.0 : 0.0
+                    Behavior on opacity { NumberAnimation { duration: 120 } }
+                }
+                Item {
+                    anchors.fill: parent
+                    anchors.leftMargin: 14
+                    anchors.rightMargin: 14
+
+                    Text {
+                        text: "Piloter depuis l’appli Jellyfin"
+                        color: remoteRow.activeFocus ? "#FFFFFF" : "#cfd6ff"
+                        font.pixelSize: 16
+                        verticalAlignment: Text.AlignVCenter
+                        anchors.left: parent.left
+                        anchors.right: remoteToggleWrap.left
+                        anchors.rightMargin: 12
+                        anchors.top: parent.top
+                        anchors.bottom: parent.bottom
+                        elide: Text.ElideRight
+                    }
+
+                    Item {
+                        id: remoteToggleWrap
+                        width: 68
+                        height: 30
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: height / 2
+                            border.width: 1
+                            border.color: panel.remoteControlEnabled ? "#E6EEFF" : "#4B5685"
+                            gradient: Gradient {
+                                GradientStop { position: 0.0; color: panel.remoteControlEnabled ? "#2F7CFF" : "#2A3152" }
+                                GradientStop { position: 1.0; color: panel.remoteControlEnabled ? "#7EC4FF" : "#1C2342" }
+                            }
+                            Behavior on border.color { ColorAnimation { duration: 140 } }
+                        }
+
+                        Rectangle {
+                            width: 24; height: 24
+                            radius: height / 2
+                            anchors.verticalCenter: parent.verticalCenter
+                            x: panel.remoteControlEnabled ? (remoteToggleWrap.width - width - 3) : 3
+                            color: panel.remoteControlEnabled ? "#FFFFFF" : "#D4D9F1"
+                            border.color: panel.remoteControlEnabled ? "#FFFFFF" : "#C7CCE6"
+                            border.width: 1
+                            Behavior on x           { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                            Behavior on color       { ColorAnimation { duration: 140 } }
+                            Behavior on border.color{ ColorAnimation { duration: 140 } }
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            onEntered: remoteRow.forceActiveFocus()
+                            onClicked: {
+                                panel._setRemoteControl(!panel.remoteControlEnabled);
+                                mouse.accepted = true;
+                            }
+                        }
+                    }
+                }
+
+                Keys.onPressed: {
+                    if (event.key === Qt.Key_Left || event.key === Qt.Key_Right ||
+                        event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Select) {
+                        panel._setRemoteControl(!panel.remoteControlEnabled);
+                        event.accepted = true;
+                    } else if (event.key === Qt.Key_Up) {
+                        playbackModeRow.forceActiveFocus();
+                        event.accepted = true;
+                    } else if (event.key === Qt.Key_Down) {
+                        aboutTitle.forceActiveFocus();
+                        event.accepted = true;
+                    }
+                }
+                MouseArea { anchors.fill: parent; onClicked: panel._setRemoteControl(!panel.remoteControlEnabled) }
+            }
+
+            Rectangle { width: parent.width; height: 2; color: "#e0d200" }
+
             /* ===== À propos ===== */
             FocusScope {
                 id: aboutTitle
                 width: parent.width
                 height: 28
                 Keys.onPressed: {
-                    if (event.key === Qt.Key_Up)  { playbackModeRow.forceActiveFocus(); event.accepted = true }
-                    else if (event.key === Qt.Key_Down) { playbackModeRow.forceActiveFocus(); event.accepted = true }
+                    if (event.key === Qt.Key_Up)  { remoteRow.forceActiveFocus(); event.accepted = true }
+                    else if (event.key === Qt.Key_Down) { remoteRow.forceActiveFocus(); event.accepted = true }
                 }
                 Text { text: "À propos"; color: "#cfd6ff"; font.pixelSize: 16; font.bold: true }
             }

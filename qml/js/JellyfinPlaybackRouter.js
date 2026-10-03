@@ -1168,8 +1168,13 @@ function _sessionPayload(root, paused, positionMs) {
         IsPaused: !!paused,
         PositionTicks: root._ticks(p),
         PlayMethod: playMethod(root),
-        AudioStreamIndex: root.selectedAudioStream >= 0 ? root.selectedAudioStream : null,
-        SubtitleStreamIndex: root.selectedSubtitleStream >= 0 ? root.selectedSubtitleStream : null,
+        // Pistes réellement actives, même en sélection automatique : les autres
+        // clients Jellyfin (pilotage à distance) affichent ainsi la bonne piste.
+        AudioStreamIndex: root.selectedAudioStream >= 0 ? root.selectedAudioStream
+                        : (root.effectiveAudioStream >= 0 ? root.effectiveAudioStream : null),
+        SubtitleStreamIndex: (root.useLocalSubs === true && root.localSubStreamIndex >= 0) ? root.localSubStreamIndex
+                           : (root.selectedSubtitleStream >= 0 ? root.selectedSubtitleStream
+                           : (root.effectiveSubtitleStream >= 0 ? root.effectiveSubtitleStream : null)),
         RepeatMode: "RepeatNone"
     };
 }

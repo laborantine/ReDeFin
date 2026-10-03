@@ -2981,6 +2981,28 @@ function sessionsPlayingProgress(serverUrl, accessToken, payload, onSuccess, onE
 function sessionsPlayingStopped(serverUrl, accessToken, payload, onSuccess, onError) {
     return _postPlayingEvent(serverUrl, accessToken, "/Sessions/Playing/Stopped", payload, onSuccess, onError);
 }
+// Pilotage à distance : déclare au serveur ce que cette session sait faire
+// (POST /Sessions/Capabilities/Full). Sans cette déclaration ET un WebSocket
+// ouvert, Jellyfin ne propose pas l'appareil dans le menu « Cast » des autres clients.
+function sessionsCapabilitiesFull(serverUrl, accessToken, payload, onSuccess, onError) {
+    return _postPlayingEvent(serverUrl, accessToken, "/Sessions/Capabilities/Full", payload, onSuccess, onError);
+}
+// URL du WebSocket de session Jellyfin. Exception documentée à la règle « jamais
+// de jeton dans une URL » : le WebSocket QML ne peut pas poser d'en-tête
+// Authorization. Jellyfin 12 n'accepte que « ApiKey » sans mode hérité ;
+// « api_key » est conservé pour les serveurs plus anciens. Même règle de
+// transport que les requêtes HTTP : rien en clair hors LAN de confiance.
+function webSocketUrl(serverUrl, accessToken, deviceId) {
+    var base = _s(normalizeServerUrl(serverUrl || "", false)).trim();
+    var token = _s(accessToken).trim();
+    var dev = _s(deviceId).trim();
+    if (!base || !token || !dev) return "";
+    if (isWanHttpUrl(base)) return "";
+    if (!/^[A-Za-z0-9]+$/.test(token)) return "";
+    var ws = base.replace(/^https:/i, "wss:").replace(/^http:/i, "ws:").replace(/\/+$/, "");
+    if (!/^wss?:\/\//i.test(ws)) return "";
+    return ws + "/socket?ApiKey=" + enc(token) + "&api_key=" + enc(token) + "&deviceId=" + enc(dev);
+}
 function updateUserPlaybackPosition(serverUrl, accessToken, userId, itemId, ticks, onSuccess, onError) {
     var url = _u(serverUrl,
         "/UserItems/" + enc(itemId) + "/UserData?UserId=" + enc(userId));
