@@ -7,33 +7,19 @@
  * - gestion clavier/navigation
  * - helpers PlayerOverlay déplacés depuis JellyfinPlaybackCore
  * - override manuel DirectPlay depuis AudioMenu : bypass des remux préventifs auto
- * - parsing/chargement de sous-titres locaux SRT/VTT déplacé depuis JellyfinPlaybackCore
+ * - coordination des sous-titres locaux ; téléchargement/parsing dans LocalTextSubtitles
  *
  * Important :
  * - applique au PlayerOverlay les résultats de négociation demandés par l'UI
  * - ne décide PAS du démarrage initial, du pré-roll ou du reporting, désormais
- *   portés par JellyfinPlaybackRouter.js
+ *   portés par PlayerSession.js
  * - ne décide PAS des politiques codec DirectPlay / remux / transcode, qui restent dans le Core
  * - utilise exclusivement un requestFn/jellyfinBridge central pour charger les sous-titres
  */
-.import "SafeLog.js" as SafeLog
-.import "MediaCatalog.js" as MediaCatalog
-
+.import "LocalTextSubtitles.js" as LocalTextSubtitles
+.import "PlayerSession.js" as PlayerSession
 /* ===== Utils sûrs ===== */
 function _s(v) { return (v === undefined || v === null) ? "" : (v + ""); }
-function _safeHelperCode(err, fallback) {
-    var fb = fallback || "network_error";
-    var raw = (typeof err === "string") ? err.toLowerCase() : "";
-    if (raw === "ctx" || raw === "http" || raw === "404" || raw === "too_large") return raw;
-    return SafeLog.safeErrorCode(err, fb);
-}
-function _safeSubtitleText(txt) {
-    txt = _s(txt);
-    var maxLen = 4194304; // 4 Mo, garde-fou RAM Freebox pour SRT/VTT aberrants.
-    if (txt.length > maxLen)
-        return "";
-    return txt;
-}
 function _has(o, k) { return o && typeof o[k] !== "undefined" && o[k] !== null; }
 function _call(o, k) {
     if (_has(o, k) && typeof o[k] === "function")
@@ -41,22 +27,6 @@ function _call(o, k) {
 }
 function _set(o, k, v) { if (_has(o, k)) o[k] = v; }
 function _inc(o, k, d) { if (_has(o, k)) o[k] = (o[k] || 0) + d; }
-function _normalizeBase(url) {
-    url = _s(url);
-    if (!url) return "";
-    return url.charAt(url.length - 1) === "/" ? url.slice(0, -1) : url;
-}
-function _u(base, path) {
-    base = _normalizeBase(base || "");
-    path = _s(path);
-    if (!path) return base;
-    return base + (path.charAt(0) === "/" ? path : ("/" + path));
-}
-function _appendParam(url, key, value) {
-    if (value === undefined || value === null || value === "") return url;
-    var sep = (url.indexOf("?") >= 0) ? "&" : "?";
-    return url + sep + encodeURIComponent(key) + "=" + encodeURIComponent(String(value));
-}
 /* Affiche les contrôles et relance le timer centralisé si présent */
 function _bumpControls(root) {
     if (!root) return;
@@ -133,11 +103,7 @@ function makeCtx(core, state, startMs, reneg) {
         selectedSubtitleIsText: reneg.selectedSubtitleIsText === true,
         selectedSubtitleIsImage: reneg.selectedSubtitleIsImage === true,
         // Par défaut, un sous-titre texte géré par le serveur doit rester dans
-        // le flux serveur. "External" n'est autorisé que sur demande explicite.
         preferExternalTextSubtitlesInRemux: reneg.preferExternalTextSubtitlesInRemux === true,
-        // Le burn-in texte reste un fallback explicite. Le chemin serveur normal
-        // utilise Embed pour les SRT/VTT afin d'éviter le bug ffmpeg observé
-        // avec Encode + seek/reprise.
         forceTextSubtitleServerBurnIn: reneg.forceTextSubtitleServerBurnIn === true,
         preferServerSubtitleBurnInOnVideoTranscode: reneg.preferServerSubtitleBurnInOnVideoTranscode === true,
         allowLocalSubtitleOverlay: reneg.allowLocalSubtitleOverlay === true,
@@ -158,8 +124,6 @@ function makeCtx(core, state, startMs, reneg) {
         manualDirectPlayOverride: !!reneg.manualDirectPlayOverride,
         manualRemuxOverride: !!reneg.manualRemuxOverride,
         // Qualité manuelle : ces valeurs sont aussi réinjectées centralement
-        // par negotiateAndApply afin de survivre aux seeks/retries/changements
-        // de pistes. Les déclarer ici évite toute perte sur un appel direct.
         forcePolicyTranscodeVideoBitrate: Number(reneg.forcePolicyTranscodeVideoBitrate || 0),
         forcePolicyTranscodeHls: reneg.forcePolicyTranscodeHls,
         forcePolicyTranscodeHlsColdStart: reneg.forcePolicyTranscodeHlsColdStart,
@@ -167,15 +131,8 @@ function makeCtx(core, state, startMs, reneg) {
         preferredContainer: state.preferredContainer || null
     };
 }
-function isDsLike(flagsOrState) {
-    var s = flagsOrState || {};
-    return !!(s.isHls || s.lastUsedTranscoding || s.lastUsedDirectStream || s.serverTimedStream || s.timeShifted ||
-              s.lastUsedServerRemux || (typeof s.selectedAudioStream === "number" && s.selectedAudioStream >= 0));
-}
 // Règle de référence sous-titres ReDeFin : seul un vrai DirectPlay, sans base
-// temporelle serveur ni flux reconstruit, peut utiliser l'overlay local QML.
 // selectedAudioStream n'entre volontairement pas dans ce prédicat : on se base
-// sur le mode réellement appliqué au média courant.
 function isPureDirectPlay(flagsOrState) {
     var s = flagsOrState || {}, base = 0;
     try { base = Math.max(0, Math.floor(Number(s.baseOffsetMs || 0))); } catch(e0) {}
@@ -193,256 +150,6 @@ function labelForItem(it, fallback) {
     }
     return it.Name || (fallback || "");
 }
-/* ===== Sous-titres locaux déplacés depuis JellyfinPlaybackCore ===== */
-function _toMs(h, m, s, ms) { return ((h * 3600 + m * 60 + s) * 1000 + ms); }
-function _fracToMs(frac) {
-    var f = _s(frac).replace(/[^0-9]/g, "");
-    if (!f) return 0;
-    while (f.length < 3) f += "0";
-    if (f.length > 3) f = f.substring(0, 3);
-    var n = parseInt(f, 10);
-    return isFinite(n) ? n : 0;
-}
-function _parseSubtitleTimeMs(raw) {
-    var t = _s(raw).trim();
-    if (!t) return -1;
-    t = t.split(/\s+/)[0];
-    t = t.replace(",", ".");
-    var parts = t.split(":"); var secPart = parts.pop();
-    if (secPart === undefined) return -1;
-    var sm = String(secPart).match(/^(\d+)(?:\.(\d+))?$/);
-    if (!sm) return -1;
-    var sec = parseInt(sm[1], 10); var ms = _fracToMs(sm[2] || "0"); var min = 0; var hrs = 0;
-    if (parts.length >= 1) min = parseInt(parts.pop(), 10);
-    if (parts.length >= 1) hrs = parseInt(parts.pop(), 10);
-    if (!isFinite(sec) || !isFinite(min) || !isFinite(hrs)) return -1;
-    return _toMs(hrs, min, sec, ms);
-}
-function _parseCueTiming(line) {
-    line = _s(line);
-    var p = line.indexOf("-->");
-    if (p < 0) return null;
-    var left = line.substring(0, p).trim(); var right = line.substring(p + 3).trim(); var s = _parseSubtitleTimeMs(left); var e = _parseSubtitleTimeMs(right);
-    if (s < 0 || e < 0 || e < s) return null;
-    return { s: s, e: e };
-}
-function parseSrt(txt) {
-    var lines = String(txt || "").replace(/\r/g, "").split("\n"); var cues = []; var i = 0; var n = lines.length;
-    while (i < n) {
-        while (i < n && lines[i].trim() === "") i++;
-        if (i >= n) break;
-        if (/^\d+$/.test(lines[i].trim())) i++;
-        if (i >= n) break;
-        var timing = _parseCueTiming(lines[i]);
-        if (!timing) {
-            i++;
-            continue;
-        }
-        i++;
-        var t = [];
-        while (i < n && lines[i].trim() !== "") {
-            t.push(lines[i]);
-            i++;
-        }
-        cues.push({ s: timing.s, e: timing.e, t: t.join("\n") });
-        while (i < n && lines[i].trim() === "") i++;
-    }
-    return cues;
-}
-function parseVtt(txt) {
-    var s = String(txt || "").replace(/\r/g, "");
-    s = s.replace(/^\uFEFF/, "");
-    s = s.replace(/^WEBVTT[^\n]*\n+/i, "");
-    var blocks = s.split(/\n\n+/); var cues = [];
-    for (var b = 0; b < blocks.length; b++) {
-        var block = blocks[b].trim();
-        if (!block) continue;
-        var lines = block.split("\n");
-        if (lines.length && /^(NOTE|STYLE|REGION)(\s|$)/i.test(lines[0].trim())) continue;
-        if (lines.length && lines[0].indexOf("-->") < 0) lines.shift();
-        if (!lines.length) continue;
-        var timing = _parseCueTiming(lines[0]);
-        if (!timing) continue;
-        cues.push({ s: timing.s, e: timing.e, t: lines.slice(1).join("\n") });
-    }
-    return cues;
-}
-function buildSubtitleFileUrl(serverUrl, itemId, mediaSourceId, subtitleIndex, format, options) {
-    options = options || {};
-    var ext = (format && format.length > 0) ? format : "vtt"; var startTicks = 0;
-    try {
-        startTicks = Math.max(0, Math.floor(Number(options.startPositionTicks || 0)));
-    } catch(e) {
-        startTicks = 0;
-    }
-    // Utiliser systématiquement la route Jellyfin avec StartPositionTicks,
-    // y compris à zéro. C'est la forme canonique renvoyée pour les sidecars
-    // et elle évite les différences de routage observées entre versions serveur.
-    var path = "/Videos/" + encodeURIComponent(itemId) + "/" +
-               encodeURIComponent(mediaSourceId) + "/Subtitles/" +
-               encodeURIComponent(subtitleIndex) + "/" +
-               encodeURIComponent(startTicks) + "/Stream." + ext;
-    var url = _u(serverUrl, path);
-    // Le token n'est volontairement jamais placé dans la query. L'authentification
-    // SRT/VTT est fournie par _sendSubtitleRequest() via Authorization.
-    if (startTicks > 0) {
-        // Jellyfin actuel : startPositionTicks est porté par la route
-        // /Videos/{item}/{source}/Subtitles/{index}/{ticks}/Stream.{format}.
-        // Les paramètres de query startPositionTicks sont obsolètes.
-        url = _appendParam(url, "copyTimestamps", options.copyTimestamps === true ? "true" : "false");
-        url = _appendParam(url, "addVttTimeMap", options.addVttTimeMap === true ? "true" : "false");
-    }
-    return url;
-}
-function _subtitleRequestHeaders(options) {
-    options = options || {};
-    var headers = {}; var token = _s(options.accessToken || "");
-    try {
-        if (options.bridge && typeof options.bridge.headersWithToken === "function")
-            headers = options.bridge.headersWithToken(token) || {};
-        else if (typeof options.headersWithTokenFn === "function")
-            headers = options.headersWithTokenFn(token) || {};
-    } catch(e0) {
-        headers = {};
-    }
-    // Le bridge retourne normalement Accept/Content-Type JSON ; cette route est
-    // textuelle. On ne conserve que l'Authorization et l'Accept adapté.
-    var authorization = "";
-    try {
-        for (var k in headers) {
-            if (!Object.prototype.hasOwnProperty.call(headers, k)) continue;
-            if (_s(k).toLowerCase() === "authorization") {
-                authorization = _s(headers[k]);
-                break;
-            }
-        }
-    } catch(e1) {}
-    var out = { "Accept": "text/plain" };
-    if (authorization)
-        out["Authorization"] = authorization;
-    return out;
-}
-function _sendSubtitleRequest(url, options, onSuccess, onError) {
-    options = options || {};
-    var headers = _subtitleRequestHeaders(options);
-    // loadLocalSubtitleByStreamIndex exige déjà un token. S'il n'a pas pu être
-    // converti en Authorization, ne jamais retomber silencieusement sur ApiKey=.
-    if (_s(options.accessToken || "") && !headers.Authorization) {
-        if (onError)
-            onError({ code: "auth_headers_missing", message: "auth_headers_missing" });
-        return null;
-    }
-    function safeSuccess(res) {
-        try {
-            var raw = "";
-            if (res && res.text !== undefined && res.text !== null)
-                raw = res.text;
-            else if (res && res.body !== undefined && res.body !== null)
-                raw = res.body;
-            raw = _s(raw);
-            var txt = _safeSubtitleText(raw);
-            if (!txt && raw.length > 0) {
-                onError && onError({ code: "too_large", message: "too_large" });
-                return;
-            }
-            if (!res || typeof res !== "object")
-                res = { status: 0 };
-            res.text = txt;
-            onSuccess && onSuccess(res);
-        } catch(e0) {
-            onError && onError({ code: "parse_error", message: "parse_error" });
-        }
-    }
-    if (typeof options.requestFn === "function")
-        return options.requestFn("get", url, headers, null, safeSuccess, onError) || null;
-    if (options.bridge && typeof options.bridge.sendRequest === "function")
-        return options.bridge.sendRequest("get", url, headers, null, safeSuccess, onError) || null;
-    if (onError)
-        onError({ code: "bridge_missing", message: "bridge_missing" });
-    return null;
-}
-function loadLocalSubtitleByStreamIndex(serverUrl, accessToken, itemId, mediaSourceId, streamIdx, onDone, options) {
-    options = options || {};
-    var controller = {
-        active: true,
-        transport: null,
-        isActive: function() { return this.active === true; },
-        cancel: function(reason) {
-            if (!this.active) return false;
-            this.active = false;
-            var handle = this.transport;
-            this.transport = null;
-            try {
-                if (handle && typeof handle.cancel === "function")
-                    handle.cancel(reason || "cancelled", false);
-            } catch(e0) {}
-            return true;
-        }
-    };
-    function finish(ok, payload) {
-        if (!controller.active) return;
-        controller.active = false;
-        controller.transport = null;
-        if (onDone) onDone(ok === true, payload);
-    }
-    if (!serverUrl || !accessToken || !itemId || !mediaSourceId) {
-        finish(false, "ctx");
-        return controller;
-    }
-    function tryFetch(extList, accErr) {
-        if (!controller.active) return;
-        if (extList.length === 0) {
-            finish(false, _safeHelperCode(accErr || "404", "404"));
-            return;
-        }
-        var ext = extList[0];
-        var url = buildSubtitleFileUrl(serverUrl, itemId, mediaSourceId, streamIdx, ext, options);
-        var handle = _sendSubtitleRequest(url, options, function(res) {
-            if (!controller.active) return;
-            controller.transport = null;
-            var raw = (res && res.text !== undefined && res.text !== null) ? res.text : "";
-            var txt = _safeSubtitleText(raw);
-            if (!txt && _s(raw).length > 0) {
-                finish(false, "too_large");
-                return;
-            }
-            try {
-                var cues = (ext === "srt") ? parseSrt(txt) : parseVtt(txt);
-                // Un HTTP 200 n'est pas une réussite utile si la conversion VTT
-                // renvoie zéro cue. Essayer alors le SRT avant de déclarer la
-                // piste indisponible. Cela couvre notamment certaines réponses
-                // Jellyfin valides mais non exploitables par notre parseur VTT.
-                if (!cues || cues.length === 0) {
-                    tryFetch(extList.slice(1), "empty_" + ext);
-                    return;
-                }
-                finish(true, {
-                    format: ext,
-                    cues: cues,
-                    startPositionTicks: Math.max(0, Math.floor(Number(options.startPositionTicks || 0))),
-                    copyTimestamps: options.copyTimestamps === true,
-                    addVttTimeMap: options.addVttTimeMap === true
-                });
-            } catch(e1) {
-                tryFetch(extList.slice(1), "parse_error");
-            }
-        }, function(err) {
-            if (!controller.active) return;
-            controller.transport = null;
-            tryFetch(extList.slice(1), _safeHelperCode(err, "http"));
-        });
-        if (controller.active)
-            controller.transport = handle || null;
-        else {
-            try {
-                if (handle && typeof handle.cancel === "function")
-                    handle.cancel("completed", false);
-            } catch(e2) {}
-        }
-    }
-    tryFetch(["vtt", "srt"], null);
-    return controller;
-}
 /* ===== Debug/trace helpers légers déplacés depuis playeroverlay.qml ===== */
 function logValue(v) {
     if (v === undefined) return "undefined";
@@ -456,29 +163,6 @@ function urlKind(u) {
     if (u.indexOf("/Videos/") >= 0 && u.indexOf("/stream") >= 0 && u.indexOf("static=true") >= 0) return "http-dp-static";
     if (u.indexOf("/Videos/") >= 0 && u.indexOf("/stream") >= 0) return "http-progressive";
     return "other";
-}
-/* ===== Playlist helpers déplacés depuis playeroverlay.qml ===== */
-function fetchSeriesEpisodes(root, bridge, seriesId, onOk, onErr) {
-    if (!root || !bridge || typeof bridge.fetchSeriesEpisodesItems !== "function" ||
-            !root.serverUrl || !root.accessToken || !root.userId || !seriesId) {
-        if (onErr) onErr("missing_context");
-        return null;
-    }
-    return bridge.fetchSeriesEpisodesItems(root.serverUrl, root.accessToken, root.userId, seriesId,
-        function(items) { if (onOk) onOk(items || []); },
-        function(err) { if (onErr) onErr(err); }
-    );
-}
-function fetchSeasonEpisodesForPlaylist(root, bridge, seasonId, onOk, onErr) {
-    if (!root || !bridge || typeof bridge.fetchEpisodes !== "function" ||
-            !root.serverUrl || !root.accessToken || !root.userId || !seasonId) {
-        if (onErr) onErr("missing_context");
-        return null;
-    }
-    return bridge.fetchEpisodes(root.serverUrl, root.accessToken, root.userId, seasonId,
-        function(items) { if (onOk) onOk(items || []); },
-        function(err) { if (onErr) onErr(err); }
-    );
 }
 /* Raccourcis de clés */
 var K = (typeof Qt !== "undefined") ? Qt : {
@@ -672,7 +356,6 @@ function handlePressed(root, event) {
                 if (idx < 5) {
                     _setControlsButtonIndex(root, idx + 1, "controls-right");
                 } else if (root && typeof root._focusChaptersButtonSilent === "function" && root._focusChaptersButtonSilent("controls-right-to-chapters")) {
-                    // Chapitres est désormais le premier bouton du groupe droit.
                 } else {
                     _set(root, "controlsFocus", CF_MENU);
                     if (_has(root, "menuIndex")) _set(root, "menuIndex", 1);
@@ -693,7 +376,6 @@ function handlePressed(root, event) {
             if (_isOkKey(event.key)) {
                 if ((idx === 1 || idx === 5) && root && typeof root._startControlsTransportHold === "function") {
                     // Comme LoginPage : les répétitions Freebox ne doivent ni réarmer
-                    // ni convertir le maintien en succession d'appuis courts.
                     if (!event.isAutoRepeat) root._startControlsTransportHold();
                 } else {
                     _activateControlsButton(root, "controls-ok");
@@ -859,33 +541,6 @@ function syncTrackMenuIndexes(root, audioItem, subItem) {
     try { if (audioItem) { audioItem.currentIndex = ai; if (audioItem.syncIndex) audioItem.syncIndex(); } } catch(e0) {}
     try { if (subItem) { subItem.currentIndex = si; if (subItem.syncIndex) subItem.syncIndex(); } } catch(e1) {}
 }
-function clearPlaylist(root) {
-    var p = root.playlistRef;
-    if (!root.clearPlaylistOnExit || !p) return;
-    try {
-        if (typeof p.clear === "function") { p.clear(); return; }
-        if (Array.isArray(p.list)) p.list = [];
-        if (typeof p.title !== "undefined") p.title = "";
-        if (typeof p.index === "number") p.index = -1;
-        if (typeof p.setIndex === "function") p.setIndex(-1);
-        if ("allowedIds" in p) p.allowedIds = null;
-        if ("controller" in p) p.controller = "";
-        if ("scope" in p) p.scope = "";
-    } catch(e) {}
-}
-function playlistHasContent(p) { return !!(p && Array.isArray(p.list) && p.list.length); }
-function syncPlaylistToCurrent(root) {
-    var p = root.playlistRef, idx = -1;
-    if (!p) return idx;
-    try {
-        if (typeof p.syncTo === "function") { p.syncTo(root.itemId); idx = typeof p.index === "number" ? p.index : -1; }
-        if (idx < 0 && Array.isArray(p.list)) {
-            var i = p.list.indexOf(_s(root.itemId));
-            if (i >= 0) { if (typeof p.setIndex === "function") p.setIndex(i); else p.index = i; idx = i; }
-        }
-    } catch(e) {}
-    return idx;
-}
 function showNextPanel(root, item) {
     root.nextUserHidden = false;
     if (!item) return;
@@ -906,187 +561,15 @@ function syncNextOverlayContext(root, item) {
     item.triggerWindowMs = root.nextOverlayWindowMs;
     item.autoStartWhenZero = root.nextOverlayAutostart;
     item.externGate = !root.nextUserHidden;
-    item.playlist = playlistHasContent(root.playlistRef) ? (root.playlistRef.list || []) : (root.playerPlaylist || []);
+    var playlist = root.playlistRef;
+    var hasScopedList = !!(playlist && playlist.hasList && playlist.hasList());
+    item.playlist = hasScopedList ? (playlist.list || []) : (root.playerPlaylist || []);
 }
-function armSkipIntroResumeGate(root, targetMs, reason) {
-    var t = Math.max(0, Math.floor(Number(targetMs || 0))); if (!t) return;
-    root.skipIntroResumeGateActive = true; root.skipIntroResumeTargetMs = t;
-    root.skipIntroResumeGateReason = reason || "boot-seek";
-    root._skipIntroLastShow = false; root.skipIntroFocusClaimed = false; root.skipIntroAutoFocusClaimed = false; root.skipIntroFocusReleasedByUser = false;
-}
-function consumeSkipIntroIfPastResume(root, api, targetMs) {
-    var t = Math.max(0, Math.floor(Number(targetMs || 0))); var s = api.startMs(root.skipIntroSegment), e = api.endMs(root.skipIntroSegment), h = api.hideMs(root.skipIntroSegment);
-    if (!root.skipIntroSegment || e <= s || t < Math.max(e, h)) return false;
-    root.skipIntroConsumed = true; root.skipIntroDismissed = true; root.skipIntroFocusClaimed = false; root.skipIntroAutoFocusClaimed = false;
-    root.skipIntroFocusReleasedByUser = true; root._skipIntroWasInside = false; root._skipIntroLastShow = false; root._skipIntroLastPos = t;
-    return true;
-}
-function releaseSkipIntroResumeGate(root, api, item, actualUiMs) {
-    var t = Math.max(0, Math.floor(Number(actualUiMs || 0)));
-    if (root.skipIntroResumeTargetMs > t) t = root.skipIntroResumeTargetMs;
-    consumeSkipIntroIfPastResume(root, api, t);
-    root.skipIntroResumeGateActive = false; root.skipIntroResumeTargetMs = -1; root.skipIntroResumeGateReason = "";
-    if (!root.skipIntroConsumed && !root.skipIntroDismissed) syncSkipIntroOverlay(root, api, item);
-}
-function armSkipIntroPlayback(root, api, item, positionMs) {
-    if (!root || root.serverPrerollBlocking === true || root.skipIntroEnabled !== true)
-        return false;
-    var pos = Math.max(0, Math.floor(Number(positionMs || 0)));
-    if (!root.skipIntroPlaybackArmed) {
-        root.skipIntroPlaybackArmed = true;
-        root.skipIntroPlaybackStartMs = pos;
-    }
-    syncSkipIntroOverlay(root, api, item);
-    return true;
-}
-function setSkipIntroItemActive(root, api, item, show) {
-    if (!item) return;
-    try {
-        item.uiMs = root.uiPositionMs();
-        item.endMs = api.endMs(root.skipIntroSegment);
-        if (item.safeMargin !== undefined) item.safeMargin = Math.max(60, root.tvSafeMargin);
-        if (item.safeMarginRight !== undefined) item.safeMarginRight = Math.max(60, root.tvSafeMargin);
-        if (item.safeMarginBottom !== undefined) item.safeMarginBottom = Math.max(60, root.tvSafeMargin);
-        if (item.avoidBottom !== undefined) item.avoidBottom = root.controlsVisible || root.scrubActive ? 190 : 0;
-        if (item.safeAreaAlreadyApplied !== undefined) item.safeAreaAlreadyApplied = false;
-        if (item.label !== undefined) item.label = "Passer le générique";
-        // Chrome visible : priorité logique/visuelle sans prendre l'activeFocus
-        // natif des contrôles. Chrome totalement masqué : SkipIntro peut aussi
-        // réclamer le focus QML pour rester la cible prioritaire de la télécommande.
-        var autoFocus = false;
-        var suppressVisiblePriority = false;
-        try {
-            autoFocus = show &&
-                        typeof root._skipIntroAutoFocusAllowed === "function" &&
-                        root._skipIntroAutoFocusAllowed();
-            suppressVisiblePriority = show && root.skipIntroFocusReleasedByUser === true &&
-                                      root.uiChromeRenderVisible === true;
-        } catch(eFocusPolicy) {}
-        if (item.stealFocusOnShow !== undefined) item.stealFocusOnShow = autoFocus;
-        // Une sortie volontaire bloque seulement la re-priorisation tant que le
-        // chrome reste visible. En plein écran sans chrome, l'auto-focus reprend.
-        if (item.prioritizeOnShow !== undefined) item.prioritizeOnShow = !suppressVisiblePriority;
-        if (item.show !== undefined) item.show = show;
-        // Chrome visible : priorité logique/visuelle sans focus natif. Cela couvre
-        // également les timings Loader où onShowChanged arrive avant le binder.
-        if (show && !autoFocus && !suppressVisiblePriority && !root.skipIntroFocusClaimed &&
-                typeof root._focusSkipIntroIfVisible === "function") {
-            try { root._focusSkipIntroIfVisible("chrome-visible-priority", false); } catch(ePriority) {}
-        }
-    } catch(e) {  }
-}
-function syncSkipIntroOverlay(root, api, item) {
-    if (!root || !api) return;
-    var pos = root.uiPositionMs(), s = api.startMs(root.skipIntroSegment), e = api.endMs(root.skipIntroSegment); var h = api.hideMs(root.skipIntroSegment);
-    if (root.skipIntroResumeGateActive) {
-        root._skipIntroLastShow = false;
-        root.skipIntroFocusClaimed = false;
-        root.skipIntroAutoFocusClaimed = false;
-        setSkipIntroItemActive(root, api, item, false);
-        root._skipIntroLastPos = pos;
-        return;
-    }
-    if (root.skipIntroSegment && e > s && root.skipIntroPlaybackStartMs >= Math.max(e, h) && pos >= Math.max(e, h)) {
-        consumeSkipIntroIfPastResume(root, api, Math.max(pos, root.skipIntroPlaybackStartMs));
-        setSkipIntroItemActive(root, api, item, false);
-        return;
-    }
-    if (root.skipIntroSegment && e > s) {
-        var rewound = root._skipIntroLastPos >= 0 && pos < root._skipIntroLastPos - root.skipIntroRearmRewindDeltaMs;
-        if ((root.skipIntroConsumed || root.skipIntroDismissed) && rewound && pos < Math.max(0, e - root.skipIntroRearmBackMs)) {
-            root.skipIntroConsumed = false;
-            root.skipIntroDismissed = false;
-        }
-        root._skipIntroWasInside = pos >= Math.max(0, s - root.skipIntroLeadMs) && pos < e;
-    }
-    var show = api.shouldShow(root.skipIntroEnabled, root.skipIntroPlaybackArmed, root.skipIntroSegment, root.nextUiLocked,
-                              root.audioMenuVisible, root.subMenuVisible, root.skipIntroConsumed, root.skipIntroDismissed,
-                              pos, root.skipIntroLeadMs);
-    // "skipIntroFocusClaimed" reflète désormais uniquement un focus réellement
-    // acquis, jamais la simple visibilité du bouton.
-    var hasSkipFocus = false;
-    try { hasSkipFocus = !!(item && item.priorityFocusActive === true); } catch(eFocus) {}
-    root.skipIntroFocusClaimed = show && hasSkipFocus;
-    // Le composant peut obtenir son focus pendant son pipeline d'apparition
-    // (callLater / retry). Si cela arrive chrome masqué, mémoriser explicitement
-    // qu'il s'agit d'un AUTO-focus afin de pouvoir le rendre au retour des panneaux.
-    if (show && hasSkipFocus) {
-        try {
-            if (root.uiChromeRenderVisible === false)
-                root.skipIntroAutoFocusClaimed = true;
-        } catch(eAutoFocus) {}
-    } else if (!hasSkipFocus) {
-        root.skipIntroAutoFocusClaimed = false;
-    }
-    if (show !== root._skipIntroLastShow)
-        root._skipIntroLastShow = show;
-    setSkipIntroItemActive(root, api, item, show);
-    root._skipIntroLastPos = pos;
-}
-function resetSkipIntroState(root, api, item) {
-    root.skipIntroSegment = null; root.skipIntroLoadedItemId = ""; root.skipIntroDismissed = false;
-    root.skipIntroConsumed = false; root.skipIntroPlaybackArmed = false; root.skipIntroPlaybackStartMs = 0;
-    if (_has(root, "_skipIntroMainSourceSeen")) root._skipIntroMainSourceSeen = false;
-    root.skipIntroFocusReleasedByUser = false; root.skipIntroFocusClaimed = false;
-    root.skipIntroResumeGateActive = false; root.skipIntroResumeTargetMs = -1; root.skipIntroResumeGateReason = "";
-    root._skipIntroWasInside = false; root._skipIntroLastShow = false; root._skipIntroLastPos = -1;
-    setSkipIntroItemActive(root, api, item, false);
-}
-function loadSkipIntroForCurrentItem(root, api, item) {
-    if (!root.skipIntroEnabled || !root.serverUrl || !root.accessToken || !root.itemId) return;
-    if (root.skipIntroLoadedItemId === root.itemId && root.skipIntroSegment) return;
-    var expected = root.itemId;
-    root.skipIntroLoadedItemId = expected; root.skipIntroDismissed = false; root.skipIntroConsumed = false;
-    root.skipIntroFocusReleasedByUser = false; root.skipIntroFocusClaimed = false; root.skipIntroAutoFocusClaimed = false; root._skipIntroLastPos = -1; root.skipIntroSegment = null;
-    if (!api || typeof api.fetchIntroSegment !== "function") return;
-    api.fetchIntroSegment(root.serverUrl, root.accessToken, expected, function(ok, seg) {
-        if (expected !== root.itemId) return;
-        if (!ok || !seg) { root.skipIntroSegment = null; root._setSkipIntroItemActive(item, false); return; }
-        root.skipIntroSegment = seg; root._syncSkipIntroOverlay();
-    });
-}
-function skipIntroNow(root, api, item, isPlaying) {
-    var end = api.endMs(root.skipIntroSegment), start = api.startMs(root.skipIntroSegment);
-    if (end <= start) return false;
-    var pos = Math.max(0, Math.floor(Number(root.uiPositionMs ? root.uiPositionMs() : 0))); var target = Math.max(0, end + root.skipIntroEndPadMs);
-    root.skipIntroConsumed = true;
-    // "dismissed" est réservé à un Back/Escape explicite de l'utilisateur.
-    root.skipIntroDismissed = false;
-    root.skipIntroFocusClaimed = false;
-    root.skipIntroAutoFocusClaimed = false;
-    root._skipIntroLastShow = false;
-    setSkipIntroItemActive(root, api, item, false);
-    // À moins d'une seconde de la fin du segment, reconstruire un HLS/remux
-    // coûterait plus cher que laisser finir naturellement l'intro.
-    if (pos >= Math.max(start, end - 1000)) {
-        root.resetControlsTimer();
-        return true;
-    }
-    if (root.shouldNetworkSeek()) {
-        root._wasPlayingBeforeSwitch = !!isPlaying;
-        root._resumeWantedAfterNegotiation = root._wasPlayingBeforeSwitch;
-        root._serverSeekFallback(target, "skipIntro");
-    } else {
-        root._localSeekTo(target, "skipIntro");
-    }
-    root.resetControlsTimer();
-    return true;
-}
-function buildLogoUrlById(root, id, tag) {
-    if (!id) return "";
-    var u = _normalizeBase(root.serverUrl) + "/Items/" + encodeURIComponent(id) + "/Images/Logo";
-    return tag ? u + "?tag=" + encodeURIComponent(tag) : u;
-}
-function logoUrlFromItem(root, it) {
-    if (!it) return "";
+function logoUrlFromItem(root, bridge, it) {
+    if (!it || !bridge || typeof bridge.itemImageUrl !== "function") return "";
     var tags = it.ImageTags || {}, tag = tags.Logo || tags.logo || "";
-
-    // Un logo n'est envoyé à QML que si Jellyfin nous a fourni son ImageTag.
-    // Ne jamais générer un /Images/Logo sans tag : pour Episode/Season le
-    // fallback série est résolu ensuite par ensureSeriesLogoTag(), après lecture
-    // des métadonnées de la série. Cela évite les 404 spéculatifs et le bruit
     // QNetworkReplyImplPrivate observé sur Qt 5.15/Freebox.
-    return tag && it.Id ? buildLogoUrlById(root, it.Id, tag) : "";
+    return tag && it.Id ? bridge.itemImageUrl(root.serverUrl, it.Id, "Logo", tag, {}) : "";
 }
 function ensureSeriesLogoTag(root, bridge, it) {
     if (!root.serverUrl || !root.accessToken || !it || hasQueryTag(root.currentItemLogoUrl)) return;
@@ -1094,9 +577,6 @@ function ensureSeriesLogoTag(root, bridge, it) {
     var sid = (t === "Episode" || t === "Season")
             ? (it.SeriesId || (it.Series && it.Series.Id) || "") : "";
     if (!sid) return;
-
-    // Le fetch est asynchrone : si l'utilisateur change d'épisode avant la
-    // réponse, ne jamais appliquer le logo de l'ancienne série au nouvel item.
     var expectedItemId = _s(it.Id || root.itemId || "");
     var expectedSeriesId = _s(sid);
     bridge.fetchItem(root.serverUrl, root.accessToken, expectedSeriesId, function(series) {
@@ -1104,7 +584,7 @@ function ensureSeriesLogoTag(root, bridge, it) {
         if (!series || _s(series.Id || "") !== expectedSeriesId) return;
         var tags = series.ImageTags || {}, tag = tags.Logo || tags.logo || "";
         if (!tag) return;
-        var u = buildLogoUrlById(root, expectedSeriesId, tag);
+        var u = bridge.itemImageUrl(root.serverUrl, expectedSeriesId, "Logo", tag, {});
         root.currentItemLogoUrl = u;
         root.lastGoodLogoUrl = u;
         root.lastGoodLogoItemId = expectedItemId;
@@ -1245,70 +725,6 @@ function refreshStreams(root, router, done) {
         root._streamsLoadingKey = ""; root._streamsReadyKey = key; flushStreamsWaiters(root, false);
     });
 }
-function applySeasonPlaylistIds(root, ids, title, scope) {
-    ids = MediaCatalog.normalizeIdList(ids || [])
-    var playlist = root.playlistRef
-    if (!ids.length || !playlist) return false
-    playlist.title = title || playlist.title || ""
-    playlist.list = ids
-    if (typeof playlist.setAllowedFromList === "function") playlist.setAllowedFromList(ids)
-    if ("controller" in playlist) playlist.controller = "playeroverlay"
-    if ("scope" in playlist) playlist.scope = scope || "season:unknown"
-    var idx = syncPlaylistToCurrent(root)
-    if (idx < 0 && typeof playlist.start === "function") playlist.start()
-    return true
-}
-function ensureSeasonPlaylistFromHints(root, bridge) {
-    try {
-        if (playlistHasContent(root.playlistRef) || !root.playlistRef) return;
-        var sid = root.selectedSeasonId, hints = root.seasonPageOrderIds || [];
-        if (!sid && !hints.length) return;
-        if (hints.length) {
-            var hintIds = MediaCatalog.normalizeIdList(hints); if (!hintIds.length) return;
-            if (!sid) { applySeasonPlaylistIds(root, hintIds, root.playerPlaylistTitle || root.playlistRef.title || "", "season:unknown"); return; }
-            fetchSeasonEpisodesForPlaylist(root, bridge, sid, function(items) {
-                if (!items || !items.length) { applySeasonPlaylistIds(root, hintIds, root.playerPlaylistTitle || root.playlistRef.title || "", "season:" + sid); return; }
-                MediaCatalog.sortEpisodesInPlace(items); var ids = MediaCatalog.episodeIdListFromItems(items, hintIds);
-                applySeasonPlaylistIds(root, ids.length ? ids : hintIds, root.playerPlaylistTitle || root.playlistRef.title || "", "season:" + sid);
-            }, function() { applySeasonPlaylistIds(root, hintIds, root.playerPlaylistTitle || root.playlistRef.title || "", "season:" + sid); });
-            return;
-        }
-        fetchSeasonEpisodesForPlaylist(root, bridge, sid, function(items) {
-            if (!items || !items.length) return; MediaCatalog.sortEpisodesInPlace(items);
-            var ids = MediaCatalog.episodeIdListFromItems(items, null); if (ids.length) applySeasonPlaylistIds(root, ids, root.playerPlaylistTitle || root.playlistRef.title || "", "season:" + sid);
-        }, function() {});
-    } catch(e) {}
-}
-function ensureAutoEpisodePlaylist(root, bridge) {
-    if (!root.serverUrl || !root.accessToken) return;
-    if (root.selectedSeasonId || (root.seasonPageOrderIds && root.seasonPageOrderIds.length)) { ensureSeasonPlaylistFromHints(root, bridge); return; }
-    if (!root.itemId) return;
-    bridge.fetchItem(root.serverUrl, root.accessToken, root.itemId, function(it) { ensureAutoEpisodePlaylistWithItem(root, bridge, it); }, function() {}, root.fbx);
-}
-function ensureAutoEpisodePlaylistWithItem(root, bridge, it) {
-    try {
-        if (!it || playlistHasContent(root.playlistRef)) return;
-        if (root.selectedSeasonId || (root.seasonPageOrderIds && root.seasonPageOrderIds.length)) { ensureSeasonPlaylistFromHints(root, bridge); return; }
-        var type = _s(it.Type), seasonId = "", seasonNo = 0;
-        if (type === "Episode") { seasonId = it.SeasonId || (it.Season && it.Season.Id) || ""; seasonNo = it.ParentIndexNumber != null ? it.ParentIndexNumber : 0; }
-        else if (type === "Season") { seasonId = it.Id || ""; seasonNo = it.IndexNumber != null ? it.IndexNumber : 0; }
-        else return;
-        var seriesId = it.SeriesId || (it.Series && it.Series.Id) || "", seriesName = it.SeriesName || (it.Series && it.Series.Name) || "";
-        var title = (seasonNo === 0 ? "Spéciaux" : "Saison " + seasonNo) + (seriesName ? " • " + seriesName : "");
-        if (seasonId) {
-            fetchSeasonEpisodesForPlaylist(root, bridge, seasonId, function(items) {
-                if (!items || !items.length) return; MediaCatalog.sortEpisodesInPlace(items);
-                var ids = MediaCatalog.episodeIdListFromItems(items, null); if (ids.length) applySeasonPlaylistIds(root, ids, title, "season:" + seasonId);
-            }, function() {}); return;
-        }
-        fetchSeriesEpisodes(root, bridge, seriesId, function(all) {
-            var bucket = [];
-            for (var i = 0; all && i < all.length; i++) if (all[i] && (all[i].ParentIndexNumber != null ? all[i].ParentIndexNumber : 0) === seasonNo) bucket.push(all[i]);
-            MediaCatalog.sortEpisodesInPlace(bucket); var ids = MediaCatalog.episodeIdListFromItems(bucket, null);
-            if (ids.length) applySeasonPlaylistIds(root, ids, title, "unknown-season:" + seriesId);
-        }, function() {});
-    } catch(e) {}
-}
 function loadLocalSubtitleForOverlay(root, bridge, item, streamIdx, cb, preserve) {
     function fail(reason) {
         if (preserve !== true) disableLocalSubsOverlay(root, item, null, null);
@@ -1318,16 +734,10 @@ function loadLocalSubtitleForOverlay(root, bridge, item, streamIdx, cb, preserve
         fail("ctx");
         return null;
     }
-    // Une seule conversion/téléchargement de sidecar à la fois. En plus de
-    // protéger l'état QML, cela évite de déclencher les corruptions observées
-    // côté Jellyfin lorsque plusieurs conversions de la même piste se croisent.
     cancelLocalSubtitleRequest(root, "superseded");
     var controller = null;
-    controller = loadLocalSubtitleByStreamIndex(root.serverUrl, root.accessToken, root.itemId,
+    controller = LocalTextSubtitles.loadLocalSubtitleByStreamIndex(root.serverUrl, root.accessToken, root.itemId,
         root.currentMediaSourceId, streamIdx, function(ok, payload) {
-            // Le controller bas niveau ignore déjà toute réponse reçue après
-            // cancel(). Ne vider le slot QML que si cette requête en est encore
-            // propriétaire, afin qu'une requête plus récente reste intacte.
             if (root._localSubtitleRequestHandle === controller)
                 root._localSubtitleRequestHandle = null;
             if (!ok || !payload || !payload.cues || payload.cues.length === 0) {
@@ -1381,89 +791,478 @@ function _mergeExtra(base, add) {
     for (k in add) out[k] = add[k]
     return out
 }
-function handleQualityDirectPlay(root, mp) {
-    if (!root || !mp || root._tearingDownPlayer) return false
-    // Si l'on vient d'un pipeline serveur, ne jamais réutiliser l'instance
-    // MediaPlayer intelce : les tests montrent que mp.seek() reste ensuite
-    // bloquant par à-coups malgré source="" + NoMedia. On redémarre donc
-    // PlayerOverlay lui-même. Le Loader recrée une vraie instance QtMultimedia,
-    // exactement comme lors d'un DirectPlay natif.
-    var fromServerPipeline = root.lastUsedTranscoding === true ||
-        root.lastUsedDirectStream === true || root.lastUsedServerRemux === true ||
-        root.serverTimedStream === true || root.timeShifted === true ||
-        Number(root.baseOffsetMs || 0) > 0;
-    if (fromServerPipeline && root.shared && typeof root.requestDirectPlayReload === "function") {
-        var freshTarget = root._clampUi(root.uiPositionMs());
-        try {
-            root.shared.__redefinExplicitPlaybackStart = {
-                source: "directplay-reload",
-                itemId: String(root.itemId || ""),
-                serverUrl: String(root.serverUrl || ""),
-                userId: String(root.userId || ""),
-                startMs: Math.max(0, Math.floor(Number(freshTarget || 0))),
-                ts: Date.now()
-            };
-            root._internalDirectPlayReload = true;
-            root.requestDirectPlayReload();
-            return true;
-        } catch(eReload) {
-            root._internalDirectPlayReload = false;
+/* ===== Verrou transport pendant un rechargement ===== */
+/*
+ * Raisons d'armement de la gate de chargement qui correspondent réellement à
+ * un RECHARGEMENT de source : négociation en vol, reset dur et remplacement
+ * d'URL. Les raisons d'ouverture initiale ("initial-negotiation",
+ * "media-url-first", "completed", "item-changed") en sont volontairement
+ * exclues : le démarrage ne doit pas être bloqué plus que nécessaire.
+ */
+var RELOAD_LOADING_REASONS = ["negotiation", "hard-source-reset",
+                              "fresh-directplay-reset", "media-url-swap"];
+function isReloadLoadingReason(reason) {
+    var r = String(reason === undefined || reason === null ? "" : reason);
+    for (var i = 0; i < RELOAD_LOADING_REASONS.length; ++i)
+        if (RELOAD_LOADING_REASONS[i] === r) return true;
+    return false;
+}
+/*
+ * Vrai tant qu'un rechargement est en cours. Pendant cette fenêtre, reculer,
+ * avancer, scruber et sauter de chapitre sont ignorés : ces commandes
+ * lanceraient une seconde négociation concurrente sur un pipeline en cours de
+ * construction. Retour, Stop et la sortie du lecteur ne sont jamais bloqués.
+ */
+function reloadBlocksTransport(root) {
+    if (!root || root._tearingDownPlayer === true || root.serverPrerollBlocking === true)
+        return false;
+    if (root._sourceResetActive === true) return true;
+    return root.videoLoadingGate === true && isReloadLoadingReason(root._videoLoadingReason);
+}
+/* ===== Focus des boutons de réglages du HUD ===== */
+/*
+ * Identifiants des boutons de réglages. Ils reprennent à l'identique la
+ * numérotation exposée par PlayerSettingsOverlay.qml ET PlayerControls.qml.
+ */
+var SETTINGS_CONTROL_QUALITY = 0;
+var SETTINGS_CONTROL_ZOOM = 1;
+var SETTINGS_CONTROL_SPEED = 2;
+var SETTINGS_CONTROL_AUDIO = 3;
+var SETTINGS_CONTROL_SUBTITLE = 4;
+function normalizeSettingsControl(control) {
+    var c = Math.floor(Number(control));
+    if (!isFinite(c) || isNaN(c) || c < 0 || c > SETTINGS_CONTROL_SUBTITLE)
+        return SETTINGS_CONTROL_QUALITY;
+    return c;
+}
+function settingsControlFocusTarget(root, control) {
+    control = normalizeSettingsControl(control);
+    if (control === SETTINGS_CONTROL_ZOOM) return root.cF_ZOOM;
+    if (control === SETTINGS_CONTROL_SPEED) return root.cF_SPEED;
+    if (control === SETTINGS_CONTROL_AUDIO || control === SETTINGS_CONTROL_SUBTITLE)
+        return root.cF_MENU;
+    return root.cF_QUALITY;
+}
+/* 0 = le bouton ne dépend pas de menuIndex. */
+function settingsControlMenuIndex(control) {
+    control = normalizeSettingsControl(control);
+    if (control === SETTINGS_CONTROL_AUDIO) return 1;
+    if (control === SETTINGS_CONTROL_SUBTITLE) return 2;
+    return 0;
+}
+function settingsFocusStillOnControl(root, control) {
+    if (!root || !(control >= 0) || control > SETTINGS_CONTROL_SUBTITLE) return false;
+    if (root.controlsFocus !== settingsControlFocusTarget(root, control)) return false;
+    var wanted = settingsControlMenuIndex(control);
+    return wanted > 0 ? root.menuIndex === wanted : true;
+}
+function _settingsPanelBusy(root) {
+    var names = ["_qualityPanelOpen", "_chaptersPanelOpen"];
+    for (var i = 0; i < names.length; ++i) {
+        try { if (typeof root[names[i]] === "function" && root[names[i]]() === true) return true; }
+        catch(e0) {}
+    }
+    return false;
+}
+/*
+ * Retour de focus déterministe après un choix ou une fermeture de menu : le
+ * focus revient TOUJOURS sur le bouton du HUD qui a ouvert le panneau, avec
+ * le HUD visible, quel que soit le chemin emprunté (validation, Retour,
+ * fermeture latérale) et que le réglage ait été appliqué, différé ou ignoré.
+ */
+function restoreFocusAfterSettingsChoice(root, control, origin) {
+    if (!root) return false;
+    control = normalizeSettingsControl(control);
+    // Remis en fin de fonction : les handlers de changement de controlsFocus /
+    root._lastSettingsFocusControl = -1;
+    root.audioMenuVisible = false;
+    root.subMenuVisible = false;
+    var menuIndex = settingsControlMenuIndex(control);
+    if (menuIndex > 0) root.menuIndex = menuIndex;
+    root.controlsFocus = settingsControlFocusTarget(root, control);
+    root.controlsVisible = true;
+    root._lastSettingsFocusControl = control;
+    try { root.forceActiveFocus(); } catch(e0) {}
+    try { root._updateControlsActive(); } catch(e1) {}
+    try { root.resetControlsTimer(); } catch(e2) {}
+    return true;
+}
+/*
+ * Un rechargement peut détruire et reconstruire le chrome : on réaffirme le
+ * focus natif sur le bouton d'origine, tant que l'utilisateur n'a pas navigué
+ * ailleurs entre-temps.
+ */
+function reassertSettingsFocus(root, origin) {
+    if (!root) return false;
+    var control = root._lastSettingsFocusControl;
+    if (!(control >= 0)) return false;
+    if (root._tearingDownPlayer === true || root.nextUiLocked === true ||
+            root.serverPrerollBlocking === true) return false;
+    if (root.audioMenuVisible === true || root.subMenuVisible === true) return false;
+    if (_settingsPanelBusy(root)) return false;
+    if (root.controlsVisible !== true || !settingsFocusStillOnControl(root, control)) {
+        root._lastSettingsFocusControl = -1;
+        return false;
+    }
+    try { root.forceActiveFocus(); } catch(e0) {}
+    try { root._updateControlsActive(); } catch(e1) {}
+    return true;
+}
+/* L'utilisateur a navigué ailleurs : plus rien à réaffirmer. */
+function forgetSettingsFocusIfMoved(root) {
+    if (!root) return false;
+    var control = root._lastSettingsFocusControl;
+    if (!(control >= 0)) return false;
+    if (settingsFocusStillOnControl(root, control)) return false;
+    root._lastSettingsFocusControl = -1;
+    return true;
+}
+/* ===== Réglages différés Audio / Sous-titres / Qualité ===== */
+var _K_AUDIO = "audio", _K_SUBTITLE = "subtitle", _K_QUALITY = "quality";
+var _Q_AUTO = -3, _Q_NONE = 0;
+function _audioSelection(stream, ui, manualDp) {
+    return { kind: _K_AUDIO, stream: Math.floor(_numberOr(stream, -1)),
+             uiIndex: Math.floor(_numberOr(ui, -1)), manualDirectPlay: manualDp === true };
+}
+function _subtitleSelection(stream, ui) {
+    return { kind: _K_SUBTITLE, stream: Math.floor(_numberOr(stream, -1)),
+             uiIndex: Math.floor(_numberOr(ui, -1)) };
+}
+function _qualitySelection(value) {
+    return { kind: _K_QUALITY, value: Math.floor(_numberOr(value, _Q_NONE)) };
+}
+function _sameSelection(a, b) {
+    if (!a || !b || a.kind !== b.kind) return false;
+    if (a.kind === _K_QUALITY) return a.value === b.value && a.value !== _Q_NONE;
+    return a.uiIndex >= 0 && a.uiIndex === b.uiIndex;
+}
+function currentAudioSelection(root) {
+    var ui = -1;
+    try { ui = root._effectiveAudioUiIndexForSettings(); } catch(e0) {}
+    var stream = root.selectedAudioStream >= 0 ? root.selectedAudioStream : root.effectiveAudioStream;
+    return _audioSelection(stream, ui, root.manualDirectPlayMode === true);
+}
+function currentSubtitleSelection(root) {
+    var ui = -1;
+    try { ui = root._effectiveSubtitleUiIndexForSettings(); } catch(e0) {}
+    var stream = root.useLocalSubs && root.localSubStreamIndex >= 0
+            ? root.localSubStreamIndex
+            : (root.selectedSubtitleStream >= 0 ? root.selectedSubtitleStream : root.effectiveSubtitleStream);
+    return _subtitleSelection(stream, ui);
+}
+function currentQualitySelection(root) {
+    var value = _Q_AUTO;
+    try { value = root._activeQualityChoiceValue(); } catch(e0) {}
+    return _qualitySelection(value);
+}
+function deferredReloadState(root) {
+    if (!root._deferredReloadState)
+        root._deferredReloadState = { audio: null, subtitle: null, quality: null };
+    return root._deferredReloadState;
+}
+function _deferredPauseActive(root) {
+    if (!root || root._deferredReloadReplaying === true
+            || typeof root._deferredReloadPauseActive !== "function") return false;
+    try { return root._deferredReloadPauseActive() === true; } catch(e0) { return false; }
+}
+function _setDeferredUi(root, kind, value) {
+    if (kind === _K_AUDIO) root._deferredAudioUiIndex = value ? value.uiIndex : -1;
+    else if (kind === _K_SUBTITLE) root._deferredSubtitleUiIndex = value ? value.uiIndex : -1;
+    else if (kind === _K_QUALITY) root._deferredQualityValue = value ? value.value : _Q_NONE;
+    try { root._syncTrackMenuIndexes("deferred-ui"); } catch(e0) {}
+}
+function clearDeferredReloadUi(root) {
+    if (!root) return false;
+    root._deferredAudioUiIndex = -1;
+    root._deferredSubtitleUiIndex = -1;
+    root._deferredQualityValue = _Q_NONE;
+    try { root._syncTrackMenuIndexes("deferred-clear"); } catch(e0) {}
+    return true;
+}
+function decideSettingChange(root, pick, active) {
+    if (!root || !pick) return "noop";
+    if (root._deferredReloadReplaying === true) return "applyNow";
+    var state = deferredReloadState(root), kind = pick.kind;
+    var pending = state[kind] || null;
+    var paused = _deferredPauseActive(root), sameActive = _sameSelection(pick, active);
+    if (!paused) {
+        if (pending) { state[kind] = null; _setDeferredUi(root, kind, null); }
+        return sameActive && !pending ? "noop" : "applyNow";
+    }
+    if (sameActive) {
+        if (pending) {
+            state[kind] = null;
+            _setDeferredUi(root, kind, null);
+            _refreshDeferredPrefetch(root, "cancel-active");
+            return "cancelPending";
         }
+        return "noop";
     }
-    // Fallback local si PlayerOverlay n'est pas hébergé par ShellPage.
-    var target = root._beginTrackSwitchRebase("quality-directplay", true)
-    root.audioIndex = 0
-    root._autoLocalizeSubStream = -1
-    if (root.selectedSubtitleStream >= 0) {
-        var li = root.listIndexForStream(root.selectedSubtitleStream)
-        if (li >= 0 && li < root.subtitleIsTextMap.length && root.subtitleIsTextMap[li])
-            root._autoLocalizeSubStream = root.selectedSubtitleStream
+    if (pending && _sameSelection(pick, pending)) return "noop";
+    state[kind] = pick;
+    _setDeferredUi(root, kind, pick);
+    _refreshDeferredPrefetch(root, "defer-" + kind);
+    return "defer";
+}
+function decideQualityChoice(root, requested) {
+    var pick = _qualitySelection(requested);
+    return pick.value === _Q_NONE ? "noop"
+            : decideSettingChange(root, pick, currentQualitySelection(root));
+}
+function cancelDeferredReload(root, kind, reason) {
+    if (!root) return false;
+    var state = deferredReloadState(root);
+    if (!state[kind]) return false;
+    state[kind] = null;
+    _setDeferredUi(root, kind, null);
+    _refreshDeferredPrefetch(root, reason || "cancel");
+    return true;
+}
+function resetDeferredReload(root, reason) {
+    if (!root) return false;
+    root._deferredReloadState = { audio: null, subtitle: null, quality: null };
+    clearDeferredReloadUi(root);
+    try {
+        if (typeof root._invalidateDeferredPrefetch === "function")
+            root._invalidateDeferredPrefetch(reason || "reset");
+    } catch(e0) {}
+    return true;
+}
+function _pendingPicks(root) {
+    var state = deferredReloadState(root), picks = [];
+    if (state.audio) picks.push({ kind: _K_AUDIO, value: state.audio });
+    if (state.subtitle) picks.push({ kind: _K_SUBTITLE, value: state.subtitle });
+    if (state.quality) picks.push({ kind: _K_QUALITY, value: state.quality });
+    return picks;
+}
+/* PlaybackInfo anticipé pendant PAUSE. QtMultimedia reste sur la source courante. */
+function deferredPrefetchKey(root) {
+    if (!root) return "";
+    var state = deferredReloadState(root), audio = state.audio, subtitle = state.subtitle;
+    if (state.quality || (!audio && !subtitle)
+            || (audio && audio.manualDirectPlay === true)) return "";
+    return [
+        String(root.itemId || ""), String(root.serverUrl || ""), String(root.userId || ""),
+        audio ? ("a:" + audio.stream + ":" + audio.uiIndex) : "a:-",
+        subtitle ? ("s:" + subtitle.stream + ":" + subtitle.uiIndex) : "s:-",
+        "ca:" + root.selectedAudioStream, "cs:" + root.selectedSubtitleStream,
+        "ls:" + root.localSubStreamIndex, "ul:" + (root.useLocalSubs ? 1 : 0),
+        "mr:" + (root.manualRemuxMode ? 1 : 0),
+        "mq:" + Math.max(0, Math.floor(_numberOr(root.manualQualityBitrate, 0))),
+        "rule:" + String(root.playbackRuleMode || "smart"),
+        "dev:" + String(root.playbackDeviceMode || ""),
+        "back:" + String(root.playbackBackendMode || ""),
+        "hls:" + (root.isHls ? 1 : 0), "tc:" + (root.lastUsedTranscoding ? 1 : 0),
+        "rmx:" + (root.lastUsedServerRemux ? 1 : 0),
+        "policy:" + (root.currentPlaybackVideoTranscodeByPolicy ? 1 : 0)
+    ].join("|");
+}
+function _refreshDeferredPrefetch(root, reason) {
+    if (!root || root._deferredReloadReplaying === true) return false;
+    var key = deferredPrefetchKey(root);
+    try {
+        if (key && typeof root._scheduleDeferredPrefetch === "function")
+            return root._scheduleDeferredPrefetch(reason || "change");
+        if (typeof root._invalidateDeferredPrefetch === "function")
+            root._invalidateDeferredPrefetch(reason || "none");
+    } catch(e0) {}
+    return false;
+}
+function prefetchDeferredReload(root,router,requestSeq){
+    if (!root || !router || typeof router.negotiatePlayback !== "function"
+            || root._tearingDownPlayer || !_deferredPauseActive(root)
+            || requestSeq !== root._deferredPrefetchSeq) return false;
+    var key = deferredPrefetchKey(root);
+    if (!key) return false;
+    var state = deferredReloadState(root), audioPick = state.audio, subtitlePick = state.subtitle;
+    var audio = root.selectedAudioStream, subtitle = root.selectedSubtitleStream;
+    var useLocal = root.useLocalSubs === true, extra = {};
+    if (audioPick) {
+        if (!(audioPick.stream >= 0) || audioPick.manualDirectPlay === true) return false;
+        audio = audioPick.stream;
+        if (useLocal && root.localSubStreamIndex >= 0) {
+            subtitle = root.localSubStreamIndex;
+            useLocal = false;
+        }
+        extra = _mergeExtra(extra, {
+            forceServerSeek: false, forceServerRemux: true, forceRetry: true,
+            forceDirectPlayInPlaybackInfo: false, forceDirectStreamInPlaybackInfo: false,
+            forceVideoStreamCopyInPlaybackInfo: true, forceAudioStreamCopyInPlaybackInfo: true,
+            forceExplicitServerProgressiveSeek: false, forceJellyfinTranscodingUrlCopyRemux: false,
+            forcePlaybackInfoAudioStreamIndex: audio
+        });
     }
-    root.selectedAudioStream = -1
-    root.selectedSubtitleStream = -1
-    root.effectiveAudioStream = -1
-    root.effectiveSubtitleStream = -1
-    root.manualDirectPlayMode = true
-    root.manualRemuxMode = false
-    root.manualQualityBitrate = 0
-    root.disableLocalSubsOverlay()
-    root.audioMenuVisible = false
-    // Nettoyer immédiatement les marqueurs hérités du remux/transcodage.
-    // baseOffsetMs reste intact jusqu'au résultat afin que l'horloge UI ne
-    // saute pas pendant le POST PlaybackInfo ; negotiateAndApply le remettra à
-    // zéro dès que le résultat DirectPlay pur sera confirmé.
-    root.lastUsedDirectStream = false
-    root.lastUsedTranscoding = false
-    root.lastUsedServerRemux = false
-    root.serverTimedStream = false
-    root.timeShifted = false
-    // Point clé : le Core voit un cold-start (0 ms), exactement comme un
-    // DirectPlay statique lancé dès le début. La position courante est gardée
-    // séparément et réappliquée après ouverture via forceInitialLocalSeekMs.
-    // Cela évite notamment fragileSeekRemux sur AVI/TS/MPEG/M2TS/VOB.
-    root.negotiatePlayback(0, false, false, false, false, {
-        forceRetry: true,
-        forceServerSeek: false,
-        forceServerRemux: false,
-        forceHlsOnDpSeekFallback: false,
-        forceDirectPlayInPlaybackInfo: true,
-        forceDirectStreamInPlaybackInfo: false,
-        forceSubtitleEncode: false,
-        preferImageSubtitleRemux: false,
-        forceFullRemuxForImageSubtitles: false,
-        manualDirectPlayOverride: true,
-        manualRemuxOverride: false,
-        preferFrenchAudio: false,
-        disableAutoFrenchAudio: true,
-        disableDefaultSubtitleRemux: true,
-        disableDefaultFrenchAudioOrderRemux: true,
-        disableImageSubtitleRiskRemux: true,
-        disableHevcMain10MkvRemux: true,
-        trackSwitchRebase: true,
-        trackSwitchUseZeroStart: true,
-        forceInitialLocalSeekMs: target
-    })
-    return true
+    if (subtitlePick) {
+        subtitle = subtitlePick.stream;
+        useLocal = false;
+        var type = _subtitleTypeForStream(root, subtitle);
+        extra = _mergeExtra(extra, {
+            forceServerSeek: false, forceServerRemux: true, forceRetry: true,
+            forceDirectPlayInPlaybackInfo: false, forceDirectStreamInPlaybackInfo: false,
+            forceVideoStreamCopyInPlaybackInfo: true, forceAudioStreamCopyInPlaybackInfo: true,
+            forceExplicitServerProgressiveSeek: false, forceJellyfinTranscodingUrlCopyRemux: false,
+            forceSubtitleEncode: false, forceTextSubtitleServerBurnIn: false,
+            preferServerSubtitleBurnInOnVideoTranscode: false,
+            preferExternalTextSubtitlesInRemux: false, allowLocalSubtitleOverlay: false,
+            preferImageSubtitleRemux: type === "image", forceFullRemuxForImageSubtitles: false,
+            disableDefaultSubtitleRemux: true, disableAutoVoFrenchFullSubtitle: !(subtitle >= 0)
+        });
+    }
+    extra = _mergeExtra(extra, _manualRemuxExtra(root));
+    var start = 0;
+    try { start = Math.max(0, Math.floor(_numberOr(root.keepUi(), 0))); }
+    catch(e0) {
+        try { start = Math.max(0, Math.floor(_numberOr(root.uiPositionMs(), 0))); }
+        catch(e1) {}
+    }
+    var ctx = makeCtx(root, {
+        selectedAudioStream: audio, selectedSubtitleStream: subtitle, useLocalSubs: useLocal,
+        disableAutoVoFrenchFullSubtitle: subtitlePick ? !(subtitle >= 0)
+                : root.disableAutoVoFrenchFullSubtitle === true
+    }, start, { preferTicks: true });
+    _copyOwn(ctx, extra);
+    ctx.serverUrl = String(root.serverUrl || "");
+    ctx.accessToken = String(root.accessToken || "");
+    ctx.userId = String(root.userId || "");
+    ctx.itemId = String(root.itemId || "");
+    ctx.startMs = start;
+    ctx.preferTicks = true;
+    ctx.selectedAudioStream = audio;
+    ctx.selectedSubtitleStream = subtitle;
+    ctx.useLocalSubs = useLocal;
+    var streamType = _subtitleTypeForStream(root, subtitle);
+    if (extra.selectedSubtitleIsText === undefined) ctx.selectedSubtitleIsText = streamType === "text";
+    if (extra.selectedSubtitleIsImage === undefined) ctx.selectedSubtitleIsImage = streamType === "image";
+    if (extra.currentPlaybackVideoTranscodeByPolicy === undefined)
+        ctx.currentPlaybackVideoTranscodeByPolicy = root.currentPlaybackVideoTranscodeByPolicy === true;
+    if (!PlayerSession.applyStickyManualRemux(root, ctx))
+        PlayerSession.applyStickyManualQuality(root, ctx);
+    ctx.playbackRuleMode = root.playbackRuleMode || "smart";
+    ctx.playbackRouterMode = root.playbackDeviceMode || "";
+    ctx.playbackRouterBackend = root.playbackBackendMode || "";
+    var seq = root._deferredPrefetchSeq;
+    try {
+        router.negotiatePlayback(ctx, function(res) {
+            if (seq !== root._deferredPrefetchSeq || !_deferredPauseActive(root)
+                    || deferredPrefetchKey(root) !== key || !res || !res.url) return;
+            root._deferredPrefetchResult = {
+                key: key, result: res, startMs: start, createdAt: _poNowMs()
+            };
+        }, function() {});
+    } catch(e2) { return false; }
+    return true;
+}
+function _takeDeferredPrefetch(root, key, start, event) {
+    if (!root || event !== "resume" || !key) return null;
+    var cached = root._deferredPrefetchResult;
+    if (!cached || cached.key !== key || !cached.result || !cached.result.url) return null;
+    var ttl = Math.max(5000, Math.floor(_numberOr(root.deferredPrefetchTtlMs, 60000)));
+    var age = Math.max(0, _poNowMs() - _numberOr(cached.createdAt, 0));
+    var delta = Math.abs(Math.floor(_numberOr(cached.startMs, 0))
+                         - Math.floor(_numberOr(start, 0)));
+    return age <= ttl && delta <= 1500 ? cached.result : null;
+}
+function mergeCoalescedNegotiationCall(previous, next) {
+    if (!previous) return next;
+    if (!next) return previous;
+    var merged = {
+        startMs: next.startMs, forceHls: next.forceHls === true,
+        preferTicks: next.preferTicks === true, forceMp4: next.forceMp4 === true,
+        forceDPOnAudioSwitch: next.forceDPOnAudioSwitch === true, extra: {}
+    };
+    var oldExtra = previous.extra || {}, newExtra = next.extra || {};
+    var keepAudioTransaction = oldExtra.audioSwitchTransaction === true, key;
+    for (key in oldExtra)
+        if (Object.prototype.hasOwnProperty.call(oldExtra, key)) merged.extra[key] = oldExtra[key];
+    for (key in newExtra) {
+        if (!Object.prototype.hasOwnProperty.call(newExtra, key)) continue;
+        if (keepAudioTransaction && (key === "audioSwitchTransaction"
+                || key.indexOf("previous") === 0)) continue;
+        merged.extra[key] = newExtra[key];
+    }
+    return merged;
+}
+function coalesceNegotiationIfActive(root, startMs, forceHls, preferTicks,
+                                     forceMp4, forceDPOnAudioSwitch, extra) {
+    if (!root || root._coalescedNegotiationActive !== true) return false;
+    root._coalescedNegotiationCall = mergeCoalescedNegotiationCall(root._coalescedNegotiationCall, {
+        startMs: Math.max(0, Math.floor(_numberOr(startMs, 0))),
+        forceHls: forceHls === true, preferTicks: preferTicks === true,
+        forceMp4: forceMp4 === true, forceDPOnAudioSwitch: forceDPOnAudioSwitch === true,
+        extra: extra || {}
+    });
+    return true;
+}
+function beginCoalescedNegotiation(root) {
+    root._coalescedNegotiationActive = true;
+    root._coalescedNegotiationCall = null;
+}
+function endCoalescedNegotiation(root) {
+    root._coalescedNegotiationActive = false;
+    var call = root._coalescedNegotiationCall || null;
+    root._coalescedNegotiationCall = null;
+    return call;
+}
+function _replayOneDeferredPick(root, pick) {
+    if (!pick || !pick.value) return;
+    if (pick.kind === _K_AUDIO)
+        handleAudioPick(root, pick.value.stream, pick.value.uiIndex,
+                        pick.value.manualDirectPlay === true);
+    else if (pick.kind === _K_SUBTITLE)
+        switchServerSubtitleStable(root, "deferred-subtitle", pick.value.stream, pick.value.uiIndex);
+    else if (pick.kind === _K_QUALITY) {
+        try { root._applyQualityChoice(pick.value.value); } catch(e0) {}
+    }
+}
+function replayDeferredReload(root, mp, options) {
+    if (!root || !mp || root._tearingDownPlayer) return false;
+    options = options || {};
+    var event = options.event === "seek" ? "seek" : "resume";
+    var key = deferredPrefetchKey(root), snapshot = root._deferredPrefetchResult || null;
+    var picks = _pendingPicks(root);
+    if (!picks.length) return false;
+    root._deferredReloadState = { audio: null, subtitle: null, quality: null };
+    clearDeferredReloadUi(root);
+    root._deferredReloadReplaying = true;
+    root._forceResumeAfterDeferredReload = options.forceResume === true;
+    beginCoalescedNegotiation(root);
+    try {
+        for (var i = 0; i < picks.length; i++) _replayOneDeferredPick(root, picks[i]);
+    } catch(e0) {}
+    var call = endCoalescedNegotiation(root);
+    var target = Math.floor(_numberOr(options.targetUiMs, -1));
+    if (call && root._internalDirectPlayReload !== true) {
+        if (target >= 0) _retargetQueuedAudioSwitch(root, target, options.forceResume === true);
+        call.extra = _mergeExtra(call.extra, { deferredReplay: true });
+        var start = target >= 0 ? target : call.startMs;
+        if (target < 0 && snapshot && root._deferredPrefetchResult === snapshot) {
+            var ready = _takeDeferredPrefetch(root, key, start, event);
+            if (ready) call.extra = _mergeExtra(call.extra, { _prefetchedResult: ready });
+        }
+        try {
+            if (typeof root._invalidateDeferredPrefetch === "function")
+                root._invalidateDeferredPrefetch("replay");
+        } catch(e1) {}
+        try {
+            root.negotiatePlayback(start, call.forceHls, call.preferTicks,
+                                   call.forceMp4, call.forceDPOnAudioSwitch, call.extra);
+        } catch(e2) {}
+    }
+    root._deferredReloadReplaying = false;
+    root._forceResumeAfterDeferredReload = false;
+    try { root._syncTrackMenuIndexes("deferred-replay"); } catch(e3) {}
+    return true;
+}
+function resumeDeferredReload(root, mp, reason) {
+    return replayDeferredReload(root, mp, {
+        event: "resume", forceResume: true, targetUiMs: -1, reason: reason
+    });
+}
+function seekDeferredReload(root, mp, targetUiMs, reason, forceResume) {
+    return replayDeferredReload(root, mp, {
+        event: "seek", forceResume: forceResume === true,
+        targetUiMs: targetUiMs, reason: reason
+    });
 }
 function _audioSwitchTransactionExtra(root) {
     return {
@@ -1519,15 +1318,12 @@ function handleAudioPick(root, streamIdx, uiIdx, explicitManualDirectPlay, targe
     var keepManualRemux = root.manualRemuxMode === true
     var queuedResume = (targetUiOverride !== undefined && targetUiOverride !== null)
             ? root._wasPlayingBeforeSwitch === true : false
-    // Un appel interne sans piste explicite doit rester côté serveur lorsqu'un
     // Remux manuel est actif. Le menu Audio visible ne fabrique plus de ligne Auto.
     if (keepManualRemux && !serverPick) {
         serverPick = true
         streamIdx = -1
     }
     // Après un échec de seek DirectPlay constaté sur ce média, l'entrée Auto
-    // ne doit plus relancer le fichier statique. Cette garde ne concerne pas
-    // le Remux manuel, qui est justement un mode serveur.
     if (explicitManualDirectPlay !== true && !keepManualRemux && !serverPick &&
             typeof root._guardUnsafeManualDirectPlayRequest === "function" &&
             root._guardUnsafeManualDirectPlayRequest(k, "audio-auto-directplay-unsafe")) {
@@ -1536,8 +1332,6 @@ function handleAudioPick(root, streamIdx, uiIdx, explicitManualDirectPlay, targe
         return false
     }
     // Pendant un scrub réseau, ne jamais modifier l'état audio "validé" avant
-    // d'avoir effectivement renégocié la source. La demande est consommée par
-    // commitScrub() avec la position finale, en une seule négociation Jellyfin.
     if (root.scrubActive) {
         root._pendingAudioStream = serverPick ? streamIdx : -1
         root._pendingAudioIndex = uiIdx
@@ -1546,13 +1340,21 @@ function handleAudioPick(root, streamIdx, uiIdx, explicitManualDirectPlay, targe
         root.resetControlsTimer()
         return true
     }
-
+    // PlaybackInfo, ni transcodage, ni changement d'état UI. Le rejeu issu du
+    if (targetUiOverride === undefined || targetUiOverride === null) {
+        var pick = _audioSelection(serverPick ? streamIdx : -1, uiIdx,
+                                     explicitManualDirectPlay === true)
+        if (decideSettingChange(root, pick, currentAudioSelection(root)) !== "applyNow") {
+            root.audioMenuVisible = false
+            root.resetControlsTimer()
+            return true
+        }
+    }
     var transaction = _audioSwitchTransactionExtra(root)
     root.audioIndex = uiIdx
     k = root._beginTrackSwitchRebase("audio", !serverPick)
     var overriddenTarget = _retargetQueuedAudioSwitch(root, targetUiOverride, queuedResume)
     if (overriddenTarget >= 0) k = overriddenTarget
-
     if (!serverPick) {
         root._autoLocalizeSubStream = -1
         if (root.selectedSubtitleStream >= 0) {
@@ -1603,7 +1405,6 @@ function handleAudioPick(root, streamIdx, uiIdx, explicitManualDirectPlay, targe
             forceVideoStreamCopyInPlaybackInfo: true, forceAudioStreamCopyInPlaybackInfo: true,
             // Redondant avec selectedAudioStream, volontairement : le POST
             // PlaybackInfo reçoit ainsi toujours l'index explicite même si un
-            // état UI change pendant la construction du contexte.
             forcePlaybackInfoAudioStreamIndex: streamIdx
         }, transaction), _manualRemuxExtra(root))
         root.negotiatePlayback(k, false, true, false, false, extra)
@@ -1612,6 +1413,13 @@ function handleAudioPick(root, streamIdx, uiIdx, explicitManualDirectPlay, targe
     return true
 }
 function switchServerSubtitleStable(root, reason, streamIdx, listIdx) {
+    // Même règle que pour l'audio : la ligne déjà cochée est un no-op complet.
+    if (decideSettingChange(root, _subtitleSelection(streamIdx, listIdx),
+                            currentSubtitleSelection(root)) !== "applyNow") {
+        root.subMenuVisible = false
+        root.resetControlsTimer()
+        return
+    }
     root._localSubtitlePickSeq++
     root.disableLocalSubsOverlay()
     root._autoLocalizeSubStream = -1
@@ -1634,7 +1442,6 @@ function switchServerSubtitleStable(root, reason, streamIdx, listIdx) {
         forceServerSeek: false, forceServerRemux: true, forceRetry: true,
         forceDirectPlayInPlaybackInfo: false, forceDirectStreamInPlaybackInfo: false,
         forceVideoStreamCopyInPlaybackInfo: true, forceAudioStreamCopyInPlaybackInfo: true,
-        // Texte serveur : Embed par défaut, jamais External/local implicitement.
         forceSubtitleEncode: false,
         forceTextSubtitleServerBurnIn: false,
         preferServerSubtitleBurnInOnVideoTranscode: false,
@@ -1650,6 +1457,9 @@ function switchServerSubtitleStable(root, reason, streamIdx, listIdx) {
 }
 function handleSubsOff(root) {
     if (!root.isDsLike()) {
+        // Coupure purement locale : instantanée, même en pause. Elle rend
+        // caduque une éventuelle attente de sous-titre serveur.
+        cancelDeferredReload(root, _K_SUBTITLE, "subs-off-local");
         root._localSubtitlePickSeq++; root.subtitleIndex = 0; root.selectedSubtitleStream = -1;
         if (root.hasOwnProperty("disableAutoVoFrenchFullSubtitle")) root.disableAutoVoFrenchFullSubtitle = true;
         root.effectiveSubtitleStream = -1; root._autoLocalizeSubStream = -1;
@@ -1661,14 +1471,13 @@ function handleSubsOff(root) {
 function handleSubsText(root, item, streamIdx, listIdx) {
     // Contrat ReDeFin :
     //   - DirectPlay pur => overlay local QML
-    //   - remux / DirectStream / transcode / HLS / server-timed => serveur
-    //
-    // Cela évite de superposer une horloge QML locale à un flux que Jellyfin a
-    // déjà resynchronisé/reconstruit côté serveur.
     if (!isPureDirectPlay(root)) {
         switchServerSubtitleStable(root, "subsTextServer", streamIdx, listIdx);
         return;
     }
+    // Overlay texte local en DirectPlay pur : aucune négociation, donc aucun
+    // report en pause. L'attente serveur éventuelle est annulée.
+    cancelDeferredReload(root, _K_SUBTITLE, "subs-text-local");
     if (root.hasOwnProperty("disableAutoVoFrenchFullSubtitle")) root.disableAutoVoFrenchFullSubtitle = false;
     var seq = ++root._localSubtitlePickSeq;
     var old = { index: root.subtitleIndex, selected: root.selectedSubtitleStream, effective: root.effectiveSubtitleStream,
@@ -1727,7 +1536,11 @@ function beginTrackSwitchRebase(root, mp, forceLocalSeek) {
     root._trackSwitchRebaseSeq++;
     root._trackSwitchAnchorUiMs = p;
     root._trackSwitchAnchorWallMs = _poNowMs();
-    root._trackSwitchWasPlaying = (mp.playbackState === root._mpPlayingState);
+    // Le rejeu d'un réglage différé est déclenché PAR la reprise : la lecture
+    // n'a pas encore repris au moment où l'on capture l'état, mais la
+    // négociation doit se terminer en lecture.
+    root._trackSwitchWasPlaying = (mp.playbackState === root._mpPlayingState) ||
+                                  root._forceResumeAfterDeferredReload === true;
     root._trackSwitchSettleTicks = 0;
     root._trackSwitchForceLocalSeek = (forceLocalSeek !== false);
     root._trackSwitchLocalSeekMs = p;
@@ -1793,7 +1606,11 @@ function completeSeekRestoreVerified(root, seekTimer, resumeTimer, targetUi) {
     if (root._wasPlayingBeforeSwitch && track) {
         root._trackSwitchResumeAfterVerified = true;
         resumeTimer.restart();
+        return;
     }
+    // Restauration vérifiée sans reprise de lecture : la gate armée par
+    // mediaUrlSwap/beginFreshDirectPlayReset n'a plus aucun chemin de sortie.
+    releaseVideoLoadingWhenPaused(root, "seek-restore-verified-paused");
 }
 function abandonBootSeekRestoreWithoutReload(root,seekTimer,targetUi,reason){
     root._pendingSeekMs=-1; resetSeekRestoreState(root,null); try{seekTimer.stop();}catch(e0){}
@@ -1915,6 +1732,21 @@ function cancelHardSourceReset(root, timer) {
     root._sourceResetPlayRetries = 0;
     root._pendingHardResetBaseMs = -1;
 }
+/*
+ * Filet de sécurité du loader vidéo.
+ *
+ * _scheduleVideoLoadingRelease() et les libérations « position-progress » /
+ * « state-playing » exigent toutes l'état Playing. Un rechargement qui se
+ * termine volontairement en pause (changement de piste, de sous-titre ou de
+ * qualité effectué pendant une pause) ne repasse donc jamais par ces chemins :
+ * la gate doit être libérée explicitement, sinon le spinner reste affiché
+ * au-dessus d'une image déjà décodée.
+ */
+function releaseVideoLoadingWhenPaused(root, reason) {
+    if (!root || typeof root._releaseVideoLoading !== "function") return false;
+    try { root._releaseVideoLoading(reason || "ready-paused"); } catch(e0) { return false; }
+    return true;
+}
 function completeFreshSourceResetState(root, timer, subtitleItem) {
     root._sourceResetActive = false;
     root._sourceResetPhase = 0;
@@ -1938,7 +1770,15 @@ function completeFreshServerTimedSource(root,mp,timer,subtitleItem){
     root.baseOffsetMs=expected; root._pendingServerTimedBaseMs=-1; root._pendingHardResetBaseMs=-1;
     root.serverTimedStream=true; root.timeShifted=expected>0; root._trackSwitchTimebaseVerified=true;
     completeFreshSourceResetState(root,timer,subtitleItem);
-    if(resume){if(mp.playbackState!==root._mpPlayingState){try{mp.play();}catch(e0){}}}else{try{mp.pause();}catch(e1){}}
+    if(resume){if(mp.playbackState!==root._mpPlayingState){try{mp.play();}catch(e0){}}}
+    else{
+        try{mp.pause();}catch(e1){}
+        // La lecture était en pause avant le rechargement : on restaure la pause,
+        // mais toutes les libérations de la gate de chargement exigent l'état
+        // Playing. Sans libération explicite ici, le loader resterait affiché
+        // indéfiniment par-dessus une vidéo pourtant prête.
+        releaseVideoLoadingWhenPaused(root,"fresh-source-ready-paused");
+    }
     root.updateClocksFromPlaybackThrottled(true);
 }
 function beginHardSourceReset(root, mp, timer, audioGateTimer, startupTimer,
@@ -2052,46 +1892,95 @@ function completeFreshDirectPlaySource(root, mp, timer, seekTimer, subtitleItem)
     root._scheduleVideoLoadingRelease("fresh-directplay-reset-complete");
     if (resume && mp.playbackState !== root._mpPlayingState) {
         try { mp.play(); } catch(e3) {}
+    } else if (!resume) {
+        // Même défaut que le reset server-timed : sans reprise de lecture,
+        // aucune libération automatique de la gate n'arrive jamais.
+        releaseVideoLoadingWhenPaused(root, "fresh-directplay-ready-paused");
     }
 }
-function tickSourceReset(root,mp,timer,seekTimer,subtitleItem){
-    if(!root._sourceResetActive){timer.stop();return;} var now=_poNowMs(),mode=String(root._sourceResetMode||"server-timed");
-    if(root._sourceResetPhase===1){
-        var cleared=mp.playbackState===root._mpStoppedState&&mp.status===root._mpNoMedia;
-        if(!cleared&&now-root._sourceResetStartedWallMs<root.sourceResetClearTimeoutMs)return;
-        root._sourceResetPhase=2; root._sourceResetAssignedWallMs=now;
-        root._pendingServerTimedBaseMs=-1; root._pendingHardResetBaseMs=-1;
-        if(mode==="directplay-local"){
-            root.baseOffsetMs=0;root.serverTimedStream=false;root.timeShifted=false;
-        }else{
-            root.baseOffsetMs=Math.max(0,Math.floor(Number(root._sourceResetExpectedUiMs||0)));
-            root.serverTimedStream=true;root.timeShifted=root.baseOffsetMs>0;
-        }
-        root.mediaUrl=root._sourceResetPendingUrl; root._setMediaPlayerSource(root.mediaUrl,mode==="directplay-local"?"fresh-directplay-source":"hard-reset-fresh-source");
-        try{mp.play();}catch(e0){} return;
+function tickSourceReset(root, mp, timer, seekTimer, subtitleItem) {
+    if (!root._sourceResetActive) {
+        timer.stop();
+        return;
     }
-    if(root._sourceResetPhase!==2)return;
-    var elapsed=now-root._sourceResetAssignedWallMs,ready=mp.status===root._mpBuffered||mp.status===root._mpLoaded;
-    var local=Math.max(0,Math.floor(Number(mp.position||0))); if(ready&&root._sourceResetReadyWallMs<=0)root._sourceResetReadyWallMs=now;
-    if(mode==="directplay-local"){
-        if(ready&&(local>0||mp.playbackState===root._mpPlayingState)){
-            completeFreshDirectPlaySource(root,mp,timer,seekTimer,subtitleItem);return;
+
+    var now = _poNowMs();
+    var mode = String(root._sourceResetMode || "server-timed");
+
+    if (root._sourceResetPhase === 1) {
+        var cleared = mp.playbackState === root._mpStoppedState
+                   && mp.status === root._mpNoMedia;
+        if (!cleared && now - root._sourceResetStartedWallMs < root.sourceResetClearTimeoutMs)
+            return;
+
+        root._sourceResetPhase = 2;
+        root._sourceResetAssignedWallMs = now;
+        root._pendingServerTimedBaseMs = -1;
+        root._pendingHardResetBaseMs = -1;
+
+        if (mode === "directplay-local") {
+            root.baseOffsetMs = 0;
+            root.serverTimedStream = false;
+            root.timeShifted = false;
+        } else {
+            root.baseOffsetMs = Math.max(0, Math.floor(Number(root._sourceResetExpectedUiMs || 0)));
+            root.serverTimedStream = true;
+            root.timeShifted = root.baseOffsetMs > 0;
         }
-        if(ready&&mp.playbackState===root._mpStoppedState&&elapsed>=root.sourceResetStartRetryMs&&root._sourceResetPlayRetries<1){
-            root._sourceResetPlayRetries++;try{mp.play();}catch(e1){}return;
+
+        root.mediaUrl = root._sourceResetPendingUrl;
+        root._setMediaPlayerSource(
+            root.mediaUrl,
+            mode === "directplay-local" ? "fresh-directplay-source" : "hard-reset-fresh-source"
+        );
+        try { mp.play(); } catch(e0) {}
+        return;
+    }
+
+    if (root._sourceResetPhase !== 2) return;
+
+    var elapsed = now - root._sourceResetAssignedWallMs;
+    var ready = mp.status === root._mpBuffered || mp.status === root._mpLoaded;
+    var local = Math.max(0, Math.floor(Number(mp.position || 0)));
+    if (ready && root._sourceResetReadyWallMs <= 0)
+        root._sourceResetReadyWallMs = now;
+
+    if (mode === "directplay-local") {
+        if (ready && (local > 0 || mp.playbackState === root._mpPlayingState)) {
+            completeFreshDirectPlaySource(root, mp, timer, seekTimer, subtitleItem);
+            return;
+        }
+        if (ready
+                && mp.playbackState === root._mpStoppedState
+                && elapsed >= root.sourceResetStartRetryMs
+                && root._sourceResetPlayRetries < 1) {
+            root._sourceResetPlayRetries++;
+            try { mp.play(); } catch(e1) {}
+            return;
         }
         // En timeout, ne retransformer surtout pas le DP en flux server-timed.
         // On libère le reset et laisse seekRestore/fallback décider proprement.
-        if(elapsed>=root.sourceResetStartTimeoutMs){
-            completeFreshDirectPlaySource(root,mp,timer,seekTimer,subtitleItem);return;
+        if (elapsed >= root.sourceResetStartTimeoutMs) {
+            completeFreshDirectPlaySource(root, mp, timer, seekTimer, subtitleItem);
+            return;
         }
         return;
     }
-    if(ready&&(local>0||mp.playbackState===root._mpPlayingState)){root._commitFreshServerTimedSource("fresh-pipeline-progress");return;}
-    if(ready&&mp.playbackState===root._mpStoppedState&&elapsed>=root.sourceResetStartRetryMs&&root._sourceResetPlayRetries<1){
-        root._sourceResetPlayRetries++;try{mp.play();}catch(e2){}return;
+
+    if (ready && (local > 0 || mp.playbackState === root._mpPlayingState)) {
+        root._commitFreshServerTimedSource("fresh-pipeline-progress");
+        return;
     }
-    if(elapsed>=root.sourceResetStartTimeoutMs)root._finishFreshServerTimedSourceTimeout("startup-timeout");
+    if (ready
+            && mp.playbackState === root._mpStoppedState
+            && elapsed >= root.sourceResetStartRetryMs
+            && root._sourceResetPlayRetries < 1) {
+        root._sourceResetPlayRetries++;
+        try { mp.play(); } catch(e2) {}
+        return;
+    }
+    if (elapsed >= root.sourceResetStartTimeoutMs)
+        root._finishFreshServerTimedSourceTimeout("startup-timeout");
 }
 /* ===== DirectPlay statique / remux de secours ===== */
 function isCurrentItemDirectPlaySeekUnsafe(root) {
@@ -2285,216 +2174,237 @@ function recoverFromMediaError(root,mp,watchTimer,guardTimer){
     armFrozenPlaybackWatch(root,mp,watchTimer,"postMediaErrorRecovery",root.frozenPlaybackWatchWindowMs);
 }
 /* ===== Source, seek et négociation ===== */
-function _timerStop(t){try{if(t&&t.stop)t.stop();}catch(e){}}
-function _timerRestart(t){try{if(t&&t.restart)t.restart();else if(t&&t.start)t.start();}catch(e){}}
-function mediaUrlSwap(root,mp,timers,subtitleItem,u,resume){
-    root._armVideoLoading("media-url-swap");var first=(!root.mediaUrl||root.mediaUrl.length===0)&&!root._sourceResetActive;
-    var should=!!resume||first;
-    var freshManualStaticDp = root.manualDirectPlayMode===true &&
-        root._trackSwitchVerificationActive===true && root._pendingSeekMs>=0 &&
-        urlKind(u||"")==="http-dp-static";
-    if(freshManualStaticDp && typeof root._beginFreshDirectPlayReset==="function"){
-        root._beginFreshDirectPlayReset(u,should,root._pendingSeekMs);return;
+function _timerStop(t) {
+    try {
+        if (t && t.stop) t.stop();
+    } catch(e) {}
+}
+
+function _timerRestart(t) {
+    try {
+        if (t && t.restart) t.restart();
+        else if (t && t.start) t.start();
+    } catch(e) {}
+}
+
+function mediaUrlSwap(root, mp, timers, subtitleItem, u, resume) {
+    var first = (!root.mediaUrl || root.mediaUrl.length === 0) && !root._sourceResetActive;
+    root._armVideoLoading(first ? "media-url-first" : "media-url-swap");
+
+    var shouldResume = !!resume || first;
+    var freshManualStaticDp = root.manualDirectPlayMode === true
+        && root._trackSwitchVerificationActive === true
+        && root._pendingSeekMs >= 0
+        && urlKind(u || "") === "http-dp-static";
+
+    if (freshManualStaticDp && typeof root._beginFreshDirectPlayReset === "function") {
+        root._beginFreshDirectPlayReset(u, shouldResume, root._pendingSeekMs);
+        return;
     }
-    if(root._pendingHardResetBaseMs>=0){root._beginHardSourceReset(u,should);return;}
-    root._gateArmed=true;root._resumeAfterGate=should;root._startupPlayWanted=should;root._startupPlayTries=0;
-    root._directPlayOpenStartedWallMs=urlKind(u||"")==="http-dp-static"?root._nowMs():0;
-    if(subtitleItem)subtitleItem.gateArmed=true;if(root.mediaUrl!==u)root.mediaUrl=u;try{mp.stop();}catch(e0){}
-    if(root._pendingServerTimedBaseMs>=0){root.baseOffsetMs=Math.max(0,Math.floor(Number(root._pendingServerTimedBaseMs||0)));root._pendingServerTimedBaseMs=-1;}
-    root._setMediaPlayerSource(root.mediaUrl,"mediaUrlSwap");
+    if (root._pendingHardResetBaseMs >= 0) {
+        root._beginHardSourceReset(u, shouldResume);
+        return;
+    }
+
+    root._gateArmed = true;
+    root._resumeAfterGate = shouldResume;
+    root._startupPlayWanted = shouldResume;
+    root._startupPlayTries = 0;
+    root._directPlayOpenStartedWallMs = urlKind(u || "") === "http-dp-static" ? root._nowMs() : 0;
+
+    if (subtitleItem) subtitleItem.gateArmed = true;
+    if (root.mediaUrl !== u) root.mediaUrl = u;
+    try { mp.stop(); } catch(e0) {}
+
+    if (root._pendingServerTimedBaseMs >= 0) {
+        root.baseOffsetMs = Math.max(0, Math.floor(Number(root._pendingServerTimedBaseMs || 0)));
+        root._pendingServerTimedBaseMs = -1;
+    }
+
+    root._setMediaPlayerSource(root.mediaUrl, "mediaUrlSwap");
     try { mp.play(); } catch(e1) {}
-    if(!should){if(root._trackSwitchVerificationActive&&root._pendingSeekMs>=0){root._seekRestorePhase=0;root._seekRestorePrimeWallMs=0;root._seekRestorePauseWallMs=0;}
-        else{try{mp.pause();}catch(e2){}}}else _timerRestart(timers&&timers.startup);
-    if(timers&&timers.audioGate){timers.audioGate.interval=root.audioGateMsDefault;_timerRestart(timers.audioGate);}
+
+    if (!shouldResume) {
+        if (root._trackSwitchVerificationActive && root._pendingSeekMs >= 0) {
+            root._seekRestorePhase = 0;
+            root._seekRestorePrimeWallMs = 0;
+            root._seekRestorePauseWallMs = 0;
+        } else {
+            try { mp.pause(); } catch(e2) {}
+        }
+    } else {
+        _timerRestart(timers && timers.startup);
+    }
+
+    if (timers && timers.audioGate) {
+        timers.audioGate.interval = root.audioGateMsDefault;
+        _timerRestart(timers.audioGate);
+    }
 }
-function retrySeekRestoreWithJellyfinCopyRemux(root,mp,timers,targetUi,reason){
-    if(!root._seekRestoreIsTrueTrackSwitch()){var tol=root._seekRestoreToleranceMs();
-        if(root._seekRestoreBestDiffMs<=tol&&root._seekRestoreBestLocalMs>=0)root._completeSeekRestoreVerified(targetUi,root._seekRestoreBestLocalMs,root._seekRestoreBestDiffMs,"best-sample-before-boot-fallback");
-        else root._abandonBootSeekRestoreWithoutReload(targetUi,reason||"boot-seek-no-track-fallback");return;}
-    if(isStaticDirectPlaySource(root)&&root.manualDirectPlayMode){fallbackStaticDirectPlayToServerRemux(root,mp,timers,targetUi,reason||"manual-directplay-local-seek-ignored");return;}
-    if(root._trackSwitchFragileHevc()){root._failTrackSwitchExactSeek(reason||"fragile-hevc-local-seek-ignored");return;}
-    if(root._trackSwitchLocalStrategy<2){root._trackSwitchLocalStrategy=2;root._seekRestoreAttempts=0;root._seekRestoreLastTargetMs=-1;
-        root._seekRestoreLastCallWallMs=0;root._seekRestoreAwaitingResult=false;root._seekRestoreStableSamples=0;root._seekRestoreReadyWallMs=0;
-        root._seekRestorePrimeWallMs=0;root._seekRestorePauseWallMs=0;root._seekRestorePhase=0;root._pendingSeekMs=-1;
-        root.baseOffsetMs=0;root.serverTimedStream=false;root.timeShifted=false;
-        root.negotiatePlayback(targetUi,false,false,false,false,{trackSwitchRebase:true,trackSwitchColdLocalSeek:true,
-            trackSwitchLocalStrategy:2,forceJellyfinTranscodingUrlCopyRemux:true,forceServerSeek:false,
-            forceServerRemux:false,forceHlsOnDpSeekFallback:false,forceRetry:true});return;}
-    root._failTrackSwitchExactSeek(reason||"local-seek-ignored");
+
+function retrySeekRestoreWithJellyfinCopyRemux(root, mp, timers, targetUi, reason) {
+    if (!root._seekRestoreIsTrueTrackSwitch()) {
+        var tol = root._seekRestoreToleranceMs();
+        if (root._seekRestoreBestDiffMs <= tol && root._seekRestoreBestLocalMs >= 0) {
+            root._completeSeekRestoreVerified(
+                targetUi,
+                root._seekRestoreBestLocalMs,
+                root._seekRestoreBestDiffMs,
+                "best-sample-before-boot-fallback"
+            );
+        } else {
+            root._abandonBootSeekRestoreWithoutReload(targetUi, reason || "boot-seek-no-track-fallback");
+        }
+        return;
+    }
+
+    if (isStaticDirectPlaySource(root) && root.manualDirectPlayMode) {
+        fallbackStaticDirectPlayToServerRemux(
+            root, mp, timers, targetUi, reason || "manual-directplay-local-seek-ignored"
+        );
+        return;
+    }
+    if (root._trackSwitchFragileHevc()) {
+        root._failTrackSwitchExactSeek(reason || "fragile-hevc-local-seek-ignored");
+        return;
+    }
+
+    if (root._trackSwitchLocalStrategy < 2) {
+        root._trackSwitchLocalStrategy = 2;
+        root._seekRestoreAttempts = 0;
+        root._seekRestoreLastTargetMs = -1;
+        root._seekRestoreLastCallWallMs = 0;
+        root._seekRestoreAwaitingResult = false;
+        root._seekRestoreStableSamples = 0;
+        root._seekRestoreReadyWallMs = 0;
+        root._seekRestorePrimeWallMs = 0;
+        root._seekRestorePauseWallMs = 0;
+        root._seekRestorePhase = 0;
+        root._pendingSeekMs = -1;
+        root.baseOffsetMs = 0;
+        root.serverTimedStream = false;
+        root.timeShifted = false;
+        root.negotiatePlayback(targetUi, false, false, false, false, {
+            trackSwitchRebase: true,
+            trackSwitchColdLocalSeek: true,
+            trackSwitchLocalStrategy: 2,
+            forceJellyfinTranscodingUrlCopyRemux: true,
+            forceServerSeek: false,
+            forceServerRemux: false,
+            forceHlsOnDpSeekFallback: false,
+            forceRetry: true
+        });
+        return;
+    }
+
+    root._failTrackSwitchExactSeek(reason || "local-seek-ignored");
 }
-function serverSeekFallback(root,mp,timers,targetUi,reason){
-    targetUi=root._clampUi(targetUi);root.lastUiTargetMs=targetUi;root.showScrubPreview(targetUi);
-    if(isStaticDirectPlaySource(root)&&!root._mediaSeekable()){
-        if(fallbackStaticDirectPlayToServerRemux(root,mp,timers,targetUi,reason||"static-directplay-unseekable"))return;}
-    root._resumeWantedAfterNegotiation=root._wasPlayingBeforeSwitch||mp.playbackState===root._mpPlayingState;
-    var hls=false,remux=root.lastUsedServerRemux||root.serverTimedStream||root.timeShifted||root.baseOffsetMs>0;
-    if(root.isHls&&root.lastUsedTranscoding&&!remux)hls=true;
-    root.negotiatePlayback(targetUi,hls,true,false,false,{forceServerSeek:true,forceServerRemux:!hls,forceHlsOnDpSeekFallback:false,forceRetry:true});
+
+function serverSeekFallback(root, mp, timers, targetUi, reason) {
+    targetUi = root._clampUi(targetUi);
+    root.lastUiTargetMs = targetUi;
+    root.showScrubPreview(targetUi);
+
+    if (isStaticDirectPlaySource(root) && !root._mediaSeekable()) {
+        if (fallbackStaticDirectPlayToServerRemux(
+                root, mp, timers, targetUi, reason || "static-directplay-unseekable"))
+            return;
+    }
+
+    root._resumeWantedAfterNegotiation = root._wasPlayingBeforeSwitch
+        || mp.playbackState === root._mpPlayingState;
+    var hls = false;
+    var remux = root.lastUsedServerRemux
+        || root.serverTimedStream
+        || root.timeShifted
+        || root.baseOffsetMs > 0;
+    if (root.isHls && root.lastUsedTranscoding && !remux) hls = true;
+
+    root.negotiatePlayback(targetUi, hls, true, false, false, {
+        forceServerSeek: true,
+        forceServerRemux: !hls,
+        forceHlsOnDpSeekFallback: false,
+        forceRetry: true
+    });
 }
-function localSeekTo(root,mp,timers,targetUi,reason){
-    targetUi=root._clampUi(targetUi);root.lastUiTargetMs=targetUi;var local=Math.max(0,targetUi-root.baseOffsetMs);
-    if(mp.duration>0)local=Math.min(local,mp.duration);
-    try{root._seekLocalPosition(local);root.updateClocksFromPlayback();return true;}
-    catch(e){serverSeekFallback(root,mp,timers,targetUi,(reason||"localSeek")+":seek-error");return false;}
+
+function localSeekTo(root, mp, timers, targetUi, reason) {
+    targetUi = root._clampUi(targetUi);
+    root.lastUiTargetMs = targetUi;
+    var local = Math.max(0, targetUi - root.baseOffsetMs);
+    if (mp.duration > 0) local = Math.min(local, mp.duration);
+
+    try {
+        root._seekLocalPosition(local);
+        root.updateClocksFromPlayback();
+        return true;
+    } catch(e) {
+        serverSeekFallback(root, mp, timers, targetUi, (reason || "localSeek") + ":seek-error");
+        return false;
+    }
 }
-function seekToChapter(root,mp,timers,targetUi){
-    if(!root||!mp||root._tearingDownPlayer)return false;targetUi=root._clampUi(Math.max(0,Math.floor(Number(targetUi||0))));
-    try{if(timers&&timers.scrubCommit)timers.scrubCommit.stop();}catch(e0){}root.scrubActive=false;root.scrubAccumUiMs=-1;root._scrubCommitTargetUiMs=-1;
-    if(root._pendingSeekMs>=0){root._pendingSeekMs=targetUi;root.lastUiTargetMs=targetUi;root.showScrubPreview(targetUi);return true;}
-    var resume=mp.playbackState===root._mpPlayingState;root._wasPlayingBeforeSwitch=resume;root.lastUiTargetMs=targetUi;root.showScrubPreview(targetUi);
-    if(root.shouldNetworkSeek&&root.shouldNetworkSeek()){try{mp.pause();}catch(e1){}root._resumeWantedAfterNegotiation=resume;serverSeekFallback(root,mp,timers,targetUi,"chapter-carousel");return true;}
-    var ok=localSeekTo(root,mp,timers,targetUi,"chapter-carousel");if(resume){try{mp.play();}catch(e2){}}return ok;
+
+function seekToChapter(root, mp, timers, targetUi) {
+    if (!root || !mp || root._tearingDownPlayer) return false;
+    targetUi = root._clampUi(Math.max(0, Math.floor(Number(targetUi || 0))));
+
+    try {
+        if (timers && timers.scrubCommit) timers.scrubCommit.stop();
+    } catch(e0) {}
+    root.scrubActive = false;
+    root.scrubAccumUiMs = -1;
+    root._scrubCommitTargetUiMs = -1;
+
+    if (root._pendingSeekMs >= 0) {
+        root._pendingSeekMs = targetUi;
+        root.lastUiTargetMs = targetUi;
+        root.showScrubPreview(targetUi);
+        return true;
+    }
+
+    var resume = mp.playbackState === root._mpPlayingState;
+    root._wasPlayingBeforeSwitch = resume;
+    root.lastUiTargetMs = targetUi;
+    root.showScrubPreview(targetUi);
+
+    if (root.shouldNetworkSeek && root.shouldNetworkSeek()) {
+        try { mp.pause(); } catch(e1) {}
+        root._resumeWantedAfterNegotiation = resume;
+        // Un réglage différé doit voyager avec la renégociation du chapitre :
+        // une seule négociation, à la position du chapitre.
+        if (seekDeferredReload(root, mp, targetUi, "chapter-carousel", resume)) return true;
+        serverSeekFallback(root, mp, timers, targetUi, "chapter-carousel");
+        return true;
+    }
+
+    var ok = localSeekTo(root, mp, timers, targetUi, "chapter-carousel");
+    if (resume) {
+        try { mp.play(); } catch(e2) {}
+    }
+    return ok;
 }
-function negotiationErrorCode(err){
-    var code="";try{if(typeof err==="string")code=err;else if(err&&err.code!==undefined)code=String(err.code);else if(err&&err.message!==undefined)code=String(err.message);}catch(e0){}
-    code=String(code||"network_error").toLowerCase().replace(/^error[:\s]*/i,"");
-    if(code.indexOf("insecure_transport")>=0)return"insecure_transport";
-    if(code.indexOf("invalid_playback_url")>=0)return"invalid_playback_url";
-    if(code.indexOf("core_url_unavailable")>=0)return"core_url_unavailable";
-    return code||"network_error";
-}
-function abortNegotiationWithoutDirectPlay(root,code,reason){
-    root._resumeWantedAfterNegotiation=false;root._startupPlayWanted=false;root._startupPlayTries=0;
-    root._pendingSeekMs=-1;root._pendingServerTimedBaseMs=-1;root._pendingHardResetBaseMs=-1;
+
+function abortNegotiationWithoutDirectPlay(root, code, reason) {
+    root._resumeWantedAfterNegotiation = false;
+    root._startupPlayWanted = false;
+    root._startupPlayTries = 0;
+    root._pendingSeekMs = -1;
+    root._pendingServerTimedBaseMs = -1;
+    root._pendingHardResetBaseMs = -1;
     root._releaseVideoLoading("negotiation-abort");
 }
-function _qualityQuery(url,key,value){
-    var u=String(url||""),h="",hi=u.indexOf("#");
-    if(hi>=0){h=u.substring(hi);u=u.substring(0,hi);}
-    var qi=u.indexOf("?"),base=qi>=0?u.substring(0,qi):u;
-    var parts=qi>=0?u.substring(qi+1).split("&"):[],out=[],wanted=String(key||"").toLowerCase(),found=false;
-    for(var i=0;i<parts.length;i++){
-        var p=parts[i];if(!p)continue;
-        var eq=p.indexOf("="),raw=eq>=0?p.substring(0,eq):p,name=raw;
-        try{name=decodeURIComponent(raw);}catch(e0){}
-        if(String(name||"").toLowerCase()===wanted){
-            if(!found&&value!==undefined&&value!==null&&value!=="")
-                out.push(encodeURIComponent(String(key))+"="+encodeURIComponent(String(value)));
-            found=true;
-        }else out.push(p);
+
+function _copyOwn(dst, src) {
+    if (!dst || !src) return dst;
+    for (var k in src) {
+        if (Object.prototype.hasOwnProperty.call(src, k)) dst[k] = src[k];
     }
-    if(!found&&value!==undefined&&value!==null&&value!=="")
-        out.push(encodeURIComponent(String(key))+"="+encodeURIComponent(String(value)));
-    return base+(out.length?"?"+out.join("&"):"")+h;
-}
-function _copyOwn(dst,src){
-    if(!dst||!src)return dst;
-    for(var k in src)if(Object.prototype.hasOwnProperty.call(src,k))dst[k]=src[k];
     return dst;
 }
-function _numberOr(value,fallback){
-    var n=Number(value);return isFinite(n)?n:fallback;
-}
-function _applyStickyManualDirectPlay(root,ctx){
-    if(!root||!ctx||root.manualDirectPlayMode!==true)
-        return false;
-    // Le choix explicite DirectPlay doit survivre aux options ponctuelles
-    // ajoutees par les retries, recoveries et changements de piste. Le fallback
-    // de seek statique desactive manualDirectPlayMode AVANT de renegocier ; il
-    // reste donc libre de demander son remux serveur positionne.
-    ctx.manualDirectPlayOverride=true;
-    ctx.manualRemuxOverride=false;
-    ctx.forceServerSeek=false;
-    ctx.forceServerRemux=false;
-    ctx.forceHls=false;
-    ctx.forceHlsOnDpSeekFallback=false;
-    ctx.forceMp4=false;
-    ctx.forceHevcMain10Remux=false;
-    ctx.forceExplicitServerProgressiveSeek=false;
-    ctx.forceJellyfinTranscodingUrlCopyRemux=false;
-    ctx.forceAllowTranscoding=false;
-    ctx.forceTranscodeOnTrackSwitch=false;
-    ctx.forceVideoTranscodeCodec=null;
-    ctx.forcePlaybackInfoVideoCodec=null;
-    ctx.forcePlaybackInfoAudioCodec=null;
-    ctx.forcePlaybackInfoAudioStreamIndex=-1;
-    ctx.forcePolicyTranscodeVideoBitrate=0;
-    ctx.forcePolicyTranscodeHls=false;
-    ctx.forcePolicyTranscodeHlsColdStart=false;
-    ctx.manualQualityRequest=false;
-    ctx.manualQualityBitrate=0;
-    ctx.currentPlaybackVideoTranscodeByPolicy=false;
-    ctx.forceDirectPlayInPlaybackInfo=true;
-    ctx.forceDirectStreamInPlaybackInfo=false;
-    ctx.forceVideoStreamCopyInPlaybackInfo=true;
-    ctx.forceAudioStreamCopyInPlaybackInfo=true;
-    ctx.forceSubtitleEncode=false;
-    ctx.preferImageSubtitleRemux=false;
-    ctx.forceFullRemuxForImageSubtitles=false;
-    ctx.forceDvdSubFileTranscode=false;
-    ctx.forceInterlacedTsTranscode=false;
-    ctx.preferFrenchAudio=false;
-    ctx.disableAutoFrenchAudio=true;
-    ctx.disableDefaultSubtitleRemux=true;
-    ctx.disableDefaultFrenchAudioOrderRemux=true;
-    ctx.disableImageSubtitleRiskRemux=true;
-    ctx.disableHevcMain10MkvRemux=true;
-    ctx.disableDvdFolderMpegRemux=true;
-    return true;
-}
-function _applyStickyManualRemux(root,ctx){
-    if(!root||!ctx||root.manualRemuxMode!==true)
-        return false;
-    // Source de vérité unique : tant que l'utilisateur n'a pas quitté
-    // explicitement "Remux (serveur)" dans le menu Qualité, TOUTE nouvelle
-    // négociation doit rester en remux. Cela couvre les changements audio /
-    // sous-titres, seeks, reprises, recoveries et retries internes.
-    ctx.manualRemuxOverride=true;
-    ctx.manualDirectPlayOverride=false;
-    ctx.forceServerRemux=true;
-    // Neutralise les règles automatiques de prudence ReDeFin.
-    ctx.forceDvdSubFileTranscode=false;
-    ctx.forceInterlacedTsTranscode=false;
-    ctx.forcePlaybackInfoVideoCodec=null;
-    ctx.forceVideoStreamCopyInPlaybackInfo=true;
-    ctx.forceAudioStreamCopyInPlaybackInfo=true;
-    ctx.forceDirectPlayInPlaybackInfo=false;
-    ctx.forceDirectStreamInPlaybackInfo=false;
-    ctx.disableDefaultSubtitleRemux=true;
-    ctx.disableDefaultFrenchAudioOrderRemux=true;
-    ctx.disableImageSubtitleRiskRemux=true;
-    ctx.disableHevcMain10MkvRemux=true;
-    // Sous-titres en mode serveur/remux, sans overlay QML local ni burn-in
-    // texte implicite. L'image peut toujours être Embed si le conteneur le permet.
-    ctx.allowLocalSubtitleOverlay=false;
-    ctx.preferExternalTextSubtitlesInRemux=false;
-    ctx.forceTextSubtitleServerBurnIn=false;
-    ctx.preferServerSubtitleBurnInOnVideoTranscode=false;
-    return true;
-}
-function _applyStickyManualQuality(root,ctx){
-    if(!root||!ctx)return 0;
-    if(root.manualDirectPlayMode===true||root.manualRemuxMode===true)return 0;
-    var rate=Math.max(0,Math.floor(_numberOr(root.manualQualityBitrate,0)));
-    if(!(rate>0))return 0;
-    rate=Math.max(420000,Math.min(200000000,rate));
-    // Une qualité vidéo choisie manuellement est un mode de lecture persistant,
-    // au même titre que DirectPlay/Remux. Tant que l'utilisateur ne choisit pas
-    // un autre mode, toute renégociation reste un transcodage vidéo au débit
-    // demandé, y compris après seek, retry/recovery ou changement de piste.
-    ctx.manualDirectPlayOverride=false;
-    ctx.manualRemuxOverride=false;
-    ctx.forceServerRemux=false;
-    ctx.forceAllowTranscoding=true;
-    ctx.forceVideoTranscodeCodec=ctx.forceVideoTranscodeCodec||"h264";
-    ctx.forcePlaybackInfoVideoCodec=ctx.forcePlaybackInfoVideoCodec||"h264";
-    ctx.forceDirectPlayInPlaybackInfo=false;
-    ctx.forceDirectStreamInPlaybackInfo=false;
-    ctx.forceVideoStreamCopyInPlaybackInfo=false;
-    ctx.forceAudioStreamCopyInPlaybackInfo=(ctx.forceAudioStreamCopyInPlaybackInfo===false)?false:true;
-    ctx.forcePolicyTranscodeVideoBitrate=rate;
-    // Une fois le protocole de transcodage établi, le conserver. Au premier
-    // choix depuis DirectPlay, la policy Freebox décide encore HLS/progressif.
-    if(ctx.forcePolicyTranscodeHls===undefined||ctx.forcePolicyTranscodeHls===null){
-        if(root.lastUsedTranscoding===true)
-            ctx.forcePolicyTranscodeHls=(root.isHls===true);
-    }
-    if(ctx.forcePolicyTranscodeHls===true&&
-            (ctx.forcePolicyTranscodeHlsColdStart===undefined||ctx.forcePolicyTranscodeHlsColdStart===null))
-        ctx.forcePolicyTranscodeHlsColdStart=false;
-    if(ctx.forcePolicyTranscodeAllowAudioCopy===undefined||ctx.forcePolicyTranscodeAllowAudioCopy===null)
-        ctx.forcePolicyTranscodeAllowAudioCopy=true;
-    return rate;
+
+function _numberOr(value, fallback) {
+    var n = Number(value);
+    return isFinite(n) ? n : fallback;
 }
 function _subtitleTypeForStream(root,streamIdx){
     var map=root&&root.subtitleStreamIndexMap?root.subtitleStreamIndexMap:[];
@@ -2550,6 +2460,9 @@ function _restoreAfterNegotiationError(root,mp,timers,extra,resume,code){
         if(extra.previousManualDirectPlayMode!==undefined)root.manualDirectPlayMode=extra.previousManualDirectPlayMode===true;
     }
     _restoreAudioSwitchTransaction(root,extra);
+    // Échec du rejeu des réglages différés : le rollback ci-dessus a déjà
+    // restauré l'ancienne piste ; il ne doit rester aucune attente fantôme.
+    if(extra&&extra.deferredReplay===true)resetDeferredReload(root,"negotiation-error");
     if(extra&&extra.trackSwitchRebase===true&&root._trackSwitchRebaseActive&&typeof root._finishTrackSwitchRebase==="function")
         root._finishTrackSwitchRebase("negotiation-error");
     abortNegotiationWithoutDirectPlay(root,code,"negotiate");
@@ -2564,7 +2477,17 @@ function _restoreAfterNegotiationError(root,mp,timers,extra,resume,code){
  */
 function negotiateAndApply(root,mp,router,subtitleItem,timers,startMs,forceHls,preferTicks,forceMp4,forceDPOnAudioSwitch,extra){
     extra=extra||{};
+    var internalPrefetchedResult=extra._prefetchedResult||null;
+    if(internalPrefetchedResult){
+        var cleanExtra={};_copyOwn(cleanExtra,extra);
+        try{delete cleanExtra._prefetchedResult;}catch(ePrefetchDelete){}
+        extra=cleanExtra;
+    }
     if(!root||!mp||!router||typeof router.negotiatePlayback!=="function")return false;
+    // Rejeu d'attentes : on n'émet rien tout de suite, les appels des handlers
+    // sont fusionnés en une seule négociation par replayDeferredReload().
+    if(coalesceNegotiationIfActive(root,startMs,forceHls,preferTicks,forceMp4,
+                                   forceDPOnAudioSwitch,extra))return true;
     var item=String(root.itemId||""),server=String(root.serverUrl||""),user=String(root.userId||""),token=String(root.accessToken||"");
     if(!item||!server||!user||!token)return false;
     var requested=Math.max(0,Math.floor(_numberOr(startMs,0)));
@@ -2601,21 +2524,22 @@ function negotiateAndApply(root,mp,router,subtitleItem,timers,startMs,forceHls,p
     // Reappliquer les modes manuels APRES toutes les options ponctuelles du
     // call-site. Ordre de souverainete : DirectPlay ou Remux explicitement
     // choisi, puis debit manuel, puis seulement les politiques automatiques.
-    var stickyManualDirectPlay=_applyStickyManualDirectPlay(root,ctx);
-    var stickyManualRemux=!stickyManualDirectPlay&&_applyStickyManualRemux(root,ctx);
-    if(!stickyManualDirectPlay&&!stickyManualRemux)_applyStickyManualQuality(root,ctx);
+    var stickyManualDirectPlay=PlayerSession.applyStickyManualDirectPlay(root,ctx);
+    var stickyManualRemux=!stickyManualDirectPlay&&PlayerSession.applyStickyManualRemux(root,ctx);
+    if(!stickyManualDirectPlay&&!stickyManualRemux)PlayerSession.applyStickyManualQuality(root,ctx);
     ctx.playbackRuleMode=root.playbackRuleMode||"smart";
     ctx.playbackRouterMode=root.playbackDeviceMode||"";
     ctx.playbackRouterBackend=root.playbackBackendMode||"";
     root.lastUiTargetMs=negotiated;
-    try{root._armVideoLoading("negotiation");}catch(e0){}
+    // L'ouverture initiale garde une raison distincte : elle ne doit pas
+    // verrouiller le transport comme un rechargement.
+    try{root._armVideoLoading(String(root.mediaUrl||"").length>0?"negotiation":"initial-negotiation");}catch(e0){}
     function fail(err){
         if(!_negotiationStillCurrent(root,seq,item,server,user,token))return;
-        var code=negotiationErrorCode(err);
+        var code=router.negotiationErrorCode(err);
         _restoreAfterNegotiationError(root,mp,timers,extra,resume,code);
     }
-    try{
-        router.negotiatePlayback(ctx,function(res){
+    function success(res){
             if(!_negotiationStillCurrent(root,seq,item,server,user,token))return;
             if(!res||!res.url){fail("invalid_playback_url");return;}
             var nextUrl=String(res.url||"");
@@ -2631,7 +2555,7 @@ function negotiateAndApply(root,mp,router,subtitleItem,timers,startMs,forceHls,p
                     currentVideoRate=rm?Math.max(0,parseInt(rm[1],10)||0):0;
                 }catch(eRate){currentVideoRate=0;}
                 if(!(currentVideoRate>0))
-                    nextUrl=_qualityQuery(nextUrl,"VideoBitrate",manualRate);
+                    nextUrl=router.replaceQueryParameter(nextUrl,"VideoBitrate",manualRate);
             }
             if(!nextUrl){fail("invalid_playback_url");return;}
             var oldSession=String(root.playSessionId||"");
@@ -2725,44 +2649,13 @@ function negotiateAndApply(root,mp,router,subtitleItem,timers,startMs,forceHls,p
             try{root.updateClocksFromPlaybackThrottled(true);}catch(e4){}
             if((root.serverTimedStream||root.lastUsedServerRemux)&&typeof root._armFrozenPlaybackWatch==="function")
                 root._armFrozenPlaybackWatch("negotiation",root.frozenPlaybackWatchWindowMs);
-        },fail);
+    }
+    try{
+        if(internalPrefetchedResult){
+            success(internalPrefetchedResult);
+        }else{
+            router.negotiatePlayback(ctx,success,fail);
+        }
     }catch(e5){fail(e5);}
     return true;
-}
-function applyManualQuality(root,mp,bitrate){
-    if(!root||!mp||typeof root.negotiatePlayback!=="function"||root._tearingDownPlayer)return false;
-    var raw=Math.floor(_numberOr(bitrate,0));
-    if(!(raw>0)||!root.serverUrl||!root.accessToken||!root.userId||!root.itemId)return false;
-    var rate=Math.max(420000,Math.min(200000000,raw));
-    if(root.manualQualityBitrate===rate&&root.currentPlaybackVideoTranscodeByPolicy===true&&
-            root.manualDirectPlayMode!==true&&root.manualRemuxMode!==true)return true;
-    var previous=Math.max(0,Math.floor(_numberOr(root.manualQualityBitrate,0)));
-    var previousRemux=root.manualRemuxMode===true;
-    var previousDirectPlay=root.manualDirectPlayMode===true;
-    var target=0;
-    try{target=root._clampUi(root.uiPositionMs());}catch(e0){target=Math.max(0,Math.floor(_numberOr(root.lastUiTargetMs,0)));}
-    var resume=mp.playbackState===root._mpPlayingState;
-    root._wasPlayingBeforeSwitch=resume;
-    root._resumeWantedAfterNegotiation=resume;
-    root.lastUiTargetMs=target;
-    // Les trois modes manuels sont mutuellement exclusifs.
-    root.manualDirectPlayMode=false;
-    root.manualRemuxMode=false;
-    root.manualQualityBitrate=rate;
-    try{if(resume)mp.pause();}catch(e1){}
-    var keepHls=root.isHls===true&&root.lastUsedTranscoding===true;
-    return root.negotiatePlayback(target,keepHls,true,false,false,{
-        manualQualityRequest:true,manualQualityBitrate:rate,previousManualQualityBitrate:previous,
-        previousManualRemuxMode:previousRemux,previousManualDirectPlayMode:previousDirectPlay,
-        forceRetry:true,forceAllowTranscoding:true,forceVideoTranscodeCodec:"h264",
-        forcePlaybackInfoVideoCodec:"h264",forceDirectPlayInPlaybackInfo:false,
-        forceDirectStreamInPlaybackInfo:false,forceVideoStreamCopyInPlaybackInfo:false,
-        // Un changement de qualité en cours de lecture doit repartir directement
-        // de la position courante côté serveur. Cela évite à QtMultimedia de
-        // chercher localement dans le nouveau HLS.
-        forceServerSeek:target>0,
-        forcePolicyTranscodeVideoBitrate:rate,forcePolicyTranscodeHls:keepHls?true:undefined,
-        forcePolicyTranscodeHlsColdStart:(target>0||keepHls)?false:undefined,
-        forcePolicyTranscodeAllowAudioCopy:true
-    })!==false;
 }

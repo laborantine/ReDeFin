@@ -1,11 +1,12 @@
 // qml/pages/detailMoviePage.qml — QtQuick 2.15 / sans Controls
 // Version compactée en gardant les optimisations déjà effectives.
 import QtQuick 2.15
+import "../js/NavigationContext.js" as NavContext
 import QtGraphicalEffects 1.15
 import "../components" as Components
 import "../js/jellyfinBridge.js" as Jellyfin
-import "../js/SeasonUtils.js" as SeasonUtils
 import "../js/MediaCatalog.js" as MediaCatalog
+import "../js/MediaRailLayout.js" as MediaRailLayout
 import "../js/SafeLog.js" as SafeLog
 FocusScope {
     id: detailMoviePage
@@ -19,18 +20,14 @@ FocusScope {
     property string userImageTag: ""
     property var fbx
     property var shared: null
-    function _sharedNavApi(){ try { return shared && shared.__redefinNavApi ? shared.__redefinNavApi : null } catch(e) { return null } }
-    function _hydrateSensitiveContextFromShared(){
-        var api = _sharedNavApi()
-        return api && api.hydrate ? api.hydrate(detailMoviePage, false, 0, false) : false
+    function _hydrateSensitiveContextFromShared() {
+        return NavContext.hydrate(shared, detailMoviePage, false, 0, false)
     }
-    function _storeSensitiveNavContext(){
-        var api = _sharedNavApi()
-        return api && api.storeTarget ? api.storeTarget(detailMoviePage) : false
+    function _storeSensitiveNavContext() {
+        return NavContext.storeTarget(shared, detailMoviePage)
     }
-    function _navRoute(page, params){
-        var api = _sharedNavApi()
-        return api && api.route ? api.route(detailMoviePage, page, params || ({})) : (page + "?ctx=1")
+    function _navRoute(page, params) {
+        return NavContext.route(shared, detailMoviePage, page, params)
     }
     property var settings: null
     readonly property bool showClockHud: {
@@ -62,7 +59,7 @@ FocusScope {
     readonly property real frameWidth: 2.0
     readonly property real frameInsetPx: 0.0
     readonly property real frameInnerEpsilon: 0.2
-    function frameMargin(){ return frameInsetPx + frameWidth / 2 + frameInnerEpsilon }
+    function frameMargin(){ return MediaRailLayout.frameMargin(frameInsetPx, frameWidth, frameInnerEpsilon) }
     /* ===== Guard nav ===== */
     property var _navGuard: ({ busy:false, lastId:"", t:0 })
     function _openOnce(id, url){
@@ -215,7 +212,7 @@ FocusScope {
     property string endTimeString: {
         if (!durationMinutes) return ""
         var n = new Date(); n.setMinutes(n.getMinutes() + durationMinutes)
-        return SeasonUtils.pad2(n.getHours()) + ":" + SeasonUtils.pad2(n.getMinutes())
+        return MediaCatalog.pad2(n.getHours()) + ":" + MediaCatalog.pad2(n.getMinutes())
     }
     property string directorsLine: {
         var s = MediaCatalog.mediaDirectorsText(item)
@@ -444,9 +441,9 @@ FocusScope {
     }
     function _consumeDetailReturnRefreshMarker(reason){
         try {
-            if (!shared || !shared.__redefinDetailReturnRefresh)
+            if (!shared || !NavContext.detailReturnRefresh(shared))
                 return false
-            var marker = shared.__redefinDetailReturnRefresh
+            var marker = NavContext.detailReturnRefresh(shared)
             var markerId = String(marker.itemId || "")
             var scope = String(marker.scope || "player").toLowerCase()
             var now = Date.now()
@@ -455,7 +452,7 @@ FocusScope {
             // sans scope explicite, il reste considéré comme un retour Player.
             var maxAge = (scope === "person") ? 120000 : 15000
             if (ts > 0 && (now - ts) > maxAge) {
-                shared.__redefinDetailReturnRefresh = null
+                NavContext.clearDetailReturnRefresh(shared)
                 return false
             }
             if (!itemId || !markerId || markerId !== String(itemId))
@@ -472,7 +469,7 @@ FocusScope {
                     a.put(_focusKey(),s)
                 }
             }
-            shared.__redefinDetailReturnRefresh = null
+            NavContext.clearDetailReturnRefresh(shared)
             return _armDetailReturnRefresh(
                         reason || (scope + "-return-marker"),
                         forceRefresh,
@@ -662,8 +659,7 @@ FocusScope {
     property int _restoreBudget: 0
     function _movieId(){ return itemId || (item && item.Id) || "" }
     function _detailFocusApi(){
-        try { return shared && shared.__redefinDetailFocusApi ? shared.__redefinDetailFocusApi : null }
-        catch(e) { return null }
+        return NavContext.detailFocusApi(shared)
     }
     function armMemo(scope){
         var api = _detailFocusApi(), mid = _movieId()
@@ -688,12 +684,12 @@ FocusScope {
             if (!shared || !itemId || !personObj || !personObj.Id) return false
             var snap = _getFocusSnapshot()
             var savedY = (snap && typeof snap.scrollY === "number") ? Number(snap.scrollY) : Number(rootFlick ? rootFlick.contentY : 0)
-            shared.__redefinPersonReturnContext = ({
+            NavContext.setPersonReturn(shared, ({
                 detailItemId: String(itemId), personId: String(personObj.Id),
                 castIndex: (castPageLoader.item && castPageLoader.item.currentActorIndex !== undefined) ? (castPageLoader.item.currentActorIndex|0) : 0,
                 returnScrollY: isFinite(savedY) ? Math.max(0, savedY) : 0,
                 detailKind: "movie", ts: Date.now()
-            })
+            }))
             return true
         } catch(e) { return false }
     }
@@ -713,7 +709,6 @@ FocusScope {
         }
     }
     Item {
-        id: castPortraitPrewarmPool
         x: -4
         y: -4
         width: 1
@@ -766,7 +761,7 @@ FocusScope {
     }
 
     // Retour terminal DetailMoviePage -> MoviePage : le stockage reste la
-    // responsabilité exclusive de l'API DetailFocus installée par ShellPage.
+    // responsabilité exclusive de l'API DetailFocus de NavigationContext.
     function _forgetFocusSnapshot(){
         if (_saveQueued) {
             try { saveFocusTimer.stop() } catch(e0) {}
@@ -981,13 +976,7 @@ FocusScope {
     /* ===== Scroll / focus helpers ===== */
     property bool scrollAnimEnabled: true
     function ensureItemVisible(target, m){
-        if (!target || !target.visible || !rootFlick) return
-        var margin = m || 20, p = target.mapToItem(rootFlick.contentItem, 0, 0)
-        var top = p.y - margin, bot = p.y + target.height + margin
-        var viewTop = rootFlick.contentY, viewBot = rootFlick.contentY + rootFlick.height
-        var maxY = Math.max(0, rootFlick.contentHeight - rootFlick.height)
-        if (top < viewTop) rootFlick.scrollToY(Math.max(0, top), true)
-        else if (bot > viewBot) rootFlick.scrollToY(Math.max(0, Math.min(maxY, bot - rootFlick.height)), true)
+        MediaRailLayout.ensureItemVisible(rootFlick, target, m || 20, true)
     }
     function hasCast(){
         return castPeople.length > 0 && castPageLoader.item && (
@@ -999,11 +988,7 @@ FocusScope {
     function hasSimilarContent(){ return !!(similarLoader.status === Loader.Ready && similarLoader.item && similarLoader.item.hasContent === true) }
     function hasChapters(){ return !!(chaptersLoader.status === Loader.Ready && chaptersLoader.item && chaptersLoader.item.hasContent === true) }
     function restoreCastFocus(){
-        if (!castPageLoader.item) return
-        if (castPageLoader.item.restoreLastActorFocus) castPageLoader.item.restoreLastActorFocus()
-        else if (castPageLoader.item.focusFirstActor) castPageLoader.item.focusFirstActor()
-        else if (castPageLoader.item.forceFirstActorFocus) castPageLoader.item.forceFirstActorFocus()
-        else if (castPageLoader.item.focusLastActor) castPageLoader.item.focusLastActor()
+        MediaRailLayout.restoreCastFocus(castPageLoader.item)
     }
     function _restoreSimilarFocusIfAny(){
         if (!similarLoader.item) return
@@ -1277,14 +1262,14 @@ FocusScope {
         _storeSensitiveNavContext()
         try {
             if (shared && startMs !== undefined && startMs !== null && Number(startMs) >= 0) {
-                shared.__redefinExplicitPlaybackStart = ({
+                NavContext.setExplicitPlaybackStart(shared, ({
                     source: sourceArg && String(sourceArg).length ? String(sourceArg) : "chapter",
                     itemId: String(itemIdArg || ""),
                     serverUrl: String(serverUrlArg || ""),
                     userId: String(userIdArg || ""),
                     startMs: Math.max(0, Math.floor(Number(startMs))),
                     ts: Date.now()
-                })
+                }))
             }
         } catch(e) {}
         requestPlay(itemIdArg, accessTokenArg, userIdArg, serverUrlArg, itemTitleArg)
@@ -1626,12 +1611,6 @@ FocusScope {
                     opacity: bgDarken
                     visible: (bgImg.source && ("" + bgImg.source).length > 0) && bgDarken > 0.001
                 }
-                function computeFullUrl(){
-                    return item ? Jellyfin.itemBackdropOrPrimaryUrl(serverUrl, item, {
-                        fillWidth: Math.round(bgW), fillHeight: Math.round(bgH),
-                        quality: 80, blur: MediaCatalog.clampBlur(bgBlur), format: "jpg"
-                    }) : ""
-                }
                 function updateBackdropNow(){
                     if (!item) {
                         lastFull = ""
@@ -1641,7 +1620,13 @@ FocusScope {
                         gateBGReady = true
                         return
                     }
-                    var ful = computeFullUrl()
+                    var ful = MediaCatalog.backdropOrPrimaryUrl(Jellyfin, serverUrl, item, {
+                        fillWidth: Math.round(bgW),
+                        fillHeight: Math.round(bgH),
+                        quality: 80,
+                        blur: MediaCatalog.clampBlur(bgBlur),
+                        format: "jpg"
+                    })
                     if (ful === lastFull || ful === loadingFull) { _updateBGGate(); return }
                     loadingFull = ful; _token += 1; bgImg.loadToken = _token
                     gateBGReady = false
@@ -1878,7 +1863,7 @@ FocusScope {
                             }
                             Text { textFormat: Text.PlainText;
                                 id: dateText
-                                text: (hasItem && item.PremiereDate) ? SeasonUtils.fmtDateLong(item.PremiereDate) : ""
+                                text: (hasItem && item.PremiereDate) ? MediaCatalog.formatDateLongFr(item.PremiereDate) : ""
                                 visible: text.length > 0
                                 color: "#E6FFFFFF"; font.pixelSize: 20; font.bold: true
                                 anchors.verticalCenter: parent.verticalCenter
@@ -2099,7 +2084,6 @@ FocusScope {
                                 }
                             }
                             OpacityMask {
-                                id: genresMaskedLine
                                 anchors.fill: parent
                                 visible: genresLineBox.maskActive
                                 enabled: genresLineBox.maskActive
@@ -2782,7 +2766,7 @@ FocusScope {
         ignoreUnknownSignals: true
         onActiveFocusChanged: if (chaptersLoader.item && chaptersLoader.item.activeFocus) { currentFocus = 5; requestSaveFocusSnapshot() }
         onLastFocusedIndexChanged: requestSaveFocusSnapshot()
-        onChapterActivated: function(index, chapter){ requestPlayAt(itemId, accessToken, userId, serverUrl, itemTitle, SeasonUtils.chapterStartMs(chapter)) }
+        onChapterActivated: function(index, chapter){ requestPlayAt(itemId, accessToken, userId, serverUrl, itemTitle, MediaCatalog.chapterStartMs(chapter)) }
     }
     Connections {
         target: similarLoader.item
@@ -2850,7 +2834,7 @@ FocusScope {
     }
     function openPosterOverlay(){ openOverlay("poster", { posterUrl: _currentArtUrl() }) }
     function _overviewReaderImageUrl(){
-        return item ? Jellyfin.itemBackdropOrPrimaryUrl(serverUrl, item, { fillWidth:720, fillHeight:405, quality:88, format:"jpg" }) : ""
+        return item ? MediaCatalog.backdropOrPrimaryUrl(Jellyfin, serverUrl, item, { fillWidth:720, fillHeight:405, quality:88, format:"jpg" }) : ""
     }
     function _overviewReaderRuntimeText(){
         var mins=Math.max(0,durationMinutes|0); if(!mins) return ""

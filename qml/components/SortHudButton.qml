@@ -100,7 +100,6 @@ FocusScope {
     }
 
     Text {
-        id: iconText
         anchors.centerIn: parent
         text: root.label
         textFormat: Text.PlainText
@@ -144,7 +143,6 @@ FocusScope {
         }
 
         Rectangle {
-            id: focusPill
             x: 8
             y: 8 + root.currentMenuIndex * root.rowHeight
             width: popup.width - 16
@@ -160,7 +158,6 @@ FocusScope {
             model: root.options ? root.options.length : 0
 
             Item {
-                id: rowItem
                 x: 8
                 y: 8 + index * root.rowHeight
                 width: popup.width - 16

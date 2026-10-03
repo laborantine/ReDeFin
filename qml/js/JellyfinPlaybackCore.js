@@ -49,6 +49,9 @@ function _policy() {
 function _normalizePlaybackRuleMode(value) {
     return _s(value).toLowerCase().trim() === "directplay" ? "directplay" : "smart"
 }
+function normalizePlaybackRuleMode(value) {
+    return _normalizePlaybackRuleMode(value)
+}
 function _smartPlaybackRulesEnabled(ctx) {
     return _normalizePlaybackRuleMode(ctx && ctx.playbackRuleMode) !== "directplay"
 }
@@ -105,7 +108,7 @@ function _applyReDeFinBitrateCeiling(profile) {
 function _policyBuildDeviceProfile(mode) {
     var p = _policy()
     if (p && typeof p.buildDeviceProfile === "function") {
-        try { return _applyReDeFinBitrateCeiling(p.buildDeviceProfile(mode)) } catch(e) {}
+        try { return _applyReDeFinBitrateCeiling(p.CoreUrl.buildDeviceProfile(mode)) } catch(e) {}
     }
     return null
 }
@@ -769,7 +772,7 @@ function _shouldRemuxDvdFolderMpeg(ctx, src) {
 function _dvdMpegAudioCodecLock(src, audioIndex) {
     var c = _selectedAudioCodec(src, audioIndex)
     if (!c) return null
-    c = _normalizeAudioCodecHint(c)
+    c = CoreUrl._normalizeAudioCodecHint(c)
     if (!c) return null
     if (c === "ac3") return "ac3"
     if (c === "dts" || c === "dca" || c === "dts,dca") return "dts,dca"
@@ -926,6 +929,12 @@ function _firstInternalSubtitleStreamIndex(src) {
     }
     return -1
 }
+// En DirectPlay natif QtMultimedia 5.15 peut ignorer les drapeaux Matroska
+// Default/Forced et afficher la première piste de sous-titres interne physique.
+// Cette valeur sert uniquement à synchroniser l'UI avec le comportement Qt.
+function _nativeDirectPlaySubtitleIndex(src) {
+    return _firstInternalSubtitleStreamIndex(src)
+}
 function _preferredFrenchForcedSubtitleNeedsServerSelection(ctx, src) {
     if (!ctx || !src) return false
     if (!_smartPlaybackRulesEnabled(ctx)) return false
@@ -1051,12 +1060,12 @@ function _hasInternalSubtitle(src) {
     return false
 }
 function _hasAudioCodec(src, codec) {
-    codec = _normalizeAudioCodecHint(codec)
+    codec = CoreUrl._normalizeAudioCodecHint(codec)
     if (!src || !src.MediaStreams || !codec) return false
     for (var i = 0; i < src.MediaStreams.length; i++) {
         var st = src.MediaStreams[i]
         if (!st || !_isType(st, "Audio")) continue
-        var c = _normalizeAudioCodecHint(st.Codec)
+        var c = CoreUrl._normalizeAudioCodecHint(st.Codec)
         if (c === codec) return true
     }
     return false
@@ -1101,11 +1110,11 @@ function _selectedAudioCodec(src, audioIndex) {
     return _exactAudioCodecHint(st.Codec)
 }
 function _isDtsAudioCodecHint(codec) {
-    var c = _normalizeAudioCodecHint(codec)
+    var c = CoreUrl._normalizeAudioCodecHint(codec)
     return c === "dts" || c === "dca" || c === "dts,dca" || c === "a_dts"
 }
 function _isTrueHdAudioCodecHint(codec) {
-    var c = _normalizeAudioCodecHint(codec)
+    var c = CoreUrl._normalizeAudioCodecHint(codec)
     return c === "truehd" || c === "mlp" || c === "mlp_fba" || c === "a_truehd" || c === "dolby_truehd" || c === "true-hd" || c === "true_hd"
 }
 function _isTrueHd51AudioStream(st) {
@@ -1135,7 +1144,7 @@ function _fullTranscodeAudioNeedsAc3(src, audioIndex) {
     return _isUnsafeFullTranscodeAudioCodecHint(_selectedAudioCodec(src, audioIndex))
 }
 function _safeFullTranscodeAudioCodecHint(wanted, src, audioIndex) {
-    var sourceNeedsAc3 = _fullTranscodeAudioNeedsAc3(src, audioIndex); var normalized = _normalizeAudioCodecHint(wanted)
+    var sourceNeedsAc3 = _fullTranscodeAudioNeedsAc3(src, audioIndex); var normalized = CoreUrl._normalizeAudioCodecHint(wanted)
     if (sourceNeedsAc3 || _isUnsafeFullTranscodeAudioCodecHint(normalized)) return "ac3"
     return normalized || "ac3"
 }
@@ -1148,17 +1157,17 @@ function _audioChannelCountForStream(src, audioIndex) {
     return channels
 }
 function _audioCodecHintContains(codecHint, codec) {
-    var wanted = _normalizeAudioCodecHint(codecHint); var source = _normalizeAudioCodecHint(codec)
+    var wanted = CoreUrl._normalizeAudioCodecHint(codecHint); var source = CoreUrl._normalizeAudioCodecHint(codec)
     if (!wanted || !source) return false
     var parts = wanted.split(",")
     for (var i = 0; i < parts.length; i++) {
-        if (_normalizeAudioCodecHint(parts[i]) === source) return true
+        if (CoreUrl._normalizeAudioCodecHint(parts[i]) === source) return true
     }
     return false
 }
 function _safeFullTranscodeAudioPlan(src, audioIndex, wantedCodec, allowCopyDefault) {
     var sourceCodec = _selectedAudioCodec(src, audioIndex); var sourceNeedsAc3 = _fullTranscodeAudioNeedsAc3(src, audioIndex); var codec = _safeFullTranscodeAudioCodecHint(wantedCodec || sourceCodec, src, audioIndex)
-    var targetIsAc3 = _normalizeAudioCodecHint(codec) === "ac3"; var sourceAllowedByTarget = _audioCodecHintContains(codec, sourceCodec); var allowCopy = allowCopyDefault !== false && !sourceNeedsAc3 && sourceAllowedByTarget
+    var targetIsAc3 = CoreUrl._normalizeAudioCodecHint(codec) === "ac3"; var sourceAllowedByTarget = _audioCodecHintContains(codec, sourceCodec); var allowCopy = allowCopyDefault !== false && !sourceNeedsAc3 && sourceAllowedByTarget
     var channels = (!allowCopy && targetIsAc3) ? _audioChannelCountForStream(src, audioIndex) : null
     return {
         sourceNeedsAc3: sourceNeedsAc3,
@@ -1213,7 +1222,7 @@ var _CORE_URL_REQUIRED = [
     "_needsServerTrackSelection_ctx", "_decidePreferredContainerWithSrc",
     "_buildRemuxProgressiveUrl", "_normalizeAudioCodecHint", "_isTx3gSelected",
     "_forceQuery", "_u", "_headersWithToken", "_jsonNormalize", "_sendRequest",
-    "_extFrom", "_isProblematicForSeek", "_transportValidateServerUrlStrict",
+    "_sendPlaybackInfoExact", "_extFrom", "_isProblematicForSeek", "_transportValidateServerUrlStrict",
     "_transportValidatePlaybackUrlStrict", "_transportFetchStreams"
 ]
 function _coreUrlContractValid() {
@@ -1245,36 +1254,11 @@ function _ensureCoreUrlConfigured() {
         return false
     }
 }
-function buildProgressiveUrl(a,b,c,d) { return _ensureCoreUrlConfigured() ? CoreUrl.buildProgressiveUrl(a,b,c,d) : "" }
-function buildServerSeekProgressiveUrl(a,b,c,d) { return _ensureCoreUrlConfigured() ? CoreUrl.buildServerSeekProgressiveUrl(a,b,c,d) : "" }
-function buildHighQualityProgressiveTranscodeUrl(a,b,c,d) { return _ensureCoreUrlConfigured() ? CoreUrl.buildHighQualityProgressiveTranscodeUrl(a,b,c,d) : "" }
-function buildHlsUrl(a,b,c,d) { return _ensureCoreUrlConfigured() ? CoreUrl.buildHlsUrl(a,b,c,d) : "" }
-function getVideoStreamUrl(a,b,c,d) { return _ensureCoreUrlConfigured() ? CoreUrl.getVideoStreamUrl(a,b,c,d) : "" }
-function _subtitleResultUrl(a,b,c,d,e,f) { return _ensureCoreUrlConfigured() ? CoreUrl._subtitleResultUrl(a,b,c,d,e,f) : "" }
-function buildDeviceProfile(a) { return _ensureCoreUrlConfigured() ? CoreUrl.buildDeviceProfile(a) : null }
-function _needsServerTrackSelection_ctx(a) { return _ensureCoreUrlConfigured() ? CoreUrl._needsServerTrackSelection_ctx(a) : false }
-function _decidePreferredContainerWithSrc(a,b) { return _ensureCoreUrlConfigured() ? CoreUrl._decidePreferredContainerWithSrc(a,b) : null }
-function _buildRemuxProgressiveUrl(a,b,c,d,e,f,g,h,i,j,k) { return _ensureCoreUrlConfigured() ? CoreUrl._buildRemuxProgressiveUrl(a,b,c,d,e,f,g,h,i,j,k) : "" }
-function _normalizeAudioCodecHint(a) { return _ensureCoreUrlConfigured() ? CoreUrl._normalizeAudioCodecHint(a) : null }
-function _isTx3gSelected(a,b) { return _ensureCoreUrlConfigured() ? CoreUrl._isTx3gSelected(a,b) : false }
-function _forceQuery(a,b,c,d) { return _ensureCoreUrlConfigured() ? CoreUrl._forceQuery(a,b,c,d) : a }
-function _u(a,b) { return _ensureCoreUrlConfigured() ? CoreUrl._u(a,b) : "" }
-function _headersWithToken(a) { return _ensureCoreUrlConfigured() ? CoreUrl._headersWithToken(a) : ({}) }
-function _jsonNormalize(a) { return _ensureCoreUrlConfigured() ? CoreUrl._jsonNormalize(a) : (a || null) }
-function _sendRequest(a,b,c,d,e,f,g) {
-    if (_ensureCoreUrlConfigured()) return CoreUrl._sendRequest(a,b,c,d,e,f,g)
-    if (typeof f === "function") f({ code:"core_url_unavailable", status:0, data:null })
-}
-function _sendPlaybackInfoRequest(url, headers, body, onSuccess, onError) {
-    if (_ensureCoreUrlConfigured() && typeof CoreUrl._sendPlaybackInfoExact === "function") return CoreUrl._sendPlaybackInfoExact(url, headers, body, onSuccess, onError)
-    return _sendRequest("post", url, headers, body, onSuccess, onError)
-}
+// Public compatibility surfaces used outside the Core. Internal URL/transport
+// helpers call CoreUrl directly after _ensureCoreUrlConfigured() succeeds.
 function _extFrom(a) { return _ensureCoreUrlConfigured() ? CoreUrl._extFrom(a) : "" }
-function _isProblematicForSeek(a) { return _ensureCoreUrlConfigured() ? CoreUrl._isProblematicForSeek(a) : false }
-function validateServerUrlStrict(a,b) { return _ensureCoreUrlConfigured() ? CoreUrl._transportValidateServerUrlStrict(a,b) : false }
-function validatePlaybackUrlStrict(a,b) { return _ensureCoreUrlConfigured() ? CoreUrl._transportValidatePlaybackUrlStrict(a,b) : false }
-function fetchStreams(a,b,c,d,e) {
-    if (_ensureCoreUrlConfigured()) return CoreUrl._transportFetchStreams(a,b,c,d,e)
+function fetchStreams(a, b, c, d, e) {
+    if (_ensureCoreUrlConfigured()) return CoreUrl._transportFetchStreams(a, b, c, d, e)
     if (typeof e === "function") e("core_url_unavailable")
 }
 var _negotiating = false; var _lastNegKey  = ""; var _lastNegTs   = 0; var _minIntervalMs = 1100; var _lastNegResultKey = ""; var _lastNegResultTs = 0; var _lastNegResult = null; var _inFlightKeys = {}
@@ -1402,7 +1386,7 @@ function _chooseSubtitleMethod(ctx, mustHls) {
     return mustHls ? "Hls" : "Embed"
 }
 function _preparePlaybackInfoRequest(ctx) {
-    var wantsServerSelect = _needsServerTrackSelection_ctx(ctx)
+    var wantsServerSelect = CoreUrl._needsServerTrackSelection_ctx(ctx)
     var mustHls = (ctx.forceHls === true)
     var allowTextSubtitleServerBurnIn = _allowTextSubtitleServerBurnIn(ctx)
     var preflightTextEncode = !!(allowTextSubtitleServerBurnIn &&
@@ -1425,7 +1409,7 @@ function _preparePlaybackInfoRequest(ctx) {
                : (explicitEncode ? "hls-encode"
                : ((mustHls || playbackInfoWantsHlsProfile) ? "hls" : "auto")))
     var subMethodWanted = _chooseSubtitleMethod(ctx, mustHls || explicitEncode)
-    var url = _u(ctx.serverUrl, "/Items/" + encodeURIComponent(ctx.itemId) + "/PlaybackInfo")
+    var url = CoreUrl._u(ctx.serverUrl, "/Items/" + encodeURIComponent(ctx.itemId) + "/PlaybackInfo")
     var requestedManualVideoBitrate = _forcedPolicyTranscodeVideoBitrate(ctx)
     var playbackInfoMaxBitrate = requestedManualVideoBitrate > 0
                                ? requestedManualVideoBitrate
@@ -1458,7 +1442,7 @@ function _preparePlaybackInfoRequest(ctx) {
         AudioCodec: ctx.forcePlaybackInfoAudioCodec || null,
         MaxStreamingBitrate: playbackInfoMaxBitrate,
         SubtitleDeliveryMethod: subMethodWanted,
-        DeviceProfile: buildDeviceProfile(dpMode)
+        DeviceProfile: CoreUrl.buildDeviceProfile(dpMode)
     }
 
     // Faire calculer le TranscodingUrl directement par Jellyfin avec le débit
@@ -1535,7 +1519,7 @@ function _finishPlaybackInfoFailure(ctx, key, explicitEncode, allowTextSubtitleS
     }
     if (forceHlsFallback) {
         var fallbackManualVideoBitrate = _forcedPolicyTranscodeVideoBitrate(ctx)
-        fbUrl = buildHlsUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
+        fbUrl = CoreUrl.buildHlsUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
             audioStreamIndex: (typeof ctx.selectedAudioStream === "number" && ctx.selectedAudioStream >= 0) ? ctx.selectedAudioStream : null,
             subtitleStreamIndex: (!ctx.useLocalSubs && typeof ctx.selectedSubtitleStream === "number" && ctx.selectedSubtitleStream >= 0) ? ctx.selectedSubtitleStream : null,
             subtitleMethod: explicitEncode ? "Encode" : "Hls",
@@ -1557,12 +1541,12 @@ function _finishPlaybackInfoFailure(ctx, key, explicitEncode, allowTextSubtitleS
             allowAudioStreamCopy: true, allowVideoStreamCopy: true,
             enableAutoStreamCopy: true, enableDirectStream: true
         }
-        fbUrl = _forceQuery(fbUrl, qctx, explicitEncode ? "Encode" : "Hls", true)
+        fbUrl = CoreUrl._forceQuery(fbUrl, qctx, explicitEncode ? "Encode" : "Hls", true)
     } else {
-        fbUrl = getVideoStreamUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId)
+        fbUrl = CoreUrl.getVideoStreamUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId)
     }
     if (!fbUrl || !/[?&]ApiKey=/i.test(fbUrl) ||
-            !validatePlaybackUrlStrict(fbUrl, ctx.serverUrl)) {
+            !CoreUrl._transportValidatePlaybackUrlStrict(fbUrl, ctx.serverUrl)) {
         delete _inFlightWaiters[key]
         if (onError) onError("invalid_playback_url")
         return
@@ -1616,7 +1600,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
         return
     }
     // Playback porte toujours un token/API key : WAN HTTP interdit avant toute négociation.
-    if (!validateServerUrlStrict(ctx.serverUrl, false)) {
+    if (!CoreUrl._transportValidateServerUrlStrict(ctx.serverUrl, false)) {
 
         if (onError) onError("insecure_transport")
         return
@@ -1657,11 +1641,11 @@ function negotiatePlayback(ctx, onSuccess, onError) {
     var url = playbackInfoPlan.url
     var body = playbackInfoPlan.body
 
-    _sendPlaybackInfoRequest(url, _headersWithToken(ctx.accessToken), body, function (res) {
+    CoreUrl._sendPlaybackInfoExact(url, CoreUrl._headersWithToken(ctx.accessToken), body, function (res) {
         _negotiating = false
         delete _inFlightKeys[key]
         _lastNegTs = (new Date()).getTime()
-        var resp = _jsonNormalize(res.json) || {}; var playSessionId = resp && resp.PlaySessionId ? resp.PlaySessionId : ""; var src = (resp && resp.MediaSources && resp.MediaSources.length > 0) ? resp.MediaSources[0] : null
+        var resp = CoreUrl._jsonNormalize(res.json) || {}; var playSessionId = resp && resp.PlaySessionId ? resp.PlaySessionId : ""; var src = (resp && resp.MediaSources && resp.MediaSources.length > 0) ? resp.MediaSources[0] : null
         var mediaSourceId = (src && src.Id) ? src.Id : ""
 
 
@@ -1793,7 +1777,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
         )
         forceTrueHd51AudioTranscode = _shouldForceTrueHd51AudioTranscode(ctx, src, effectiveAudioStreamIndex)
 
-        var tx3gSelected = _isTx3gSelected(src, ctx.selectedSubtitleStream)
+        var tx3gSelected = CoreUrl._isTx3gSelected(src, ctx.selectedSubtitleStream)
         // Aucun overlay local ne doit être créé pendant une négociation serveur,
         // sauf opt-in explicite d'un vrai DirectPlay. Le chemin manuel SRT
         // DirectPlay ne passe de toute façon pas par cette négociation.
@@ -1840,7 +1824,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
         // alors plus reconstruire les contraintes décidées par Jellyfin.
         var preserveJellyfinTranscodingUrl = false
         if (src) {
-            var hasTC   = !!(src.TranscodingUrl && src.TranscodingUrl.length > 0); var cont    = _s(src.Container).toLowerCase(); var pathExt = _extFrom(src.Path || ""); var isFrag  = _isProblematicForSeek(cont || pathExt)
+            var hasTC   = !!(src.TranscodingUrl && src.TranscodingUrl.length > 0); var cont    = _s(src.Container).toLowerCase(); var pathExt = _extFrom(src.Path || ""); var isFrag  = CoreUrl._isProblematicForSeek(cont || pathExt)
             fragileSeekRemux = !!( isFrag &&
                 ctx.manualDirectPlayOverride !== true &&
                 !mustHls && !forceTranscodeByPolicy &&
@@ -1862,7 +1846,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                                       ? (_isTextSubtitleSelected(src, tsSubtitleIndex) ? "Embed" : "Encode")
                                       : null
 
-                newUrl = buildHighQualityProgressiveTranscodeUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
+                newUrl = CoreUrl.buildHighQualityProgressiveTranscodeUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
                     audioStreamIndex: effectiveAudioStreamIndex, subtitleStreamIndex: tsSubtitleIndex >= 0 ? tsSubtitleIndex : null,
                     subtitleMethod: tsSubtitleMethod, forceNoSubtitle: tsSubtitleIndex < 0,
                     mediaSourceId: mediaSourceId, playSessionId: playSessionId,
@@ -1894,7 +1878,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                 dvdAudioChannels = dvdAudioPlan.channels
                 dvdAudioBitrate = dvdAudioPlan.bitrate
 
-                newUrl = buildHighQualityProgressiveTranscodeUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
+                newUrl = CoreUrl.buildHighQualityProgressiveTranscodeUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
                     audioStreamIndex: effectiveAudioStreamIndex, subtitleStreamIndex: dvdSubTranscodeSubtitleIndex >= 0 ? dvdSubTranscodeSubtitleIndex : null,
                     subtitleMethod: dvdSubTranscodeSubtitleIndex >= 0 ? dvdSubTranscodeSubtitleMethod : null, forceNoSubtitle: dvdSubTranscodeSubtitleIndex < 0,
                     mediaSourceId: mediaSourceId, playSessionId: playSessionId,
@@ -1921,7 +1905,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                 var imageBurnAudioCodec = _policyTranscodeAudioCodecHint(ctx, src, effectiveAudioStreamIndex, true)
                 var imageBurnAllowAudioCopy = _policyTranscodeAllowAudioCopy(ctx, src, effectiveAudioStreamIndex, true)
                 imageBurnAudioPlan = _safeFullTranscodeAudioPlan(src, effectiveAudioStreamIndex, imageBurnAudioCodec, imageBurnAllowAudioCopy)
-                newUrl = buildHlsUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
+                newUrl = CoreUrl.buildHlsUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
                     audioStreamIndex: effectiveAudioStreamIndex,
                     subtitleStreamIndex: (!ctx.useLocalSubs && typeof ctx.selectedSubtitleStream === "number" && ctx.selectedSubtitleStream >= 0) ? ctx.selectedSubtitleStream : null,
                     subtitleMethod: "Encode", mediaSourceId: mediaSourceId,
@@ -1944,7 +1928,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                 // renvoyer HLS alors que la qualité manuelle attend un progressif.
                 // Dans ce cas, laisser newUrl vide déclenche le fallback progressif
                 // commun plus bas, avec StartTimeTicks et sans seek local HLS.
-                var jellyfinTcCandidate = hasTC ? _u(ctx.serverUrl, src.TranscodingUrl) : ""
+                var jellyfinTcCandidate = hasTC ? CoreUrl._u(ctx.serverUrl, src.TranscodingUrl) : ""
                 var jellyfinTcIsHls = !!(jellyfinTcCandidate &&
                     (jellyfinTcCandidate.indexOf(".m3u8") >= 0 || jellyfinTcCandidate.indexOf("/hls") >= 0 ||
                      _s(src && src.TranscodingSubProtocol).toLowerCase() === "hls"))
@@ -1970,7 +1954,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                     var policyHlsAudioCodec = _policyTranscodeAudioCodecHint(ctx, src, effectiveAudioStreamIndex, true); var policyHlsAllowAudioCopy = _policyTranscodeAllowAudioCopy(ctx, src, effectiveAudioStreamIndex, true)
 
                     var policyHlsTicks = (!policyTranscodeHlsColdStart && ctx.startMs > 0) ? Math.floor(ctx.startMs * 10000) : 0
-                    newUrl = buildHlsUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
+                    newUrl = CoreUrl.buildHlsUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
                         audioStreamIndex: effectiveAudioStreamIndex,
                         subtitleStreamIndex: (!ctx.useLocalSubs && typeof ctx.selectedSubtitleStream === "number" && ctx.selectedSubtitleStream >= 0) ? ctx.selectedSubtitleStream : null,
                         subtitleMethod: subMethodWanted || null, mediaSourceId: mediaSourceId,
@@ -2003,9 +1987,9 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                 var trueHd51SubtitleMethod = trueHd51SubtitleIndex >= 0 ? (carrySafeFrenchForcedSubtitle ? "Embed" : (subMethodWanted || "Embed"))
                                            : null
                 var trueHd51Container = mp4EditListTimestampRisk ? "mkv"
-                                      : (_decidePreferredContainerWithSrc(ctx, src) || "mkv")
+                                      : (CoreUrl._decidePreferredContainerWithSrc(ctx, src) || "mkv")
 
-                newUrl = buildServerSeekProgressiveUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
+                newUrl = CoreUrl.buildServerSeekProgressiveUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
                     audioStreamIndex: effectiveAudioStreamIndex, subtitleStreamIndex: trueHd51SubtitleIndex >= 0 ? trueHd51SubtitleIndex : null,
                     subtitleMethod: trueHd51SubtitleMethod, forceNoSubtitle: trueHd51SubtitleIndex < 0,
                     mediaSourceId: mediaSourceId, playSessionId: playSessionId,
@@ -2024,13 +2008,13 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                 remuxAudioCodecLock = dvdFolderMpegRemux ? _dvdMpegAudioCodecLock(src, effectiveAudioStreamIndex)
                                    : _remuxAudioCodecLock(ctx, src, effectiveAudioStreamIndex, true, false, false)
                 var explicitSeekContainer = mp4ContainerTimelineRisk ? "mkv"
-                                          : (dvdFolderMpegRemux ? "mpeg" : (_decidePreferredContainerWithSrc(ctx, src) || (cont || pathExt || "mkv")))
+                                          : (dvdFolderMpegRemux ? "mpeg" : (CoreUrl._decidePreferredContainerWithSrc(ctx, src) || (cont || pathExt || "mkv")))
                 var explicitSeekSubMethod = carrySafeFrenchForcedSubtitle ? "Embed"
                                           : ((!ctx.useLocalSubs && typeof ctx.selectedSubtitleStream === "number" && ctx.selectedSubtitleStream >= 0)
                                               ? (subMethodWanted || (preferImageRemux ? "Embed" : null)) : null)
 
                 includeTicks = true
-                newUrl = buildServerSeekProgressiveUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
+                newUrl = CoreUrl.buildServerSeekProgressiveUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
                     audioStreamIndex: effectiveAudioStreamIndex,
                     subtitleStreamIndex: (!ctx.useLocalSubs && typeof ctx.selectedSubtitleStream === "number" && ctx.selectedSubtitleStream >= 0) ? ctx.selectedSubtitleStream : null,
                     subtitleMethod: explicitSeekSubMethod,
@@ -2052,7 +2036,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                                    : _remuxAudioCodecLock(ctx, src, effectiveAudioStreamIndex, true, false, false)
 
                 includeTicks = !!(includeTicks || forceTicksForServerRemux || ctx.forceServerSeek || (ctx.startMs || 0) > 0)
-                newUrl = _u(ctx.serverUrl, src.TranscodingUrl)
+                newUrl = CoreUrl._u(ctx.serverUrl, src.TranscodingUrl)
                 lastUsedDirectStream = false
                 lastUsedTranscoding = false
                 isServerRemux = true
@@ -2060,7 +2044,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                 remuxAudioCodecLock = _remuxAudioCodecLock(ctx, src, effectiveAudioStreamIndex, true, false, false)
 
                 includeTicks = true
-                newUrl = _buildRemuxProgressiveUrl( ctx,
+                newUrl = CoreUrl._buildRemuxProgressiveUrl( ctx,
                     src, mediaSourceId,
                     playSessionId, effectiveAudioStreamIndex,
                     carrySafeFrenchForcedSubtitle ? "Embed" : null, includeTicks,
@@ -2076,11 +2060,11 @@ function negotiatePlayback(ctx, onSuccess, onError) {
 
                 includeTicks = !!(includeTicks || forceTicksForServerRemux || ctx.forceServerSeek)
                 var forcedCont0 = mp4ContainerTimelineRisk ? "mkv"
-                                : (dvdFolderMpegRemux ? "mpeg" : (_decidePreferredContainerWithSrc(ctx, src) || (cont || pathExt || "mkv")))
+                                : (dvdFolderMpegRemux ? "mpeg" : (CoreUrl._decidePreferredContainerWithSrc(ctx, src) || (cont || pathExt || "mkv")))
                 var strictSubMethod = carrySafeFrenchForcedSubtitle ? "Embed"
                                     : ((!ctx.useLocalSubs && typeof ctx.selectedSubtitleStream === "number" && ctx.selectedSubtitleStream >= 0)
                                         ? (subMethodWanted || (preferImageRemux ? "Embed" : null)) : null)
-                newUrl = _buildRemuxProgressiveUrl( ctx,
+                newUrl = CoreUrl._buildRemuxProgressiveUrl( ctx,
                     src, mediaSourceId,
                     playSessionId, effectiveAudioStreamIndex,
                     strictSubMethod, includeTicks,
@@ -2092,7 +2076,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                 isServerRemux = true
             } else if (wantDpLocalSeek) {
 
-                newUrl = getVideoStreamUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
+                newUrl = CoreUrl.getVideoStreamUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
                     mediaSourceId: mediaSourceId, container: _containerOrExt(src)
                 })
                 includeTicks = false
@@ -2100,7 +2084,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                 lastUsedTranscoding = false
             } else if (wantDpStatic) {
 
-                newUrl = getVideoStreamUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
+                newUrl = CoreUrl.getVideoStreamUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
                     mediaSourceId: mediaSourceId, container: _containerOrExt(src)
                 })
                 includeTicks = false
@@ -2109,7 +2093,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
             } else if (mustHls) {
 
                 var hlsTicks = (ctx.startMs > 0) ? Math.floor(ctx.startMs * 10000) : 0
-                newUrl = buildHlsUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
+                newUrl = CoreUrl.buildHlsUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
                     audioStreamIndex: effectiveAudioStreamIndex,
                     subtitleStreamIndex: (!ctx.useLocalSubs && typeof ctx.selectedSubtitleStream === "number" && ctx.selectedSubtitleStream >= 0) ? ctx.selectedSubtitleStream : null,
                     subtitleMethod: subMethodWanted || "Hls", mediaSourceId: mediaSourceId,
@@ -2124,8 +2108,8 @@ function negotiatePlayback(ctx, onSuccess, onError) {
             } else if ((wantsServerSelect || subMethodWanted === "Embed" || ctx.forceServerSeek === true) && !forceTranscodeByPolicy) {
                 remuxAudioCodecLock = _remuxAudioCodecLock(ctx, src, effectiveAudioStreamIndex, true, false, false)
 
-                var includeRemuxTicks = !!((includeTicks && (ctx.startMs || 0) > 0) || ctx.forceServerSeek === true); var forcedCont1 = _decidePreferredContainerWithSrc(ctx, src) || (cont || pathExt || "mkv")
-                newUrl = _buildRemuxProgressiveUrl( ctx,
+                var includeRemuxTicks = !!((includeTicks && (ctx.startMs || 0) > 0) || ctx.forceServerSeek === true); var forcedCont1 = CoreUrl._decidePreferredContainerWithSrc(ctx, src) || (cont || pathExt || "mkv")
+                newUrl = CoreUrl._buildRemuxProgressiveUrl( ctx,
                     src, mediaSourceId,
                     playSessionId, effectiveAudioStreamIndex,
                     subMethodWanted, includeRemuxTicks,
@@ -2138,7 +2122,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                 isServerRemux = true
             } else if (hasTC && ctx.forceAllowTranscoding === true) {
 
-                newUrl = _u(ctx.serverUrl, src.TranscodingUrl)
+                newUrl = CoreUrl._u(ctx.serverUrl, src.TranscodingUrl)
                 includeTicks = true
                 lastUsedTranscoding = true
                 lastUsedDirectStream = false
@@ -2150,7 +2134,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                 var policyTicks = (policyTranscodeUseHls && policyTranscodeHlsColdStart) ? 0 : ((ctx.startMs > 0) ? Math.floor(ctx.startMs * 10000) : 0)
                 if (policyTranscodeUseHls) {
                     var fallbackPolicyAudioCodec = _policyTranscodeAudioCodecHint(ctx, src, effectiveAudioStreamIndex, true); var fallbackPolicyAllowAudioCopy = _policyTranscodeAllowAudioCopy(ctx, src, effectiveAudioStreamIndex, true)
-                    newUrl = buildHlsUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
+                    newUrl = CoreUrl.buildHlsUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
                         audioStreamIndex: effectiveAudioStreamIndex,
                         subtitleStreamIndex: (!ctx.useLocalSubs && typeof ctx.selectedSubtitleStream === "number" && ctx.selectedSubtitleStream >= 0) ? ctx.selectedSubtitleStream : null,
                         subtitleMethod: subMethodWanted || null, mediaSourceId: mediaSourceId,
@@ -2170,11 +2154,11 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                     var fallbackProgressiveAudioPlan = _safeFullTranscodeAudioPlan( src,
                         effectiveAudioStreamIndex, _policyTranscodeAudioCodecHint(ctx, src, effectiveAudioStreamIndex, false),
                         _policyTranscodeAllowAudioCopy(ctx, src, effectiveAudioStreamIndex, false) )
-                    newUrl = buildHighQualityProgressiveTranscodeUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
+                    newUrl = CoreUrl.buildHighQualityProgressiveTranscodeUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
                         audioStreamIndex: effectiveAudioStreamIndex,
                         subtitleStreamIndex: (!ctx.useLocalSubs && typeof ctx.selectedSubtitleStream === "number" && ctx.selectedSubtitleStream >= 0) ? ctx.selectedSubtitleStream : null,
                         subtitleMethod: subMethodWanted, mediaSourceId: mediaSourceId,
-                        container: _decidePreferredContainerWithSrc(ctx, src) || "mkv", playSessionId: playSessionId || "",
+                        container: CoreUrl._decidePreferredContainerWithSrc(ctx, src) || "mkv", playSessionId: playSessionId || "",
                         startTimeTicks: policyTicks, videoCodec: policyTranscodeVideoCodec || "h264",
                         audioCodec: fallbackProgressiveAudioPlan.codec,
                         forceNoSubtitle: !(typeof ctx.selectedSubtitleStream === "number" && ctx.selectedSubtitleStream >= 0),
@@ -2202,11 +2186,11 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                                                : (carrySafeFrenchForcedSubtitle ? safeFrenchForcedSubIndex
                                                   : ((!ctx.useLocalSubs && typeof ctx.selectedSubtitleStream === "number" && ctx.selectedSubtitleStream >= 0)
                                                      ? ctx.selectedSubtitleStream : -1))
-                newUrl = buildServerSeekProgressiveUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
+                newUrl = CoreUrl.buildServerSeekProgressiveUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
                     audioStreamIndex: effectiveAudioStreamIndex, subtitleStreamIndex: fallbackTrueHd51SubIndex >= 0 ? fallbackTrueHd51SubIndex : null,
                     subtitleMethod: fallbackTrueHd51SubIndex >= 0 ? (carrySafeFrenchForcedSubtitle ? "Embed" : (subMethodWanted || "Embed")) : null,
                     forceNoSubtitle: fallbackTrueHd51SubIndex < 0, mediaSourceId: mediaSourceId,
-                    playSessionId: playSessionId || "", container: _decidePreferredContainerWithSrc(ctx, src) || "mkv",
+                    playSessionId: playSessionId || "", container: CoreUrl._decidePreferredContainerWithSrc(ctx, src) || "mkv",
                     startTimeTicks: trueHd51Ticks, videoCodec: _selectedVideoCodec(src),
                     audioCodec: "ac3", allowAudioStreamCopy: false,
                     allowVideoStreamCopy: true, enableAutoStreamCopy: false,
@@ -2221,7 +2205,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
             } else if (mustHls) {
 
                 var fallbackHlsTicks = (ctx.startMs > 0) ? Math.floor(ctx.startMs * 10000) : 0
-                newUrl = buildHlsUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
+                newUrl = CoreUrl.buildHlsUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
                     audioStreamIndex: effectiveAudioStreamIndex,
                     subtitleStreamIndex: (!ctx.useLocalSubs && typeof ctx.selectedSubtitleStream === "number" && ctx.selectedSubtitleStream >= 0) ? ctx.selectedSubtitleStream : null,
                     subtitleMethod: subMethodWanted || "Hls", mediaSourceId: mediaSourceId,
@@ -2235,7 +2219,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                 lastUsedDirectStream = false
             } else if (!wantsServerSelect && !forceServerRemux && !forceTranscodeByPolicy && !fragileSeekRemux) {
 
-                newUrl = getVideoStreamUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
+                newUrl = CoreUrl.getVideoStreamUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
                     mediaSourceId: mediaSourceId, container: _containerOrExt(src)
                 })
                 includeTicks = false
@@ -2245,8 +2229,8 @@ function negotiatePlayback(ctx, onSuccess, onError) {
             } else {
                 remuxAudioCodecLock = _remuxAudioCodecLock(ctx, src, effectiveAudioStreamIndex, true, false, false)
 
-                var fbCont = src ? (_decidePreferredContainerWithSrc(ctx, src) || _containerOrExt(src) || "mkv") : "mkv"
-                newUrl = buildProgressiveUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
+                var fbCont = src ? (CoreUrl._decidePreferredContainerWithSrc(ctx, src) || _containerOrExt(src) || "mkv") : "mkv"
+                newUrl = CoreUrl.buildProgressiveUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
                     audioStreamIndex: effectiveAudioStreamIndex,
                     subtitleStreamIndex: (serverExternalTextSubtitle ? null : (carrySafeFrenchForcedSubtitle ? safeFrenchForcedSubIndex : ((!ctx.useLocalSubs && typeof ctx.selectedSubtitleStream === "number" && ctx.selectedSubtitleStream >= 0) ? ctx.selectedSubtitleStream : null))),
                     subtitleMethod: serverExternalTextSubtitle ? null : (carrySafeFrenchForcedSubtitle ? "Embed" : subMethodWanted), mediaSourceId: mediaSourceId,
@@ -2264,7 +2248,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                 isServerRemux = true
             }
         }
-        var forcedContainer = mp4ContainerTimelineRisk ? "mkv" : (ctx.preferredContainer || _decidePreferredContainerWithSrc(ctx, src)); var looksLikeHls = (newUrl.indexOf(".m3u8") >= 0) || (newUrl.indexOf("/hls") >= 0)
+        var forcedContainer = mp4ContainerTimelineRisk ? "mkv" : (ctx.preferredContainer || CoreUrl._decidePreferredContainerWithSrc(ctx, src)); var looksLikeHls = (newUrl.indexOf(".m3u8") >= 0) || (newUrl.indexOf("/hls") >= 0)
         var policyTranscode = !!(forceTranscodeByPolicy && lastUsedTranscoding); var dvdSubFileTranscodeActive = !!(forceDvdSubFileTranscode && lastUsedTranscoding && !looksLikeHls)
         var interlacedTsTranscodeActive = !!(forceInterlacedTsTranscode && lastUsedTranscoding && !looksLikeHls)
         var policyTranscodeAudioCodecLock = policyTranscode ? _policyTranscodeAudioCodecHint(ctx, src, effectiveAudioStreamIndex, looksLikeHls) : null
@@ -2367,7 +2351,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                                          : (forceImageBurnIn ? "Encode"
                                                : (looksLikeHls ? (subMethodWanted || "Hls") : subMethodWanted)))))
 
-        newUrl = _forceQuery( newUrl,
+        newUrl = CoreUrl._forceQuery( newUrl,
             ctxForQuery, finalSubMethodForQuery,
             includeTicks )
 
@@ -2379,7 +2363,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
             if (onError) onError("invalid_playback_url")
             return
         }
-        if (!validatePlaybackUrlStrict(newUrl, ctx.serverUrl)) {
+        if (!CoreUrl._transportValidatePlaybackUrlStrict(newUrl, ctx.serverUrl)) {
             delete _inFlightWaiters[key]
 
             if (onError) onError("invalid_playback_url")
@@ -2410,8 +2394,8 @@ function negotiatePlayback(ctx, onSuccess, onError) {
         var externalSub = null
         if ((forceLocalOverlay || serverExternalTextSubtitle) && !looksLikeHls && mediaSourceId && typeof ctx.selectedSubtitleStream === "number") {
             externalSub = {
-                urlSrt: _subtitleResultUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, mediaSourceId, ctx.selectedSubtitleStream, "srt"),
-                urlVtt: _subtitleResultUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, mediaSourceId, ctx.selectedSubtitleStream, "vtt"),
+                urlSrt: CoreUrl._subtitleResultUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, mediaSourceId, ctx.selectedSubtitleStream, "srt"),
+                urlVtt: CoreUrl._subtitleResultUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, mediaSourceId, ctx.selectedSubtitleStream, "vtt"),
                 index:  ctx.selectedSubtitleStream, serverExternal: !!serverExternalTextSubtitle
             }
 
@@ -2443,6 +2427,23 @@ function negotiatePlayback(ctx, onSuccess, onError) {
             effectiveSubtitleStreamIndex = safeFrenchForcedSubIndex
             effectiveSubtitleMode = "directplay"
             effectiveSubtitleReason = "safeFrenchForcedDefault"
+        }
+        // En DirectPlay statique, Jellyfin ne porte pas forcément les index de
+        // pistes dans l'URL : QtMultimedia choisit alors directement dans le
+        // conteneur. On expose ce choix natif à l'UI uniquement, sans modifier
+        // la source ni déclencher une nouvelle négociation.
+        var pureStaticDirectPlay = !isServerRemux && !isHls &&
+                !lastUsedTranscoding && !lastUsedDirectStream
+        if (pureStaticDirectPlay) {
+            if (effectiveSubtitleStreamIndex < 0 && ctx.useLocalSubs !== true &&
+                    !forceLocalOverlay && !serverExternalTextSubtitle) {
+                var nativeDpSubtitleIndex = _nativeDirectPlaySubtitleIndex(src)
+                if (nativeDpSubtitleIndex >= 0) {
+                    effectiveSubtitleStreamIndex = nativeDpSubtitleIndex
+                    effectiveSubtitleMode = "directplay"
+                    effectiveSubtitleReason = "nativeDirectPlayFirstInternal"
+                }
+            }
         }
         // Un forceServerSeek doit toujours prendre le pas sur le cold-start local.
         // Sinon un HLS correctement reconstruit avec StartTimeTicks serait encore

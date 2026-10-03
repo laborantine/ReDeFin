@@ -1,11 +1,10 @@
 // ReDeFin DirectPlay : les sous-titres externes dormants ne forcent pas le remux initial.
 // Le routage texte QML reste réservé au DirectPlay pur ; remux, DirectStream,
-// transcodage et HLS restent gérés côté serveur. Les ticks Jellyfin sont figés
-// avant Stop/Retour et le reporting de reprise reste délégué aux modules JS.
 import QtQuick 2.15
+import "../js/NavigationContext.js" as NavContext
 import QtMultimedia 5.15
-import "../components" as Components
 import "../js/JellyfinPlaybackRouter.js" as JF
+import "../js/PlayerSession.js" as PlayerSession
 import "../js/jellyfinBridge.js"  as JFB
 import "../js/playerOverlayHelper.js" as H
 import "../js/SkipIntro.js" as SkipIntro
@@ -15,18 +14,12 @@ FocusScope {
     focus: true
     z: 900
     clip: false
-
-    // Le PlayerOverlay doit toujours être visuellement opaque par rapport à la
-    // page détail située dessous. Pendant un changement de source ou les toutes
     // premières frames du nouveau MediaPlayer, VideoOutput peut momentanément
-    // ne rien dessiner. Ce fond empêche alors DetailMovie/DetailSerie de
-    // transparaître sans modifier le pipeline vidéo.
     Rectangle {
         anchors.fill: parent
         color: "#000000"
         z: 0
     }
-
     property var settingsRef: null
     property bool topbarShowClock: true
     // Le noyau MediaPlayer/VideoOutput reste créé synchronement. Les sous-vues purement UI sont armées après une courte frame afin d'étaler le coût de création sur Révolution sans modifier le backend multimédia.
@@ -58,7 +51,21 @@ FocusScope {
                 controls: controlsTimer,
                 resumeCheckpoint: resumeCheckpointTimer,
                 frozenWatch: frozenPlaybackWatchTimer,
-                mediaGuard: mediaErrorRecoveryGuard
+                mediaGuard: mediaErrorRecoveryGuard,
+                nextRearm: nextRearmTimer,
+                topBarApply: topBarApplyTimer,
+                sourceReset: sourceResetTimer,
+                coalescedLocalSeek: coalescedLocalSeekTimer,
+                pauseResumeProbe: pauseResumeProbeTimer,
+                trackSwitchFailureRestart: trackSwitchFailureRestartTimer,
+                trackSwitchVerifiedResume: trackSwitchVerifiedResumeTimer,
+                videoLoadingShow: videoLoadingShowTimer,
+                videoLoadingHide: videoLoadingHideTimer,
+                videoLoadingRelease: videoLoadingReleaseTimer,
+                speedPopupFadeOut: speedDirectPlayPopupFadeOutTimer,
+                speedPopupCleanup: speedDirectPlayPopupCleanupTimer,
+                playbackRateSync: playbackRateSyncTimer,
+                nextHidden: nextHiddenWaiter
             })
         }
         return __playbackTimerRefs
@@ -96,6 +103,8 @@ FocusScope {
     property int frozenPlaybackStartupGraceMs: 2800
     // Overlay visuel de chargement vidéo. Il n'influence jamais la politique DirectPlay / remux / transcodage et reste purement informatif.
     property bool videoLoadingGate: true
+    // initiale ou d'un buffering, et sert de base au verrou transport.
+    property string _videoLoadingReason: ""
     property bool videoLoadingVisible: false
     property int videoLoadingShowDelayMs: 180
     property int videoLoadingHideDelayMs: 90
@@ -121,12 +130,14 @@ FocusScope {
     }
     function _armVideoLoading(reason){
         videoLoadingGate = true
+        _videoLoadingReason = String(reason || "")
         try { videoLoadingHideTimer.stop() } catch(e0) {}
         if (!videoLoadingVisible && !videoLoadingShowTimer.running)
             videoLoadingShowTimer.restart()
     }
     function _releaseVideoLoading(reason){
         videoLoadingGate = false
+        _videoLoadingReason = ""
         if (!videoLoadingRequested) {
             try { videoLoadingShowTimer.stop() } catch(e0) {}
             videoLoadingHideTimer.restart()
@@ -149,8 +160,14 @@ FocusScope {
             videoLoadingHideTimer.restart()
         }
     }
+    // Retour, Stop, la sortie du lecteur et Lecture/Pause restent actifs.
+    readonly property bool _reloadInProgress: H.reloadBlocksTransport(root)
+    function _transportLocked(origin){
+        if (!_reloadInProgress) return false
+        resetControlsTimer()
+        return true
+    }
     function _nowMs(){ return Date.now ? Date.now() : (new Date()).getTime() }
-
     function _serverTimedLike(){ return !!(serverTimedStream||timeShifted||lastUsedServerRemux||baseOffsetMs>0) }
     function _seekLocalPosition(localTarget){
         mp.seek(localTarget)
@@ -172,7 +189,6 @@ FocusScope {
     property string currentItemTitle: ""
     property string currentItemLogoUrl: ""
     property string currentItemType: ""
-    // Pré-roll Jellyfin (/Items/{itemId}/Intros), alimenté notamment par jellyfin-plugin-intros. L'item principal reste toujours root.itemId.
     property bool serverPrerollEnabled: true
     property int _serverPrerollState: 0 // 0=idle, 1=resolve, 2=intro, 3=main switch, 4=done
     readonly property bool serverPrerollBlocking:
@@ -194,38 +210,36 @@ FocusScope {
     readonly property bool currentItemIsEpisode:
         String(currentItemType || "").toLowerCase() === "episode"
     property bool _topBarLogoReadyForCurrent: false
-    property string _topBarLogoCandidateNorm: ""
-    property int _topBarLogoReadyPollsLeft: 0
     property var    fbx
     property var    shared: null
     property string playbackDeviceMode: ""
     property string playbackBackendMode: ""
     // Politique de lecture utilisateur. "smart" conserve les heuristiques ReDeFin ; "directplay" supprime uniquement les remux automatiques de préférence.
     property string playbackRuleMode: "smart"
-    function _normalizedPlaybackRuleMode(value){ return JF.normalizePlaybackRuleMode(value) }
+    function _normalizedPlaybackRuleMode(value) {
+        return JF.normalizePlaybackRuleMode(value)
+    }
     function _smartPlaybackRulesEnabled(){
-        // La préférence appartient à cette instance de PlayerOverlay. Ne pas
-        // dépendre de l'état global du Router, qui peut encore refléter le
-        // player précédent pendant quelques millisecondes au chargement.
         return _normalizedPlaybackRuleMode(playbackRuleMode) !== "directplay"
     }
-    function _syncPlaybackRuleMode(reason){ var m=_normalizedPlaybackRuleMode(playbackRuleMode); if(playbackRuleMode!==m)playbackRuleMode=m; JF.setPlaybackRuleMode(m) }
-    function _syncPlaybackBackend(reason){ JF.syncPlayerBackendContext(root) }
-    function _sharedNavApi(){ try { return shared && shared.__redefinNavApi ? shared.__redefinNavApi : null } catch(e) { return null } }
-    function _storeSensitiveNavContext(){
-        var api = _sharedNavApi()
-        return api && api.storeTarget ? api.storeTarget(root) : false
+    function _syncPlaybackRuleMode(reason) {
+        var mode = _normalizedPlaybackRuleMode(playbackRuleMode)
+        if (playbackRuleMode !== mode) playbackRuleMode = mode
+        JF.setPlaybackRuleMode(mode)
+    }
+    function _storeSensitiveNavContext() {
+        return NavContext.storeTarget(shared, root)
     }
     // Handshake léger avec DetailMoviePage. Le marker est posé AVANT le signal de retour afin qu'une fiche recréée sache qu'elle doit afficher son CircleDotsLoader dès sa toute première frame.
     function _markDetailReturnRefresh(reason){
         try {
             if (!shared || !itemId) return false
-            shared.__redefinDetailReturnRefresh = ({
+            NavContext.setDetailReturnRefresh(shared, ({
                 itemId: String(itemId || ""),
                 positionMs: Math.max(0, Math.floor(Number(_finalExitPositionMs || 0))),
                 reason: String(reason || "player-exit"),
                 ts: _nowMs()
-            })
+            }))
             return true
         } catch(e) {
             return false
@@ -233,7 +247,6 @@ FocusScope {
     }
     signal requestBackToDetails(string returnFocusId)
     // Reload interne demandé lors d'un passage Remux/Transcode -> DirectPlay.
-    // ShellPage détruit puis recrée PlayerOverlay afin d'obtenir une NOUVELLE
     // instance QtMultimedia, seule façon fiable de retrouver le pipeline d'un
     // DirectPlay natif sur intelce.
     signal requestDirectPlayReload()
@@ -241,23 +254,21 @@ FocusScope {
     property var    playlistRef: null
     property var    playerPlaylist: []
     property string playerPlaylistTitle: ""
-    // Une playlist explicitement lancée depuis DetailSeriePage doit ignorer
-    // PlaybackPositionTicks pour chacun de ses épisodes.
     property bool forcePlaylistStartAtZero: false
     property bool   autoplayNext: true
     property bool _internalDirectPlayReload: false
     property string selectedSeasonId: ""
     property var    seasonPageOrderIds: []   // liste d’IDs dans l’ordre d’affichage SeasonPage
     property bool clearPlaylistOnExit: true
-    function _plHasContent(){ return H.playlistHasContent(playlistRef) }
+    function _plHasContent() {
+        return PlayerSession.playlistHasContent(playlistRef)
+    }
     property bool nextOverlayEnabled: true
     property int  nextOverlayWindowMs: 30000
     property bool nextOverlayAutostart: false
     property int  tvSafeMargin: 60
     // Sous-titres texte rendus localement en DirectPlay pur.
     // Décalage VISUEL appliqué après le calcul des anchors du Loader :
-    //   + => plus bas, - => plus haut.
-    // Le déplacement positif est plafonné pour conserver la safe-area TV.
     property int  localSubtitleDirectPlayYOffset: 50
     property bool nextUserHidden: false
     function showNextPanel(){ H.showNextPanel(root, nextLoader.item) }
@@ -283,37 +294,38 @@ FocusScope {
         } else {
         }
     }
-    function _syncNextOverlayContext(){ H.syncNextOverlayContext(root, nextLoader.item) }
+    function _syncNextOverlayContext(){
+        H.syncNextOverlayContext(root, nextLoader.item)
+    }
+    function _syncPlaylistPresentation(){
+        if (!playlistRef) return
+        playlistRef.setAutoplayNext(autoplayNext)
+        playlistRef.setTitle(playerPlaylistTitle || "")
+    }
+    function _syncIncomingPlaylist(allowEmpty){
+        if (!playlistRef) return
+        if (allowEmpty || (playerPlaylist && playerPlaylist.length))
+            playlistRef.setList(playerPlaylist || [])
+        _syncPlaylistPresentation()
+    }
     onPlayerPlaylistChanged: {
-        if (playlistRef && playlistRef.list !== playerPlaylist)
-            playlistRef.list = (playerPlaylist || []).map(function(x){return String(x||"")})
+        _syncIncomingPlaylist(true)
         _syncNextOverlayContext()
     }
-    onPlayerPlaylistTitleChanged: {
-        if (playlistRef && typeof playlistRef.title !== "undefined")
-            playlistRef.title = playerPlaylistTitle || ""
-    }
-    onAutoplayNextChanged: {
-        if (playlistRef && typeof playlistRef.autoplayNext !== "undefined")
-            playlistRef.autoplayNext = autoplayNext
-    }
+    onPlayerPlaylistTitleChanged: _syncPlaylistPresentation()
+    onAutoplayNextChanged: _syncPlaylistPresentation()
     onPlaylistRefChanged: {
         if (playlistRef) {
-            if (typeof playlistRef.autoplayNext !== "undefined")
-                playlistRef.autoplayNext = autoplayNext
-            if (playerPlaylist && playerPlaylist.length)
-                playlistRef.list = (playerPlaylist || []).map(function(x){return String(x||"")})
-            if (typeof playlistRef.title !== "undefined")
-                playlistRef.title = playerPlaylistTitle || ""
+            _syncIncomingPlaylist(false)
             if (_plHasContent()) {
-                var __idx = H.syncPlaylistToCurrent(root)
-                if (__idx < 0 && typeof playlistRef.start === "function") playlistRef.start()
+                var __idx = PlayerSession.syncPlaylistToCurrent(root)
+                if (__idx < 0) playlistRef.start()
             }
         }
         _syncNextOverlayContext()
     }
-    onSelectedSeasonIdChanged:  { if(!_plHasContent()) _ensureSeasonPlaylistFromHints() }
-    onSeasonPageOrderIdsChanged:{ if(!_plHasContent()) _ensureSeasonPlaylistFromHints() }
+    onSelectedSeasonIdChanged:  { if(!_plHasContent()) PlayerSession.ensureSeasonPlaylistFromHints(root, JFB) }
+    onSeasonPageOrderIdsChanged:{ if(!_plHasContent()) PlayerSession.ensureSeasonPlaylistFromHints(root, JFB) }
     onNextUserHiddenChanged:    { _syncNextOverlayContext() }
     property bool skipIntroEnabled: true
     property var  skipIntroSegment: null       // { startMs, endMs, promptMs, hideMs, source, type }
@@ -330,33 +342,48 @@ FocusScope {
     property bool skipIntroPlaybackArmed: false
     property int  skipIntroPlaybackStartMs: 0
     property bool _skipIntroMainSourceSeen: false
-    // Verrou uniquement pour éviter de re-prioriser SkipIntro pendant que le
-    // chrome reste visible après une sortie volontaire (↓ ou ←/→). Dès que le
     // chrome est totalement masqué, SkipIntro redevient éligible à l'auto-focus.
     property bool skipIntroFocusReleasedByUser: false
     property bool skipIntroFocusClaimed: false
     // Distingue le focus pris automatiquement lorsque le chrome est masqué du
     // focus demandé explicitement avec ↑ depuis la progressbar. Seul le premier
-    // doit être rendu automatiquement lorsque les panneaux réapparaissent.
     property bool skipIntroAutoFocusClaimed: false
-
     onSkipIntroFocusClaimedChanged: {
         // Un seul focus visuel à la fois : quand SkipIntro est prioritaire,
         // masquer les halos ProgressBar/Transports sans perdre leur position logique.
         _updateControlsActive()
     }
-
     property bool skipIntroResumeGateActive: false
     property int skipIntroResumeTargetMs: -1
     property string skipIntroResumeGateReason: ""
-    function _armSkipIntroResumeGate(targetMs, reason){ H.armSkipIntroResumeGate(root, targetMs, reason) }
-    function _releaseSkipIntroResumeGate(actualUiMs){ H.releaseSkipIntroResumeGate(root, SkipIntro, skipIntroLoader.item, actualUiMs) }
-    function _setSkipIntroItemActive(it, show){ H.setSkipIntroItemActive(root, SkipIntro, it, show) }
-    function _syncSkipIntroOverlay(){ H.syncSkipIntroOverlay(root, SkipIntro, skipIntroLoader.item) }
-    function _resetSkipIntroState(reason){ H.resetSkipIntroState(root, SkipIntro, skipIntroLoader.item, reason) }
-    function _loadSkipIntroForCurrentItem(reason){ H.loadSkipIntroForCurrentItem(root, SkipIntro, skipIntroLoader.item, reason) }
-    function skipIntroNow(origin){ H.skipIntroNow(root, SkipIntro, skipIntroLoader.item, mp.playbackState === MediaPlayer.PlayingState, origin) }
-    function _armSkipIntroPlayback(){ return H.armSkipIntroPlayback(root, SkipIntro, skipIntroLoader.item, uiPositionMs()) }
+    function _armSkipIntroResumeGate(targetMs, reason){
+        SkipIntro.armSkipIntroResumeGate(root, targetMs, reason)
+    }
+    function _releaseSkipIntroResumeGate(actualUiMs){
+        SkipIntro.releaseSkipIntroResumeGate(root, skipIntroLoader.item, actualUiMs)
+    }
+    function _setSkipIntroItemActive(it, show){
+        SkipIntro.setSkipIntroItemActive(root, it, show)
+    }
+    function _syncSkipIntroOverlay(){
+        SkipIntro.syncSkipIntroOverlay(root, skipIntroLoader.item)
+    }
+    function _resetSkipIntroState(reason){
+        SkipIntro.resetSkipIntroState(root, skipIntroLoader.item)
+    }
+    function _loadSkipIntroForCurrentItem(reason){
+        SkipIntro.loadSkipIntroForCurrentItem(root, skipIntroLoader.item)
+    }
+    function skipIntroNow(origin){
+        return SkipIntro.skipIntroNow(
+            root,
+            skipIntroLoader.item,
+            mp.playbackState === MediaPlayer.PlayingState
+        )
+    }
+    function _armSkipIntroPlayback(){
+        return SkipIntro.armSkipIntroPlayback(root, skipIntroLoader.item, uiPositionMs())
+    }
     function _restoreFocusAfterSkipIntro(origin){
         skipIntroFocusClaimed=false; skipIntroAutoFocusClaimed=false; controlsVisible=true; controlsFocus=cF_CONTROLS; _updateControlsActive(); _syncControlsTimer(); try{root.forceActiveFocus()}catch(e){}
     }
@@ -364,7 +391,6 @@ FocusScope {
         var w = skipIntroLoader.item
         var nativeFocus = requestNativeFocus !== false
         if (!skipIntroLoader.visible || !w || w.effectiveShow !== true) {
-            
             return false
         }
         try {
@@ -372,10 +398,8 @@ FocusScope {
                 skipIntroFocusReleasedByUser = false
                 skipIntroFocusClaimed = true
                 // Focus AUTO uniquement lorsque le chrome est caché. Lorsque les
-                // panneaux sont visibles, la priorité reste logique/visuelle.
                 skipIntroAutoFocusClaimed = (String(reason || "") === "chrome-hidden")
                 controlsTimer.stop()
-                
                 return true
             }
         } catch(e) {  }
@@ -416,28 +440,22 @@ FocusScope {
     function _applyVideoZoomMode(mode){ videoZoomMode=_normalizeVideoZoomMode(mode); return true }
     // Vitesse locale QtMultimedia, quantifiée par pas de 0,25x.
     // Certains backends QtMultimedia Freebox peuvent réinitialiser playbackRate lors d'un
-    // changement de source / état. On ne dépend donc plus d'un simple binding QML :
-    // le taux demandé est appliqué explicitement et resynchronisé avec un budget borné.
     property real playbackSpeed: 1.0
     property int _playbackRateSyncAttempts: 0
     readonly property int playbackRateSyncMaxAttempts: 4
     readonly property int playbackRateSyncDelayMs: 90
     function _normalizePlaybackSpeed(rate){
-        return JF.normalizePlayerPlaybackSpeed(rate)
+        return PlayerSession.normalizePlayerPlaybackSpeed(rate)
     }
     function _syncPlaybackSpeedToPlayer(reason, resetBudget){
-        return JF.syncPlayerPlaybackSpeed(root, mp, playbackRateSyncTimer, resetBudget)
+        return PlayerSession.syncPlayerPlaybackSpeed(root, mp, playbackRateSyncTimer, resetBudget)
     }
     function _applyPlaybackSpeed(rate){
         playbackSpeed=_normalizePlaybackSpeed(rate)
         _syncPlaybackSpeedToPlayer("user", true)
         return true
     }
-
-    // Feedback utilisateur lorsque le réglage Vitesse est utilisé sur un flux
     // qui n'est pas un DirectPlay pur. La fenêtre est non modale : elle ne
-    // capture aucune touche et disparaît automatiquement en 5 secondes, avec
-    // fondu d'entrée puis de sortie.
     property bool _speedDirectPlayPopupMounted: false
     property bool _speedDirectPlayPopupShown: false
     property string _speedDirectPlayPopupModeLabel: ""
@@ -488,7 +506,6 @@ FocusScope {
         onTriggered: root._syncPlaybackSpeedToPlayer("retry", false)
     }
     property bool   controlsVisible: true
-    // Opacité unique du chrome lecteur. Tous les éléments visuels du PlayerOverlay suivent cette même animation afin de disparaître exactement ensemble.
     readonly property bool uiChromeTargetVisible: !serverPrerollBlocking
                                                   && !nextUiLocked
                                                   && (controlsVisible || scrubActive || audioMenuVisible || subMenuVisible)
@@ -496,26 +513,16 @@ FocusScope {
     readonly property bool uiChromeRenderVisible: uiChromeTargetVisible || uiChromeOpacity > 0.001
     Behavior on uiChromeOpacity { NumberAnimation { duration: 280; easing.type: Easing.InOutQuad } }
     function _skipIntroAutoFocusAllowed() {
-        // "Pas apparent" signifie ici que le chrome a fini son fade-out ET
-        // qu'aucun panneau modal/track/scrub n'est encore actif.
-        // Une sortie volontaire de SkipIntro ne vaut que tant que le chrome
-        // reste visible : une fois le player nu, SkipIntro redevient prioritaire.
         return !uiChromeRenderVisible && !scrubActive &&
                !_chaptersPanelOpen() && !_qualityPanelOpen() && !_trackPanelOpen()
     }
     onUiChromeRenderVisibleChanged: {
-        // Le retour du chrome ne retire plus la priorité visuelle/logique.
-        // La prochaine navigation décide de la sortie : ↓ vers ProgressBar,
-        // ←/→ vers le modèle courant, ↑ reste sur SkipIntro.
         if (uiChromeRenderVisible && skipIntroFocusClaimed) {
-            
             return
         }
         if (!uiChromeRenderVisible && _skipIntroAutoFocusAllowed()) {
-            // La sortie utilisateur ne doit pas survivre au passage en plein écran
             // sans chrome. C'est un nouveau contexte de focus.
             if (skipIntroFocusReleasedByUser) {
-                
                 skipIntroFocusReleasedByUser = false
             }
             Qt.callLater(function() {
@@ -529,7 +536,15 @@ FocusScope {
     onMenuIndexChanged: {
         var clamped = menuIndex < 1 ? 1 : (menuIndex > 2 ? 2 : menuIndex)
         if (clamped !== menuIndex) { menuIndex = clamped; return }
+        H.forgetSettingsFocusIfMoved(root)
     }
+    // Dernier bouton de réglages ayant reçu le focus après un choix. Il permet
+    // de réaffirmer ce focus une fois le rechargement terminé.
+    property int    _lastSettingsFocusControl: -1
+    function _restoreFocusAfterSettingsChoice(control, origin){
+        return H.restoreFocusAfterSettingsChoice(root, control, origin)
+    }
+    function _reassertSettingsFocus(origin){ return H.reassertSettingsFocus(root, origin) }
     readonly property int cF_PROGRESS: 0
     readonly property int cF_CONTROLS: 1
     readonly property int cF_MENU: 4
@@ -549,7 +564,10 @@ FocusScope {
     }
     function _focusChaptersButtonSilent(origin){ var w=chaptersOverlayLoader.item; if(!w||!w.hasContent||w.panelOpen)return false; controlsFocus=cF_CHAPTERS; root.forceActiveFocus(); return true }
     function _openChaptersPanel(){ var w=chaptersOverlayLoader.item; if(!w||!w.hasContent)return false; controlsVisible=true; controlsTimer.stop(); return w.openPanel(uiPositionMs()) }
-    function _seekToChapterMs(ms){ return H.seekToChapter(root,mp,_playbackTimers(),ms) }
+    function _seekToChapterMs(ms){
+        if (_transportLocked("chapter-seek")) return false
+        return H.seekToChapter(root,mp,_playbackTimers(),ms)
+    }
     function _chaptersPanelOpen(){ return !!(chaptersOverlayLoader.item && chaptersOverlayLoader.item.panelOpen) }
     function _settingsOverlay(){ return settingsOverlayLoader.item }
     // Alias historique utilisé par playerOverlayHelper.js pour les trois panneaux Qualité / Zoom / Vitesse. Audio et Sous-titres conservent leurs booléens historiques dédiés afin de préserver le contrat du helper.
@@ -661,11 +679,8 @@ FocusScope {
     property int  _scrubCommitTargetUiMs: -1
     property int  scrubCommitDelayMs: 1000
     property bool commitOnKeyRelease: false
-
     // DirectPlay obtenu apres un reload complet Remux/Transcodage -> DirectPlay :
     // certains fichiers font bloquer MediaPlayer.seek() 0,5 a 1,5 s sur intelce.
-    // Les auto-repeat telecommande s'accumulent alors dans la file Qt puis
-    // explosent en rafale. On coalesce UNIQUEMENT ce chemin degrade ; le
     // DirectPlay natif conserve son seek immediat, deja plus fluide.
     property bool coalescedDirectPlaySeekMode: false
     property int  coalescedDirectPlaySeekDelayMs: 85
@@ -710,16 +725,12 @@ FocusScope {
     property string localSubFormat: ""
     property int    localSubStreamIndex: -1
     property int    _localSubtitlePickSeq: 0
-    // Handle annulable du téléchargement/conversion SRT/VTT en cours. Une seule
-    // requête locale reste active afin d'éviter les réponses Jellyfin croisées.
     property var    _localSubtitleRequestHandle: null
     property int    subtitleDelayMs: 0
     // Résolution de l'horloge locale des sous-titres. Ce seuil ne décale pas les cues : il évite seulement des écritures QML redondantes à très haute fréquence. 50 ms = précision max de 1/20 s.
     property int    subsUiPushMinDeltaMs: 50
     // QtMultimedia 5.15 notifie position/bufferProgress toutes les 1000 ms par
     // défaut. Pour les sous-titres texte locaux DirectPlay uniquement, on
-    // resserre cette cadence afin que les cues SRT/VTT apparaissent quasiment
-    // à leur timestamp réel sans timer QML supplémentaire.
     readonly property int localSubtitleNotifyIntervalMs: 80
     readonly property int normalMediaNotifyIntervalMs: 1000
     property int    _lastSubsUiPushMs: -1
@@ -738,7 +749,6 @@ FocusScope {
     property int  _pendingHardResetBaseMs: -1
     property bool   _sourceResetActive: false
     property int    _sourceResetPhase: 0       // 0=idle, 1=clear, 2=fresh source assigned
-    // "server-timed" : reset historique pour flux serveur repositionné.
     // "directplay-local" : teardown complet du backend avant un DP statique
     // issu d'un switch Remux/Transcode -> DirectPlay.
     property string _sourceResetMode: ""
@@ -787,13 +797,46 @@ FocusScope {
     property bool _pendingAudioManualDirectPlay: false
     property int  _pendingSubStream:   snt
     property int  _pendingSubIndex:    -1
+    // ===== Rechargement différé des réglages choisis en pause =====
+    // Un choix audio / sous-titre serveur / qualité effectué pendant une pause
+    property var  _deferredReloadState: null
+    property int  _deferredAudioUiIndex: -1
+    property int  _deferredSubtitleUiIndex: -1
+    property int  _deferredQualityValue: 0
+    property bool _deferredReloadReplaying: false
+    property bool _forceResumeAfterDeferredReload: false
+    property bool _coalescedNegotiationActive: false
+    property var  _coalescedNegotiationCall: null
+    // PlaybackInfo anticipé pendant PAUSE ; mp.source ne change qu'à PLAY.
+    property int _deferredPrefetchSeq: 0
+    property var _deferredPrefetchResult: null
+    property int deferredPrefetchDebounceMs: 220
+    property int deferredPrefetchTtlMs: 60000
+    function _invalidateDeferredPrefetch(reason){
+        _deferredPrefetchSeq++; _deferredPrefetchResult = null
+        try { deferredPrefetchTimer.stop() } catch(e0) {}
+    }
+    function _scheduleDeferredPrefetch(reason){
+        if (!_deferredReloadPauseActive()) { _invalidateDeferredPrefetch(reason || "not-paused"); return false }
+        _deferredPrefetchSeq++; _deferredPrefetchResult = null
+        deferredPrefetchTimer.interval = Math.max(80, deferredPrefetchDebounceMs | 0)
+        deferredPrefetchTimer.restart(); return true
+    }
+    Timer {
+        id: deferredPrefetchTimer
+        interval: Math.max(80, root.deferredPrefetchDebounceMs | 0)
+        repeat: false
+        onTriggered: H.prefetchDeferredReload(root, JF, root._deferredPrefetchSeq)
+    }
+    // Une pause réelle, hors téléchargement de source, hors scrub et hors
+    function _deferredReloadPauseActive(){
+        return !_tearingDownPlayer && !serverPrerollBlocking && !_sourceResetActive &&
+               !scrubActive && mp.playbackState === MediaPlayer.PausedState
+    }
+    function _resetDeferredReload(reason){ return H.resetDeferredReload(root, reason) }
     property int _autoLocalizeSubStream: -1
     property int resumePrerollMs: 1500
     property bool   scrobbleEnabled: true
-    // Cadence de reprise : PlaybackPositionTicks est écrit très régulièrement
-    // côté Jellyfin via le progressTimer existant, sans timer QML supplémentaire.
-    // Cadence canonique Jellyfin : Progress + UserData, mêmes ticks.
-    property int    progressEveryMs: 2500
     property int    userDataEveryMs: 2500
     property int    resumeCheckpointDelayMs: 1800
     property bool   _startedReported: false
@@ -875,55 +918,63 @@ FocusScope {
         return idx < 0 ? Math.max(0, Math.min(subtitleIndex|0, count-1))
                        : Math.max(0, Math.min(idx|0, count-1))
     }
+    function _displayAudioUiIndexForSettings(){
+        return _deferredAudioUiIndex >= 0 ? _deferredAudioUiIndex
+                                          : _effectiveAudioUiIndexForSettings()
+    }
+    function _displaySubtitleUiIndexForSettings(){
+        return _deferredSubtitleUiIndex >= 0 ? _deferredSubtitleUiIndex
+                                             : _effectiveSubtitleUiIndexForSettings()
+    }
+    function _deferredSelectionNote(pending){
+        return pending ? "Appliqué à la reprise" : ""
+    }
     function _syncTrackMenuIndexes(reason){
         // Les index Audio sont alignés sur les vraies pistes. Les sous-titres
-        // conservent seuls l'index synthétique 0 pour « Aucun ».
         H.syncTrackMenuIndexes(root, null, null)
         var w=_settingsOverlay()
         if(w && w.syncTrackIndexes)
-            w.syncTrackIndexes(_effectiveAudioUiIndexForSettings(),
-                               _effectiveSubtitleUiIndexForSettings())
+            w.syncTrackIndexes(_displayAudioUiIndexForSettings(),
+                               _displaySubtitleUiIndexForSettings())
     }
     function _applyOriginalDirectPlayFromQuality(){
         manualQualityBitrate = 0
         manualRemuxMode = false
         // Le changement de qualité n'est PAS un changement de piste audio.
         // Il doit ouvrir le même fichier statique qu'un DirectPlay démarré à
-        // froid, puis restaurer la position localement. Le détour historique
         // par handleAudioPick() injectait le temps courant dans la négociation
-        // et pouvait déclencher le remux de seek préventif du Core.
         try {
-            return H.handleQualityDirectPlay(root, mp) !== false
+            return PlayerSession.applyOriginalDirectPlayQuality(root, mp) !== false
         } catch(e) {
             return false
         }
     }
     function _applyManualRemuxFromQuality(){
-        return JF.applyManualRemuxQuality(root, mp)
+        return PlayerSession.applyManualRemuxQuality(root, mp)
     }
     function _applyAutomaticQualityFromQuality(){
-        return JF.applyAutomaticQuality(root, mp)
+        return PlayerSession.applyAutomaticQuality(root, mp)
     }
     function durationMs(){
-        return JF.playerDurationMs(root, mp)
+        return PlayerSession.playerDurationMs(root, mp)
     }
     function uiPositionMs(){
-        return JF.playerUiPositionMs(root, mp)
+        return PlayerSession.playerUiPositionMs(root, mp)
     }
     function subtitleClockMs(){
-        return JF.playerSubtitleClockMs(root, mp)
+        return PlayerSession.playerSubtitleClockMs(root, mp)
     }
     function keepUi(){
-        return JF.playerKeepUiPosition(root, mp)
+        return PlayerSession.playerKeepUiPosition(root, mp)
     }
     function _ticks(ms){
         return Math.max(0, ms | 0) * 10000
     }
     function _rememberPersistablePositionMs(pos, reason){
-        return JF.rememberPlayerPersistablePosition(root, mp, pos, reason)
+        return PlayerSession.rememberPlayerPersistablePosition(root, mp, pos, reason)
     }
     function _capturePersistablePositionMs(reason){
-        return JF.capturePlayerPersistablePosition(root, mp, reason)
+        return PlayerSession.capturePlayerPersistablePosition(root, mp, reason)
     }
     function _sendPlaybackCheckpoint(reason, isPaused, includeSessionProgress){
         if (serverPrerollBlocking)
@@ -934,20 +985,15 @@ FocusScope {
             return false
         var pos = _capturePersistablePositionMs(reason || "checkpoint")
         if (pos <= 0) return false
-
-        // Une seule position capturée devient l'autorité du checkpoint.
-        // IMPORTANT Jellyfin : UserData doit être écrit APRES Progress afin que
         // la position exacte ReDeFin reste la dernière écriture du cycle.
         _rememberPersistablePositionMs(pos, reason || "checkpoint")
         _sendStartIfNeeded(pos)
-
         function persistExactUserData(){
             if (_tearingDownPlayer || _playbackExitInProgress) return
             JFB.updateUserPlaybackPosition(serverUrl, accessToken, userId, itemId,
                                            _ticks(pos), function(){}, function(){})
             _lastUserDataSentMs = _nowMs()
         }
-
         if (includeSessionProgress === true && playSessionId) {
             _sendProgress(!!isPaused, pos, function(){ persistExactUserData() })
             _lastProgressSentMs = _nowMs()
@@ -956,9 +1002,6 @@ FocusScope {
         }
         return true
     }
-    function _sendUserDataCheckpoint(reason){
-        return _sendPlaybackCheckpoint(reason, false, false)
-    }
     function _finalizeCurrentSessionForSwitch(reason){
         if (!playSessionId || _stoppedReportedSessionId === playSessionId ||
                 _stoppedPendingSessionId === playSessionId)
@@ -966,31 +1009,30 @@ FocusScope {
         var pos = _capturePersistablePositionMs(reason || "item-switch")
         try { progressTimer.stop() } catch(e0) {}
         try { resumeCheckpointTimer.stop() } catch(e1) {}
-        JF.sendStoppedAtPosition(root, JFB, pos, function(){})
+        PlayerSession.sendStoppedAtPosition(root, JFB, pos, function(){})
     }
     function finalizePlaybackAndExit(reason){
         if (_playbackExitInProgress)
             return true
         var wasServerPreroll = serverPrerollBlocking
         if (wasServerPreroll)
-            _abortServerPrerollForExit(reason || "exit")
+            PlayerSession.abortServerPrerollForExit(root, mp, JFB, reason || "exit")
         _finalExitPositionMs = wasServerPreroll ? 0 : _capturePersistablePositionMs(reason || "exit")
         if (!wasServerPreroll)
             _rememberPersistablePositionMs(_finalExitPositionMs, reason || "exit")
         _playbackExitInProgress = true
+        _resetDeferredReload("player-exit")
         try { scrubCommitTimer.stop() } catch(e0) {}
         _cancelCoalescedLocalSeek()
         try { resumeCheckpointTimer.stop() } catch(e1) {}
         try { progressTimer.stop() } catch(e2) {}
-        // L'appel HTTP est amorcé avec une position figée avant que Qt ne puisse remettre mp.position à zéro. Le verrou bloque ensuite tous les handlers de StoppedState susceptibles d'écraser ces ticks.
-        JF.sendStoppedAtPosition(root, JFB, _finalExitPositionMs, function(){})
+        PlayerSession.sendStoppedAtPosition(root, JFB, _finalExitPositionMs, function(){})
         _tearingDownPlayer = true
         try { H.cancelLocalSubtitleRequest(root, "player-exit") } catch(eCancelSub) {}
         scrubActive = false
         scrubAccumUiMs = -1
         _scrubCommitTargetUiMs = -1
         try { mp.stop() } catch(e3) {}
-        // Le retour peut recréer ou simplement réafficher DetailMoviePage. Dans les deux cas, le marker empêche toute frame de fiche obsolète.
         _markDetailReturnRefresh(reason || "player-exit")
         try { requestBackToDetails(itemId || "") } catch(e4) {}
         return true
@@ -1008,22 +1050,66 @@ FocusScope {
     function _retrySeekRestoreWithJellyfinCopyRemux(targetUi, reason){
         H.retrySeekRestoreWithJellyfinCopyRemux(root, mp, _playbackTimers(), targetUi, reason)
     }
-    function _finishTrackSwitchRebase(reason){ H.finishTrackSwitchRebase(root, trackSwitchSettleTimer) }
+    function _finishTrackSwitchRebase(reason){
+        H.finishTrackSwitchRebase(root, trackSwitchSettleTimer)
+        _reassertSettingsFocus("track-switch-done")
+    }
     // Etat affiché dans Qualité vidéo. Le menu reflète le mode réellement obtenu.
     function _qualityOriginalDirectPlaySelected(){
-        return JF.qualityOriginalDirectPlaySelected(root, mp)
+        return PlayerSession.qualityOriginalDirectPlaySelected(root, mp)
     }
     function _qualityRemuxSelected(){
-        return JF.qualityRemuxSelected(root, mp)
+        return PlayerSession.qualityRemuxSelected(root, mp)
     }
     function _qualityAutomaticServerSelected(){
-        return JF.qualityAutomaticServerSelected(root, mp)
+        return PlayerSession.qualityAutomaticServerSelected(root, mp)
     }
     function _qualityAutomaticServerLabel(){
-        return JF.qualityAutomaticServerLabel(root)
+        return PlayerSession.qualityAutomaticServerLabel(root)
     }
     function _qualityStatusText(){
-        return JF.qualityStatusText(root, mp)
+        return PlayerSession.qualityStatusText(root, mp)
+    }
+    // Valeur du panneau Qualité vidéo réellement cochée, avec exactement le
+    function _activeQualityChoiceValue(){
+        if (_qualityOriginalDirectPlaySelected()) return -1
+        if (_qualityRemuxSelected()) return -2
+        if (_qualityAutomaticServerSelected()) return -3
+        if (manualQualityBitrate > 0) return manualQualityBitrate
+        return -3
+    }
+    // Qualité vidéo réellement affichée par le panneau : une attente prend le
+    // pas sur l'état appliqué.
+    function _displayQualityBitrate(){
+        return _deferredQualityValue > 0 ? _deferredQualityValue : manualQualityBitrate
+    }
+    function _displayQualityDirectPlaySelected(){
+        return _deferredQualityValue !== 0 ? _deferredQualityValue === -1
+                                           : _qualityOriginalDirectPlaySelected()
+    }
+    function _displayQualityRemuxSelected(){
+        return _deferredQualityValue !== 0 ? _deferredQualityValue === -2
+                                           : _qualityRemuxSelected()
+    }
+    function _displayQualityAutomaticSelected(){
+        return _deferredQualityValue !== 0 ? _deferredQualityValue === -3
+                                           : _qualityAutomaticServerSelected()
+    }
+    function _displayQualityStatusText(){
+        return _deferredQualityValue !== 0 ? "Appliqué à la reprise de la lecture"
+                                           : _qualityStatusText()
+    }
+    // Point d'entrée unique du panneau Qualité vidéo : une seule place décide
+    // d'ignorer, de différer ou d'appliquer un choix de qualité.
+    function _applyQualityChoice(requested){
+        requested = Math.floor(Number(requested || 0))
+        if (requested === 0) return false
+        if (H.decideQualityChoice(root, requested) !== "applyNow") return true
+        if (requested === -3) return _applyAutomaticQualityFromQuality()
+        if (requested === -2) return _applyManualRemuxFromQuality()
+        if (requested === -1) return _applyOriginalDirectPlayFromQuality()
+        manualRemuxMode = false
+        return PlayerSession.applyManualBitrateQuality(root, mp, requested)
     }
     function _effectiveTopBarTitle(){
         // Tant que le logo n'est pas réellement prêt, le titre conserve son fallback centré. Dès qu'un logo est confirmé Ready, le TopBar central se libère. Pour un épisode, le titre est alors rendu juste sous le logo par episodeLogoTitle ci-dessous.
@@ -1032,33 +1118,19 @@ FocusScope {
     function _syncTopBarLogoReadyState(){
         var candidateNorm = _normalizeUrl(_pendingLogo || "")
         var readyNorm = ""
+        var ready = false
         try {
-            if (topBarLoader.item && topBarLoader.item._lastGoodUrl !== undefined)
-                readyNorm = _normalizeUrl(String(topBarLoader.item._lastGoodUrl || ""))
-        } catch(e0) {
-            readyNorm = ""
-        }
-        var ready = candidateNorm.length > 0 && readyNorm === candidateNorm
+            if (topBarLoader.item && topBarLoader.item.logoReady === true) {
+                readyNorm = _normalizeUrl(String(topBarLoader.item.readyLogoUrl || ""))
+                ready = candidateNorm.length > 0 && readyNorm === candidateNorm
+            }
+        } catch(e0) {}
         if (_topBarLogoReadyForCurrent !== ready) {
             _topBarLogoReadyForCurrent = ready
             _pendingTitle = _effectiveTopBarTitle()
             _queueTopBarPush()
         }
         return ready
-    }
-    Timer {
-        id: topBarLogoReadyTimer
-        interval: 100
-        repeat: false
-        running: false
-        onTriggered: {
-            if (_syncTopBarLogoReadyState())
-                return
-            if (_topBarLogoReadyPollsLeft > 0 && _pendingLogo && _pendingLogo.length > 0) {
-                _topBarLogoReadyPollsLeft--
-                restart()
-            }
-        }
     }
     function refreshCurrentItemTitle(){
         if (!serverUrl || !accessToken || !itemId) {
@@ -1075,14 +1147,14 @@ FocusScope {
                 return
             currentItemType = String(it && it.Type || "")
             currentItemTitle = H.labelForItem(it, itemTitle || "")
-            currentItemLogoUrl = H.logoUrlFromItem(root, it)
+            currentItemLogoUrl = H.logoUrlFromItem(root, JFB, it)
             if (H.hasQueryTag(currentItemLogoUrl)) {
                 lastGoodLogoUrl = currentItemLogoUrl
                 lastGoodLogoItemId = (it && it.Id) ? String(it.Id) : expectedItemId
             }
             _topBarLogoReadyForCurrent = false
             _pushTopBar()
-            _ensureAutoEpisodePlaylistWithItem(it)
+            PlayerSession.ensureAutoEpisodePlaylistWithItem(root, JFB, it)
             var typ = String(it && it.Type || "")
             if (!H.hasQueryTag(currentItemLogoUrl) &&
                     (typ === "Episode" || typ === "Season"))
@@ -1106,23 +1178,17 @@ FocusScope {
             candidate = lastGoodLogoUrl
         if (hasGoodForThisItem && !H.hasQueryTag(candidate) && H.hasQueryTag(lastGoodLogoUrl))
             candidate = lastGoodLogoUrl
+        var previousCandidateNorm = _normalizeUrl(_pendingLogo || "")
         var candidateNorm = _normalizeUrl(candidate)
-        if (_topBarLogoCandidateNorm !== candidateNorm) {
-            _topBarLogoCandidateNorm = candidateNorm
+        if (previousCandidateNorm !== candidateNorm)
             _topBarLogoReadyForCurrent = false
-        }
         _pendingLogo = candidate
-        // Détection immédiate lorsque TopBar possède déjà le logo en cache, puis polling court uniquement pendant le chargement asynchrone.
+        // Si TopBar possède déjà ce logo en cache, le fallback titre peut être
+        // levé immédiatement. Sinon les signaux logoReady/readyLogoUrl prennent
+        // le relais sans polling périodique.
         _syncTopBarLogoReadyState()
         _pendingTitle = _effectiveTopBarTitle()
         _queueTopBarPush()
-        if (candidateNorm.length > 0) {
-            // Le polling court est également nécessaire pour les épisodes : leur titre ne quitte le centre qu'après confirmation Image.Ready.
-            _topBarLogoReadyPollsLeft = 40
-            topBarLogoReadyTimer.restart()
-        } else {
-            topBarLogoReadyTimer.stop()
-        }
     }
     function _pushProgress(pos, dur){
         if (!controlsLoader.item) return
@@ -1192,8 +1258,18 @@ FocusScope {
         })
     }
     function _cancelHardSourceReset(reason){ H.cancelHardSourceReset(root, sourceResetTimer) }
-    function _commitFreshServerTimedSource(reason){ H.completeFreshServerTimedSource(root, mp, sourceResetTimer, subsLoader.item) }
-    function _finishFreshServerTimedSourceTimeout(reason){ H.completeFreshServerTimedSource(root, mp, sourceResetTimer, subsLoader.item) }
+    function _commitFreshServerTimedSource(reason){
+        H.completeFreshServerTimedSource(root, mp, sourceResetTimer, subsLoader.item)
+        _reassertSettingsFocus("fresh-source-commit")
+    }
+    function _finishFreshServerTimedSourceTimeout(reason){
+        H.completeFreshServerTimedSource(root, mp, sourceResetTimer, subsLoader.item)
+        // Le reset dur a expiré sans progression : le comportement de sortie
+        // reste celui du succès, mais la gate de chargement ne doit plus
+        // pouvoir rester armée indéfiniment sur un pipeline qui ne démarre pas.
+        _releaseVideoLoading("fresh-source-reset-timeout")
+        _reassertSettingsFocus("fresh-source-timeout")
+    }
     function _beginHardSourceReset(u,shouldResume){ H.beginHardSourceReset(root,mp,sourceResetTimer,audioGateDelay,startupPlayTimer,subsLoader.item,u,shouldResume) }
     function _beginFreshDirectPlayReset(u,shouldResume,targetUi){
         H.beginFreshDirectPlayReset(root,mp,sourceResetTimer,audioGateDelay,startupPlayTimer,subsLoader.item,u,shouldResume,targetUi)
@@ -1208,18 +1284,12 @@ FocusScope {
     }
     // Le cycle Local Intros est orchestré par le routeur playback. PlayerOverlay
     // conserve seulement les façades appelées par ses handlers et par le helper.
-    function _resetServerPrerollState(reason){ JF.resetServerPrerollState(root, mp, JFB, reason) }
-    function _sendServerPrerollStartIfNeeded(){ JF.sendServerPrerollStartIfNeeded(root, mp, JFB) }
-    function _tryStartServerPreroll(mainStartMs, forceMainRemux, rawResumeMs){
-        return JF.tryStartServerPreroll(root, mp, JFB, mainStartMs, forceMainRemux, rawResumeMs)
+    function _resetServerPrerollState(reason) {
+        PlayerSession.resetServerPrerollState(root, mp, JFB, reason)
     }
-    function _finishServerPreroll(reason){ JF.finishServerPreroll(root, mp, JFB, reason) }
-    function _completeServerPrerollTransition(){ JF.completeServerPrerollTransition(root) }
-    function _abortServerPrerollForExit(reason){ JF.abortServerPrerollForExit(root, mp, JFB, reason) }
-    function _startInitialPlayback(){ JF.startInitialPlayback(root, JFB) }
-    function _ensureSeasonPlaylistFromHints(){ H.ensureSeasonPlaylistFromHints(root, JFB) }
-    function _ensureAutoEpisodePlaylist(){ H.ensureAutoEpisodePlaylist(root, JFB) }
-    function _ensureAutoEpisodePlaylistWithItem(it){ H.ensureAutoEpisodePlaylistWithItem(root, JFB, it) }
+    function _tryStartServerPreroll(mainStartMs, forceMainRemux, rawResumeMs){
+        return PlayerSession.tryStartServerPreroll(root, mp, JFB, mainStartMs, forceMainRemux, rawResumeMs)
+    }
     function negotiatePlayback(startMs, forceHls, preferTicks, forceMp4, forceDPOnAudioSwitch, extra){
         return H.negotiateAndApply(root, mp, JF, subsLoader.item,
                                    _playbackTimers(),
@@ -1251,15 +1321,15 @@ FocusScope {
         var p = (positionMs !== undefined && positionMs !== null)
               ? _clampUi(Number(positionMs) || 0)
               : _clampUi(keepUi())
-        JF.sendStartIfNeeded(root, JFB, p)
+        PlayerSession.sendStartIfNeeded(root, JFB, p)
     }
     function _sendProgress(isPaused, positionMs, done){
         var p = (positionMs !== undefined && positionMs !== null)
               ? _clampUi(Number(positionMs) || 0)
               : _capturePersistablePositionMs(isPaused ? "progress-paused" : "progress")
-        JF.sendProgress(root, JFB, isPaused, p, done)
+        PlayerSession.sendProgress(root, JFB, isPaused, p, done)
     }
-    function _sendStopped(){ JF.sendStopped(root, JFB) }
+    function _sendStopped(){ PlayerSession.sendStopped(root, JFB) }
     Timer {
         id: resumeCheckpointTimer
         interval: Math.max(500, resumeCheckpointDelayMs)
@@ -1325,14 +1395,12 @@ FocusScope {
         var base = (_coalescedLocalSeekTargetUiMs >= 0 && _coalescedLocalSeekDirection === dir)
                  ? _coalescedLocalSeekTargetUiMs : nowUi
         var target = _clampUi(base + deltaMs)
-
         // Quand mp.seek() bloque le thread QML, plusieurs secondes d'auto-repeat
         // peuvent etre livrees d'un coup au retour. Elles ne doivent jamais
         // transformer une seule frame actualisee en saut de plusieurs minutes.
         var maxJump = Math.max(Math.abs(deltaMs), coalescedDirectPlaySeekMaxJumpMs | 0)
         if (dir > 0) target = Math.min(target, _clampUi(nowUi + maxJump))
         else target = Math.max(target, _clampUi(nowUi - maxJump))
-
         _coalescedLocalSeekDirection = dir
         _coalescedLocalSeekTargetUiMs = target
         lastUiTargetMs = target
@@ -1355,7 +1423,6 @@ FocusScope {
         var target = (scrubAccumUiMs >= 0) ? scrubAccumUiMs : _scrubCommitTargetUiMs
         if (target < 0) target = (lastUiTargetMs >= 0 ? lastUiTargetMs : uiPositionMs())
         target = _clampUi(target)
-
         // Un choix audio effectué pendant la fenêtre de scrub doit être appliqué
         // avec CE target final. L'ancienne implémentation remplissait ces champs
         // sans jamais les consommer, d'où un premier choix parfois "avalé".
@@ -1366,12 +1433,10 @@ FocusScope {
         _pendingAudioStream = snt
         _pendingAudioIndex = -1
         _pendingAudioManualDirectPlay = false
-
         scrubActive = false
         scrubAccumUiMs = -1
         _scrubCommitTargetUiMs = -1
         if (subsLoader.item) subsLoader.item.gateArmed = false
-
         if (hasPendingAudio) {
             try {
                 // Une seule négociation : sélection de piste + reprise à la
@@ -1388,6 +1453,11 @@ FocusScope {
             showScrubPreview(_pendingSeekMs)
             return
         }
+        // Un réglage différé embarque dans la négociation du seek : une seule
+        // négociation, à la position finale, et la pause reste conservée si le
+        // scrub a été lancé depuis une pause.
+        if (H.seekDeferredReload(root, mp, target, "commitScrub", _wasPlayingBeforeSwitch))
+            return
         if (shouldNetworkSeek()){
             _resumeWantedAfterNegotiation = _wasPlayingBeforeSwitch
             _serverSeekFallback(target, "commitScrub")
@@ -1397,6 +1467,7 @@ FocusScope {
         }
     }
     function seekBy(deltaMs){
+        if (_transportLocked("seekBy")) return
         var d = durationMs(); if (d<=0) d = 24*3600*1000
         var nowUi = uiPositionMs()
         if (_pendingSeekMs >= 0){
@@ -1432,10 +1503,8 @@ FocusScope {
         running: controlsVisible
         repeat: false
         onTriggered: {
-            
             _parkFocusOnProgress("auto-hide-to-progress")
             controlsVisible = false
-            
         }
     }
     Timer {
@@ -1586,6 +1655,11 @@ FocusScope {
     }
     MediaPlayer {
         id: mp
+        // QtMultimedia 5.15 : déclarer explicitement la bande-son comme flux
+        // vidéo afin que le backend audio Freebox puisse lui appliquer le
+        // routage / la priorité adaptés, notamment face à une source Bluetooth.
+        // Qt exige que le rôle soit défini avant la source.
+        audioRole: MediaPlayer.VideoRole
         autoPlay: true
         source: root.mediaUrl
         // Qt 5.15 : positionChanged suit notifyInterval (1000 ms par défaut).
@@ -1612,7 +1686,7 @@ FocusScope {
         onError: if (!_tearingDownPlayer && mp.error !== MediaPlayer.NoError){
             if (serverPrerollBlocking) {
                 if (_serverPrerollState === 2)
-                    _finishServerPreroll("media-error")
+                    PlayerSession.finishServerPreroll(root, mp, JFB, "media-error")
                 return
             }
             _recoverFromMediaError()
@@ -1623,7 +1697,7 @@ FocusScope {
             if (!hasSource)
                 _skipIntroMainSourceSeen = false
             if (_serverPrerollState === 3 && _serverPrerollMainStarted && hasSource)
-                _completeServerPrerollTransition()
+                PlayerSession.completeServerPrerollTransition(root)
             // Cette source est le média principal uniquement une fois sorti de l'état pré-roll. Cela évite d'armer Skip Intro sur le clip Local Intros.
             if (hasSource && !serverPrerollBlocking)
                 _skipIntroMainSourceSeen = true
@@ -1634,7 +1708,7 @@ FocusScope {
             if (_tearingDownPlayer) return
             if (serverPrerollBlocking) {
                 if (serverPrerollActive && mp.playbackState === MediaPlayer.PlayingState) {
-                    _sendServerPrerollStartIfNeeded()
+                    PlayerSession.sendServerPrerollStartIfNeeded(root, mp, JFB)
                     _cancelStartupPlay("server-preroll-playing")
                     _scheduleVideoLoadingRelease("server-preroll-playing")
                 }
@@ -1680,7 +1754,7 @@ FocusScope {
             if (_tearingDownPlayer) return
             if (serverPrerollBlocking) {
                 if (serverPrerollActive && mp.playbackState === MediaPlayer.PlayingState && mp.position > 0) {
-                    _sendServerPrerollStartIfNeeded()
+                    PlayerSession.sendServerPrerollStartIfNeeded(root, mp, JFB)
                     // Le pré-roll est réellement en train d'avancer : ne pas attendre
                     // que QtMultimedia quitte tardivement Loading/Buffered pour masquer
                     // le spinner par-dessus une image déjà décodée.
@@ -1731,7 +1805,6 @@ FocusScope {
         }
         onStatusChanged: {
             if (_tearingDownPlayer) return
-
             if (serverPrerollBlocking) {
                 if (mp.status===MediaPlayer.Buffered || mp.status===MediaPlayer.Loaded) {
                     _kickStartupPlay("server-preroll-status-ready")
@@ -1746,7 +1819,7 @@ FocusScope {
                         _armVideoLoading("server-preroll-status-loading")
                 }
                 if (_serverPrerollState === 2 && mp.status===MediaPlayer.EndOfMedia)
-                    _finishServerPreroll("end-of-media")
+                    PlayerSession.finishServerPreroll(root, mp, JFB, "end-of-media")
                 return
             }
             if (mp.status===MediaPlayer.Buffered || mp.status===MediaPlayer.Loaded) {
@@ -1765,9 +1838,10 @@ FocusScope {
             if (_pendingSeekMs>=0 && (mp.status===MediaPlayer.Buffered || mp.status===MediaPlayer.Loaded)) seekRestoreTimer.start()
             if (mp.status===MediaPlayer.EndOfMedia){
                 _releaseVideoLoading("end-of-media")
+                _resetDeferredReload("end-of-media")
                 var endPos = durationMs() > 0 ? durationMs() : _capturePersistablePositionMs("end-of-media")
                 _rememberPersistablePositionMs(endPos, "end-of-media")
-                JF.sendStoppedAtPosition(root, JFB, endPos, function(){})
+                PlayerSession.sendStoppedAtPosition(root, JFB, endPos, function(){})
                 if (playlistRef && autoplayNext) {
                     hideNextPanel()
                     nextHiddenWaiter.budget = nextHideMaxWaitMs
@@ -1777,7 +1851,6 @@ FocusScope {
         }
     }
     VideoOutput {
-        id: videoOutput
         anchors.centerIn: parent
         width: Math.round(parent.width * root.videoZoomFactor)
         height: Math.round(parent.height * root.videoZoomFactor)
@@ -1792,13 +1865,11 @@ FocusScope {
     // loader vidéo, mais sans focus ni MouseArea afin de ne jamais perturber
     // la télécommande pendant la lecture.
     Item {
-        id: speedDirectPlayPopup
         z: 4500
         anchors.fill: parent
         enabled: false
         visible: root._speedDirectPlayPopupMounted || opacity > 0.001
         opacity: root._speedDirectPlayPopupShown ? 1.0 : 0.0
-
         Behavior on opacity {
             NumberAnimation {
                 duration: root._speedDirectPlayPopupShown
@@ -1809,7 +1880,6 @@ FocusScope {
                              : Easing.InOutQuad
             }
         }
-
         Rectangle {
             anchors.horizontalCenter: parent.horizontalCenter
             anchors.verticalCenter: parent.verticalCenter
@@ -1820,7 +1890,6 @@ FocusScope {
             color: Qt.rgba(0.075, 0.075, 0.085, 0.96)
             border.width: 1
             border.color: Qt.rgba(1, 1, 1, 0.20)
-
             Column {
                 id: popupTextColumn
                 anchors.left: parent.left
@@ -1829,7 +1898,6 @@ FocusScope {
                 anchors.rightMargin: 24
                 anchors.verticalCenter: parent.verticalCenter
                 spacing: 8
-
                 Text {
                     width: parent.width
                     text: "Vitesse indisponible"
@@ -1840,7 +1908,6 @@ FocusScope {
                     wrapMode: Text.NoWrap
                     elide: Text.ElideRight
                 }
-
                 Text {
                     width: parent.width
                     text: "La vitesse de lecture peut être modifiée uniquement en DirectPlay. " +
@@ -1850,7 +1917,6 @@ FocusScope {
                     font.pixelSize: 17
                     wrapMode: Text.WordWrap
                 }
-
                 Text {
                     width: parent.width
                     text: root._speedDirectPlayPopupModeLabel.length > 0
@@ -1866,7 +1932,6 @@ FocusScope {
             }
         }
     }
-
     Rectangle {
         anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right; height: 180; z: 15; enabled: false
         opacity: root.uiChromeOpacity
@@ -1913,6 +1978,12 @@ FocusScope {
         }
         opacity: root.uiChromeOpacity
     }
+    Connections {
+        target: topBarLoader.item
+        ignoreUnknownSignals: true
+        function onLogoReadyChanged() { root._syncTopBarLogoReadyState() }
+        function onReadyLogoUrlChanged() { root._syncTopBarLogoReadyState() }
+    }
     Text {
         id: episodeLogoTitle
         z: 501
@@ -1952,7 +2023,6 @@ FocusScope {
         anchors.fill: parent
         clip: false
         onLoaded: {
-            
             if (item && item.prioritizeOnShow !== undefined) item.prioritizeOnShow = true
             _syncSkipIntroOverlay()
             Qt.callLater(function() {
@@ -1973,7 +2043,6 @@ FocusScope {
                         _focusSkipIntroIfVisible("chrome-visible-priority", false)
                 } catch(e0) {  }
             })
-            
         }
         onStatusChanged: {
             if (status === Loader.Error) 0
@@ -1983,12 +2052,10 @@ FocusScope {
         target: skipIntroLoader.item
         ignoreUnknownSignals: true
         function onSkipRequested(targetMs) {
-            
             skipIntroNow("../components/SkipIntro.qml")
             _restoreFocusAfterSkipIntro("skip")
         }
         function onDismissed() {
-            
             skipIntroDismissed = true
             skipIntroFocusReleasedByUser = true
             if (skipIntroLoader.item) { try { _setSkipIntroItemActive(skipIntroLoader.item, false) } catch(e) {} }
@@ -2037,7 +2104,6 @@ FocusScope {
             _updateControlsActive()
             _syncControlsTimer()
             try { root.forceActiveFocus() } catch(e0) {}
-            
         }
     }
     property int nextToProgressGap: 24
@@ -2046,18 +2112,22 @@ FocusScope {
     function _goNextEpisode(){ transportNext("next-panel") }
     function _playlistArray(){
         var src = []
-        try {
-            if (playlistRef && Array.isArray(playlistRef.list) && playlistRef.list.length > 0) src = playlistRef.list
-            else if (Array.isArray(playerPlaylist) && playerPlaylist.length > 0) src = playerPlaylist
-        } catch(e) { src = [] }
+        if (playlistRef && playlistRef.hasList())
+            src = playlistRef.copyList()
+        else if (Array.isArray(playerPlaylist) && playerPlaylist.length > 0)
+            src = playerPlaylist
+
         var out = []
-        for (var i=0; i<src.length; i++) {
+        for (var i = 0; i < src.length; i++) {
             var v = String(src[i] || "")
             if (v.length) out.push(v)
         }
         return out
     }
-    function _syncPlaylistIndex(i){ try{if(!playlistRef)return; if(typeof playlistRef.setIndex==="function")playlistRef.setIndex(i); else if(typeof playlistRef.index!=="undefined")playlistRef.index=i}catch(e){} }
+    function _syncPlaylistIndex(i){
+        if (!playlistRef) return
+        playlistRef.setIndex(i)
+    }
     function playRelative(step, origin){
         var arr = _playlistArray()
         var cur = String(root.itemId || "")
@@ -2092,12 +2162,132 @@ FocusScope {
         var willPause = (mp.playbackState === MediaPlayer.PlayingState)
         resetControlsTimer()
         _cancelStartupPlay(origin || "manual-toggle")
+        // Voie de reprise unique du lecteur : toutes les commandes Play
+        // (bouton HUD, OK sur la progressbar, touche média, mediaToggle)
+        // convergent ici. Des réglages choisis pendant la pause sont appliqués
+        // en une seule négociation, avec reprise forcée ; aucun mp.play() ne
+        // doit alors être émis sur l'ancien flux.
+        if (!willPause && H.resumeDeferredReload(root, mp, origin || "manual-toggle"))
+            return
         try {
             if (willPause) { mp.pause() }
             else { mp.play() }
         } catch(e) {
         }
     }
+    // ===== Contrôle distant Jellyfin =====
+    // Ces façades ne contournent jamais le moteur ReDeFin : elles réutilisent
+    // les mêmes automates que la télécommande locale.
+    function remoteControlReady(){
+        var expectedKey = String(serverUrl || "") + "|" + String(itemId || "")
+        return !!itemId
+            && !!mediaUrl
+            && _streamsReadyKey === expectedKey
+            && !_sourceResetActive
+            && !_trackSwitchVerificationActive
+            && !_tearingDownPlayer
+    }
+    function remotePause(){
+        try {
+            _cancelStartupPlay("remote-pause")
+            if (mp.playbackState !== MediaPlayer.PausedState)
+                mp.pause()
+            return true
+        } catch(e) {}
+        return false
+    }
+    function remoteUnpause(){
+        try {
+            if (mp.playbackState === MediaPlayer.PlayingState)
+                return true
+            _cancelStartupPlay("remote-unpause")
+            if (H.resumeDeferredReload(root, mp, "remote-unpause"))
+                return true
+            mp.play()
+            return true
+        } catch(e) {}
+        return false
+    }
+    function remoteStop(){
+        return finalizePlaybackAndExit("remote-stop")
+    }
+    function remoteReportState(reason){
+        try {
+            var paused = mp.playbackState !== MediaPlayer.PlayingState
+            return _sendPlaybackCheckpoint(reason || "remote-command", paused, true)
+        } catch(e) {}
+        return false
+    }
+    function remoteSwitchItem(newItemId){
+        var id = String(newItemId || "")
+        if (!id.length)
+            return false
+        if (id === String(itemId || ""))
+            return true
+        // Même comptabilité Jellyfin que les changements d'épisode locaux :
+        // clôturer l'ancienne session avant de changer root.itemId.
+        _finalizeCurrentSessionForSwitch("remote-play")
+        root.itemId = id
+        return true
+    }
+    function remoteSeekTicks(ticks){
+        var n = Number(ticks)
+        if (!isFinite(n) || isNaN(n) || n < 0)
+            return false
+        if (_transportLocked("remote-seek"))
+            return false
+
+        var target = _clampUi(Math.floor(n / 10000))
+        var wasPlaying = (mp.playbackState === MediaPlayer.PlayingState)
+        _cancelCoalescedLocalSeek()
+
+        if (_pendingSeekMs >= 0) {
+            _setPendingSeekMs(target, "remote-seek-existing-pending")
+            lastUiTargetMs = target
+            showScrubPreview(target)
+            return true
+        }
+
+        if (H.seekDeferredReload(root, mp, target, "remote-seek", wasPlaying))
+            return true
+
+        if (shouldNetworkSeek()) {
+            _resumeWantedAfterNegotiation = wasPlaying
+            _serverSeekFallback(target, "remote-seek")
+        } else {
+            _localSeekTo(target, "remote-seek")
+        }
+        return true
+    }
+    function remoteSetAudioStreamIndex(streamIdx){
+        var n = Number(streamIdx)
+        if (!isFinite(n) || isNaN(n) || n < 0)
+            return true
+        var ui = _indexInStreamMap(audioStreamIndexMap, n)
+        if (ui < 0)
+            return true
+        return handleAudioPick(n, ui, false) !== false
+    }
+    function remoteSetSubtitleStreamIndex(streamIdx){
+        var n = Number(streamIdx)
+        if (!isFinite(n) || isNaN(n))
+            return true
+        if (n < 0) {
+            handleSubsOff()
+            return true
+        }
+        var ui = _indexInStreamMap(subtitleStreamIndexMap, n)
+        if (ui < 0)
+            return true
+        var isText = ui >= 0 && ui < subtitleIsTextMap.length
+                && subtitleIsTextMap[ui] === true
+        if (isText)
+            handleSubsText(n, ui)
+        else
+            handleSubsImage(n, ui)
+        return true
+    }
+
     function _setControlsButtonIndex(idx,origin){ idx=Math.max(1,Math.min(5,idx|0)); controlsFocus=1; if(controlsLoader.item&&controlsLoader.item.hasOwnProperty("focusIndex"))controlsLoader.item.focusIndex=idx }
     function _activateControlsButton(origin){
         var idx = (controlsLoader.item && controlsLoader.item.focusIndex) ? controlsLoader.item.focusIndex : 3
@@ -2243,7 +2433,6 @@ FocusScope {
         function onSeekRequested(delta){  resetControlsTimer(); seekBy(delta) }
         function onToggleRequested(){  transportToggle("progressbar-signal") }
         function onFocusUp(){
-            
             // Certaines builds Freebox font remonter ↑ par le signal de la
             // ProgressBar plutôt que par Keys.BeforeItem. Les deux chemins doivent
             // donc mener au même focus SkipIntro et au même encadré blanc.
@@ -2284,6 +2473,7 @@ FocusScope {
         function onUserActivity(){ resetControlsTimer() }
     }
     onControlsFocusChanged: {
+        H.forgetSettingsFocusIfMoved(root)
         if (controlsLoader.item && controlsLoader.item.hasOwnProperty("focused")) {
             try { controlsLoader.item.focused = !skipIntroFocusClaimed && (controlsFocus===cF_PROGRESS) } catch(e) {}
         }
@@ -2291,8 +2481,11 @@ FocusScope {
         _syncControlsTimer()
         _focusControlsLater()
     }
-    onAudioMenuVisibleChanged: _syncControlsTimer()
-    onSubMenuVisibleChanged:   _syncControlsTimer()
+    // controlsLoader.active dépend aussi de ces deux booléens : sans
+    // resynchronisation ici, le halo des transports restait figé sur sa
+    // valeur précédente jusqu'au prochain changement de controlsFocus.
+    onAudioMenuVisibleChanged: { _syncControlsTimer(); _updateControlsActive() }
+    onSubMenuVisibleChanged:   { _syncControlsTimer(); _updateControlsActive() }
     onScrubActiveChanged:      _syncControlsTimer()
     onBaseOffsetMsChanged: {
         if (subsLoader.item)
@@ -2391,22 +2584,22 @@ FocusScope {
             })
             item.chaptersPanelOpen = Qt.binding(function(){ return root._chaptersPanelOpen() })
             item.safeBottomMargin = Qt.binding(function(){ return root.sideButtonBottomMargin })
-            item.selectedBitrate = Qt.binding(function(){ return root.manualQualityBitrate })
+            item.selectedBitrate = Qt.binding(function(){ return root._displayQualityBitrate() })
             item.sourceVideoBitrate = Qt.binding(function(){ return root.sourceVideoBitrate })
             item.directPlaySelected = Qt.binding(function(){
-                return root._qualityOriginalDirectPlaySelected()
+                return root._displayQualityDirectPlaySelected()
             })
             item.remuxSelected = Qt.binding(function(){
-                return root._qualityRemuxSelected()
+                return root._displayQualityRemuxSelected()
             })
             item.automaticServerSelected = Qt.binding(function(){
-                return root._qualityAutomaticServerSelected()
+                return root._displayQualityAutomaticSelected()
             })
             item.automaticQualityLabel = Qt.binding(function(){
                 return root._qualityAutomaticServerLabel()
             })
             item.qualityStatusText = Qt.binding(function(){
-                return root._qualityStatusText()
+                return root._displayQualityStatusText()
             })
             item.selectedMode = Qt.binding(function(){ return root.videoZoomMode })
             item.selectedRate = Qt.binding(function(){ return root.playbackSpeed })
@@ -2415,53 +2608,37 @@ FocusScope {
             item.subtitleMenuOpen = Qt.binding(function(){ return root.subMenuVisible })
             item.audioTracks = Qt.binding(function(){ return root.audioTracks })
             item.audioStreamIndexMap = Qt.binding(function(){ return root.audioStreamIndexMap })
-            item.audioCurrentIndex = Qt.binding(function(){ return root._effectiveAudioUiIndexForSettings() })
+            item.audioCurrentIndex = Qt.binding(function(){ return root._displayAudioUiIndexForSettings() })
+            item.audioSelectionNote = Qt.binding(function(){ return root._deferredSelectionNote(root._deferredAudioUiIndex >= 0) })
             item.subtitleTracks = Qt.binding(function(){ return root.subtitleTracks })
             item.subtitleStreamIndexMap = Qt.binding(function(){ return root.subtitleStreamIndexMap })
             item.subtitleIsTextMap = Qt.binding(function(){ return root.subtitleIsTextMap })
-            item.subtitleCurrentIndex = Qt.binding(function(){ return root._effectiveSubtitleUiIndexForSettings() })
+            item.subtitleCurrentIndex = Qt.binding(function(){ return root._displaySubtitleUiIndexForSettings() })
+            item.subtitleSelectionNote = Qt.binding(function(){ return root._deferredSelectionNote(root._deferredSubtitleUiIndex >= 0) })
             if (item.syncTrackIndexes)
-                item.syncTrackIndexes(root._effectiveAudioUiIndexForSettings(),
-                                      root._effectiveSubtitleUiIndexForSettings())
+                item.syncTrackIndexes(root._displayAudioUiIndexForSettings(),
+                                      root._displaySubtitleUiIndexForSettings())
         }
     }
     Connections {
         target: settingsOverlayLoader.item
         ignoreUnknownSignals: true
         function onRequestQuality(bitrate){
-            var requested = Math.floor(Number(bitrate || 0))
-            if (requested === -3) {
-                _applyAutomaticQualityFromQuality()
-            } else if (requested === -2) {
-                _applyManualRemuxFromQuality()
-            } else if (requested === -1) {
-                _applyOriginalDirectPlayFromQuality()
-            } else {
-                manualRemuxMode = false
-                H.applyManualQuality(root,mp,requested)
-            }
-            controlsFocus=cF_QUALITY
-            root.forceActiveFocus()
-            resetControlsTimer()
+            _applyQualityChoice(bitrate)
+            _restoreFocusAfterSettingsChoice(H.SETTINGS_CONTROL_QUALITY, "quality-choice")
         }
         function onRequestZoom(mode){
             _applyVideoZoomMode(mode)
-            controlsFocus=cF_ZOOM
-            root.forceActiveFocus()
-            resetControlsTimer()
+            _restoreFocusAfterSettingsChoice(H.SETTINGS_CONTROL_ZOOM, "zoom-choice")
         }
         function onRequestSpeed(rate){
             if (!root.isPureDirectPlay()) {
                 root._showSpeedDirectPlayOnlyPopup()
-                controlsFocus=cF_SPEED
-                root.forceActiveFocus()
-                resetControlsTimer()
+                _restoreFocusAfterSettingsChoice(H.SETTINGS_CONTROL_SPEED, "speed-refused")
                 return
             }
             _applyPlaybackSpeed(rate)
-            controlsFocus=cF_SPEED
-            root.forceActiveFocus()
-            resetControlsTimer()
+            _restoreFocusAfterSettingsChoice(H.SETTINGS_CONTROL_SPEED, "speed-choice")
         }
         function onRequestAudioPick(streamIdx, uiIdx){
             handleAudioPick(streamIdx, Math.max(0, uiIdx | 0))
@@ -2476,21 +2653,7 @@ FocusScope {
             handleSubsImage(streamIdx, uiIdx)
         }
         function onRequestTrackClose(control){
-            var w=settingsOverlayLoader.item
-            if(!w) return
-            if(control===w.controlSubtitle){
-                subMenuVisible=false
-                audioMenuVisible=false
-                controlsFocus=cF_MENU
-                menuIndex=2
-            } else {
-                audioMenuVisible=false
-                subMenuVisible=false
-                controlsFocus=cF_MENU
-                menuIndex=1
-            }
-            root.forceActiveFocus()
-            resetControlsTimer()
+            _restoreFocusAfterSettingsChoice(control, "track-close")
         }
         function onRequestFocusProgress(){
             _focusProgressBarSilent("settings")
@@ -2515,15 +2678,7 @@ FocusScope {
             resetControlsTimer()
         }
         function onRequestButtonFocus(control){
-            var w=settingsOverlayLoader.item
-            if(!w) return
-            if(control===w.controlZoom) controlsFocus=cF_ZOOM
-            else if(control===w.controlSpeed) controlsFocus=cF_SPEED
-            else if(control===w.controlAudio){ controlsFocus=cF_MENU; menuIndex=1 }
-            else if(control===w.controlSubtitle){ controlsFocus=cF_MENU; menuIndex=2 }
-            else controlsFocus=cF_QUALITY
-            root.forceActiveFocus()
-            resetControlsTimer()
+            _restoreFocusAfterSettingsChoice(control, "button-focus")
         }
         function onRequestFocusControlsLeft(){ if(controlsLoader.item&&controlsLoader.item.hasOwnProperty("focusIndex"))controlsLoader.item.focusIndex=1; _forceControlsFocusNow("settings-dpad") }
         function onRequestOpenControl(control){ var w=settingsOverlayLoader.item; if(!w)return; if(control===w.controlQuality)_openQualityPanel(); else if(control===w.controlZoom)_openZoomPanel(); else if(control===w.controlSpeed)_openSpeedPanel() }
@@ -2562,7 +2717,6 @@ FocusScope {
         // la hauteur interne de SubtitleOverlay.qml.
         // Position fixe : volets visibles ou masqués, même hauteur.
         anchors.bottomMargin: Math.max(96, root.tvSafeMargin)
-
         transform: Translate {
             // Décalage VISUEL final, après calcul des anchors. Aucun clamp caché :
             //   valeur positive = plus bas
@@ -2607,8 +2761,8 @@ FocusScope {
         controlsVisible=true; controlsTimer.stop()
         var w=_settingsOverlay()
         if(w && w.syncTrackIndexes)
-            w.syncTrackIndexes(_effectiveAudioUiIndexForSettings(),
-                               _effectiveSubtitleUiIndexForSettings())
+            w.syncTrackIndexes(_displayAudioUiIndexForSettings(),
+                               _displaySubtitleUiIndexForSettings())
         if(w && w.focusCurrentTrack) Qt.callLater(function(){ if(audioMenuVisible) w.focusCurrentTrack() })
     }
     function openSubMenu(){
@@ -2619,8 +2773,8 @@ FocusScope {
         controlsVisible=true; controlsTimer.stop()
         var w=_settingsOverlay()
         if(w && w.syncTrackIndexes)
-            w.syncTrackIndexes(_effectiveAudioUiIndexForSettings(),
-                               _effectiveSubtitleUiIndexForSettings())
+            w.syncTrackIndexes(_displayAudioUiIndexForSettings(),
+                               _displaySubtitleUiIndexForSettings())
         if(w && w.focusCurrentTrack) Qt.callLater(function(){ if(subMenuVisible) w.focusCurrentTrack() })
     }
     Keys.onPressed: {
@@ -2646,9 +2800,7 @@ FocusScope {
         if (_handleSideFocusKey(event)) {  return }
         if (_handleSettingsFocusKey(event)) {  return }
         if (typeof H !== "undefined" && H && typeof H.handlePressed === "function") {
-            
             H.handlePressed(root, event)
-            
             if (event.accepted) return
         }
         if (!nextUiLocked) {
@@ -2667,77 +2819,9 @@ FocusScope {
             if (event.accepted) return
         }
     }
-    function _resetCommonPlaybackRuntimeState(resetScrub) {
-        baseOffsetMs = 0
-        _setPendingSeekMs(-1, "reset-common-runtime")
-        _pendingHardResetBaseMs = -1
-        lastUiTargetMs = 0
-        if (resetScrub === true) {
-            scrubActive = false
-            scrubAccumUiMs = -1
-            _scrubCommitTargetUiMs = -1
-        }
-
-        _pauseWatchStartedWallMs = 0
-        _pauseWatchStartedUiMs = 0
-        _pauseWatchLastStableUiMs = 0
-        _pauseWatchLastStableWallMs = 0
-        _pauseWatchInPause = false
-
-        _mediaErrorRecoveryInProgress = false
-        _mediaErrorRecoverySafeUiMs = 0
-        _mediaErrorProgressGuardUntilWallMs = 0
-        _mediaErrorRecoveryReason = ""
-
-        _frozenPlaybackWatchActive = false
-        _frozenPlaybackNoProgressSinceWallMs = 0
-        _frozenPlaybackRecoveryCount = 0
-        _frozenPlaybackLastLocalMs = -1
-        _frozenPlaybackLastUiMs = -1
-        try { frozenPlaybackWatchTimer.stop() } catch(eFrozenWatch) {}
-
-        lastUsedServerRemux = false
-        serverTimedStream = false
-        timeShifted = false
-        currentPlaybackVideoTranscodeByPolicy = false
-
-        _trackSwitchVerificationActive = false
-        _trackSwitchTimebaseVerified = false
-        _trackSwitchRequestedUiMs = 0
-        _trackSwitchLocalStrategy = 1
-        _seekRestoreLastCallWallMs = 0
-        _seekRestoreAwaitingResult = false
-        _seekRestoreStableSamples = 0
-        _seekRestoreBestDiffMs = 2147483647
-        _seekRestoreBestLocalMs = -1
-        _seekRestoreAccepted = false
-        _seekRestoreReadyWallMs = 0
-        _seekRestorePrimeWallMs = 0
-        _seekRestorePhase = 0
-        _trackSwitchSourceHevc10 = false
-        _trackSwitchSourceVideoCodec = ""
-        _trackSwitchSourceContainer = ""
-
-        _directPlayOpenFallbackUsed = false
-        _directPlayOpenStartedWallMs = 0
-        _staticDirectPlaySeekUnsafe = false
-        _staticDirectPlaySeekUnsafeItemId = ""
-        _staticDirectPlaySeekFallbackInProgress = false
-        _staticDirectPlayFallbackAwaitingStableRemux = false
-        _staticDirectPlayFallbackTargetMs = -1
-        _staticDirectPlayFallbackStartedWallMs = 0
-
-        _startedReported = false
-        _reportedSessionId = ""
-        _stoppedReportedSessionId = ""
-        _stoppedPendingSessionId = ""
-        _lastProgressSentMs = 0
-        _lastUserDataSentMs = 0
-        _playbackExitInProgress = false
-        _finalExitPositionMs = -1
-        _lastPersistableUiMs = 0
-    }
+    
     Component.onCompleted: {
+        _resetDeferredReload("completed")
         _primaryUiReady = false
         _secondaryUiReady = false
         primaryUiTimer.restart()
@@ -2747,17 +2831,10 @@ FocusScope {
         // Loader.onLoaded la réinjecte ensuite avec le contexte utilisateur,
         // mais cette étape élimine tout démarrage fugitif en mode "smart".
         _syncPlaybackRuleMode("completed")
-        _syncPlaybackBackend("completed")
+        JF.syncPlayerBackendContext(root)
         controlsVisible=true; controlsFocus=cF_CONTROLS; root.forceActiveFocus()
         _syncControlsTimer(); Qt.callLater(_focusControlsLater)
-        if (playlistRef) {
-            if (typeof playlistRef.autoplayNext !== "undefined")
-                playlistRef.autoplayNext = autoplayNext
-            if (playerPlaylist && playerPlaylist.length)
-                playlistRef.list = (playerPlaylist || []).map(function(x){return String(x||"")})
-            if (typeof playlistRef.title !== "undefined")
-                playlistRef.title = playerPlaylistTitle || ""
-        }
+        _syncIncomingPlaylist(false)
         _syncNextOverlayContext()
         if (nextLoader.item && nextLoader.item.findNextByPlaylist)
             nextLoader.item.findNextByPlaylist(itemId, nextLoader.item.playlist)
@@ -2767,31 +2844,31 @@ FocusScope {
         useLocalSubs = false
         manualDirectPlayMode = false
         manualRemuxMode = false
-        _resetCommonPlaybackRuntimeState(false)
+        PlayerSession.resetPlaybackState(root, false)
         _pushTopBar()
         refreshCurrentItemTitle()
         _loadSkipIntroForCurrentItem("completed")
-        if (!_plHasContent()) _ensureAutoEpisodePlaylist()
-        _startInitialPlayback()
+        if (!_plHasContent()) PlayerSession.ensureAutoEpisodePlaylist(root, JFB)
+        PlayerSession.startInitialPlayback(root, JFB)
         updateClocksFromPlayback()
     }
-    onFbxChanged:        { _syncPlaybackBackend("fbxChanged"); _syncNextOverlayContext() }
-    onPlaybackDeviceModeChanged: _syncPlaybackBackend("playbackDeviceModeChanged")
+    onFbxChanged:        { JF.syncPlayerBackendContext(root); _syncNextOverlayContext() }
+    onPlaybackDeviceModeChanged: JF.syncPlayerBackendContext(root)
     onPlaybackRuleModeChanged: _syncPlaybackRuleMode("playbackRuleModeChanged")
     onAccessTokenChanged: {
         _resetServerPrerollState("accessToken")
         refreshStreams()
         refreshCurrentItemTitle()
         _loadSkipIntroForCurrentItem("accessToken")
-        if (!_plHasContent()) _ensureAutoEpisodePlaylist()
-        _startInitialPlayback()
+        if (!_plHasContent()) PlayerSession.ensureAutoEpisodePlaylist(root, JFB)
+        PlayerSession.startInitialPlayback(root, JFB)
         _syncNextOverlayContext()
     }
     onUserIdChanged: {
         _resetServerPrerollState("userId")
         refreshCurrentItemTitle()
-        if (!_plHasContent()) _ensureAutoEpisodePlaylist()
-        _startInitialPlayback()
+        if (!_plHasContent()) PlayerSession.ensureAutoEpisodePlaylist(root, JFB)
+        PlayerSession.startInitialPlayback(root, JFB)
         _syncNextOverlayContext()
     }
     onServerUrlChanged: {
@@ -2799,8 +2876,8 @@ FocusScope {
         refreshStreams()
         refreshCurrentItemTitle()
         _loadSkipIntroForCurrentItem("serverUrl")
-        if (!_plHasContent()) _ensureAutoEpisodePlaylist()
-        _startInitialPlayback()
+        if (!_plHasContent()) PlayerSession.ensureAutoEpisodePlaylist(root, JFB)
+        PlayerSession.startInitialPlayback(root, JFB)
         _queueTopBarPush()
         _syncNextOverlayContext()
     }
@@ -2808,9 +2885,6 @@ FocusScope {
         try { H.cancelLocalSubtitleRequest(root, "item-changed") } catch(eCancelSub) {}
         currentItemType = ""
         _topBarLogoReadyForCurrent = false
-        _topBarLogoCandidateNorm = ""
-        _topBarLogoReadyPollsLeft = 0
-        try { topBarLogoReadyTimer.stop() } catch(eTopBarLogoTimer) {}
         _armVideoLoading("item-changed")
         if (playlistRef && typeof playlistRef.syncTo === "function")
             playlistRef.syncTo(root.itemId)
@@ -2851,9 +2925,10 @@ FocusScope {
             nextLoader.item.findNextByPlaylist(root.itemId, nextLoader.item.playlist)
         refreshCurrentItemTitle()
         _loadSkipIntroForCurrentItem("itemChanged")
-        if (!_plHasContent()) _ensureAutoEpisodePlaylist()
+        if (!_plHasContent()) PlayerSession.ensureAutoEpisodePlaylist(root, JFB)
         _cancelHardSourceReset("item-changed")
-        _resetCommonPlaybackRuntimeState(true)
+        PlayerSession.resetPlaybackState(root, true)
+        _resetDeferredReload("item-changed")
         _pendingAudioStream = snt
         _pendingAudioIndex = -1
         _pendingAudioManualDirectPlay = false
@@ -2881,82 +2956,17 @@ FocusScope {
         safeFrenchForcedDvdSubtitleStream = -1
         strictFrenchForcedDefaultTextSubtitleStream = -1
         legacyFrenchForcedTextSubtitleStream = -1
-        _startInitialPlayback()
+        PlayerSession.startInitialPlayback(root, JFB)
         updateClocksFromPlayback()
         _syncControlsTimer()
         Qt.callLater(_focusControlsLater)
     }
-    function _stopTimerSafe(t){ try{if(t&&t.running)t.stop()}catch(e){} }
-    function _cleanupMediaPlayerForDestruction() {
-        var wasServerPreroll = serverPrerollBlocking
-        if (wasServerPreroll)
-            _abortServerPrerollForExit("destruction")
-        if (_finalExitPositionMs < 0)
-            _finalExitPositionMs = wasServerPreroll ? 0 : _capturePersistablePositionMs("destruction")
-        try { _sendStopped() } catch(eStop) {}
-        _tearingDownPlayer = true
-        _stopTimerSafe(nextRearmTimer)
-        _stopTimerSafe(topBarApplyTimer)
-        _stopTimerSafe(topBarLogoReadyTimer)
-        _stopTimerSafe(progressTimer)
-        _stopTimerSafe(resumeCheckpointTimer)
-        _stopTimerSafe(controlsTimer)
-        _stopTimerSafe(startupPlayTimer)
-        _stopTimerSafe(sourceResetTimer)
-        _stopTimerSafe(audioGateDelay)
-        _stopTimerSafe(seekRestoreTimer)
-        _stopTimerSafe(scrubCommitTimer)
-        _stopTimerSafe(coalescedLocalSeekTimer)
-        _stopTimerSafe(mediaErrorRecoveryGuard)
-        _stopTimerSafe(pauseResumeProbeTimer)
-        _stopTimerSafe(trackSwitchFailureRestartTimer)
-        _stopTimerSafe(trackSwitchVerifiedResumeTimer)
-        _stopTimerSafe(frozenPlaybackWatchTimer)
-        _stopTimerSafe(videoLoadingShowTimer)
-        _stopTimerSafe(videoLoadingHideTimer)
-        _stopTimerSafe(videoLoadingReleaseTimer)
-        _stopTimerSafe(speedDirectPlayPopupFadeOutTimer)
-        _stopTimerSafe(speedDirectPlayPopupCleanupTimer)
-        _stopTimerSafe(playbackRateSyncTimer)
-        _stopTimerSafe(nextHiddenWaiter)
-        try { disableLocalSubsOverlay() } catch(e0) {}
-        try {
-            if (mp) {
-                mp.stop()
-                mp.source = ""
-            }
-        } catch(e1) {}
-        mediaUrl = ""
-        _setPendingSeekMs(-1, "component-cleanup")
-        _pendingServerTimedBaseMs = -1
-        _sourceResetActive = false
-        _sourceResetPhase = 0
-        _sourceResetPendingUrl = ""
-        _sourceResetExpectedUiMs = -1
-        _sourceResetReadyWallMs = 0
-        _pendingHardResetBaseMs = -1
-        scrubActive = false
-        scrubAccumUiMs = -1
-        _scrubCommitTargetUiMs = -1
-        _coalescedLocalSeekTargetUiMs = -1
-        _coalescedLocalSeekDirection = 0
-        _startupPlayWanted = false
-        _directPlayOpenFallbackUsed = false
-        _directPlayOpenStartedWallMs = 0
-        _gateArmed = false
-        _resumeAfterGate = false
-        _mediaErrorRecoveryArmed = false
-        _mediaErrorRecoveryInProgress = false
-        _frozenPlaybackWatchActive = false
-        _pauseWatchInPause = false
-        videoLoadingGate = false
-        videoLoadingVisible = false
-    }
+
     Component.onDestruction: {
         try { primaryUiTimer.stop() } catch(ePrimaryUi) {}
         try { secondaryUiTimer.stop() } catch(eSecondaryUi) {}
         _storeSensitiveNavContext()
-        _cleanupMediaPlayerForDestruction()
-        if (!_internalDirectPlayReload) H.clearPlaylist(root, "destruction")
+        PlayerSession.cleanupMediaPlayer(root, mp, JFB)
+        if (!_internalDirectPlayReload) PlayerSession.clearPlaylist(root)
     }
 }

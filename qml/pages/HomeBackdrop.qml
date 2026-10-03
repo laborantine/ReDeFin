@@ -1,6 +1,7 @@
 import QtQuick 2.15
 import "../js/jellyfinBridge.js" as Jellyfin
 import "../js/MediaCatalog.js" as MediaCatalog
+import "../js/MediaRailLayout.js" as MediaRailLayout
 
 // Fond dynamique de l'accueil : sélection de l'image, double buffer et temporisation.
 Item {
@@ -28,7 +29,7 @@ Item {
         var memo = _failureMemo || ({})
         if (memo[url] === true) return
         memo[url] = true
-        _failureMemo = MediaCatalog.trimObjectMemo(memo, failureMemoLimit)
+        _failureMemo = MediaRailLayout.trimObjectMemo(memo, failureMemoLimit)
     }
 
     function _backdropUrlForItem(item) {

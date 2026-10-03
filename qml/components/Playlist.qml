@@ -95,7 +95,46 @@ Item {
             }
         }
     }
-    function setAllowedFromList(ids){ setAllowed(ids); } // alias pratique
+
+    function setTitle(value){
+        title = String(value || "")
+    }
+
+    function setAutoplayNext(value){
+        autoplayNext = !!value
+    }
+
+    function setContext(newTitle, newController, newScope){
+        setTitle(newTitle)
+        controller = String(newController || "")
+        scope = String(newScope || "")
+    }
+
+    function resetContext(){
+        allowedIds = null
+        title = ""
+        controller = ""
+        scope = ""
+    }
+
+    function resetAll(){
+        resetContext()
+        clear()
+    }
+
+    function replaceScopedList(ids, newTitle, newController, newScope){
+        // Retire d'abord l'ancien périmètre : une saison précédente ne doit
+        // jamais filtrer la nouvelle liste pendant onListChanged.
+        allowedIds = null
+        setContext(newTitle, newController, newScope)
+        setList(ids)
+        setAllowed(list)
+        return copyList()
+    }
+
+    function copyList(){
+        return _normalizedCopy(list)
+    }
 
     /* ===== Normalisation sûre ===== */
     onListChanged: {

@@ -734,6 +734,36 @@ function listServers() {
     return _readServersArr();
 }
 
+function rememberServer(serverUrl, info) {
+    var srv = _normalizeUrl(serverUrl);
+    if (!srv) return false;
+    info = info || {};
+    return addOrUpdateServer({
+        serverUrl: srv,
+        name: info.name || info.ServerName || info.ProductName || info.serverName || "",
+        version: info.version || info.Version || "",
+        id: info.id || info.Id || info.ServerId || ""
+    });
+}
+
+function listServersForOverlay() {
+    var servers = listServers() || [];
+    var out = [];
+    for (var i = 0; i < servers.length; i++) {
+        var item = servers[i] || {};
+        var srv = _normalizeUrl(item.serverUrl || item.url);
+        if (!srv) continue;
+        out.push({
+            name: item.name || "Jellyfin",
+            url: srv,
+            serverUrl: srv,
+            version: item.version || "",
+            id: item.id || ""
+        });
+    }
+    return out;
+}
+
 function _removeServerOnly(serverUrl) {
     var srv = _normalizeUrl(serverUrl);
     if (!srv) return;
@@ -1241,6 +1271,153 @@ function addOrUpdateUser(u) {
 }
 
 
+
+// ============== ADAPTATEURS PROFILS LOGIN ==============
+// Ces fonctions restent volontairement pures : UserStore connaît le format
+// persistant et produit les petits objets de profil utilisés par LoginPage,
+// sans dépendre d'un Item QML ni modifier les tableaux fournis.
+function primaryImageTagOf(userObj) {
+    if (!userObj) return "";
+    return String(userObj.PrimaryImageTag
+                  || (userObj.ImageTags && userObj.ImageTags.Primary)
+                  || "");
+}
+
+function _copyPlainObject(source) {
+    var out = {};
+    if (!source || typeof source !== "object") return out;
+    for (var key in source) {
+        try {
+            if (Object.prototype.hasOwnProperty.call(source, key))
+                out[key] = source[key];
+        } catch(e0) {}
+    }
+    return out;
+}
+
+function profileEntryFromUser(userObj, rememberValue) {
+    if (!userObj || !userObj.Id) return null;
+    var hasRemember = rememberValue !== undefined && rememberValue !== null;
+    return {
+        Id: userObj.Id,
+        Name: userObj.Name || userObj.Username || "Profil",
+        PrimaryImageTag: primaryImageTagOf(userObj),
+        AvatarTagVerified: true,
+        Remember: hasRemember ? rememberValue === true : false
+    };
+}
+
+function mergeAuthenticatedProfile(localUsers, userObj, rememberValue) {
+    var source = localUsers || [];
+    var entry = profileEntryFromUser(userObj, rememberValue);
+    if (!entry) return { profiles:source, entry:null, changed:false };
+
+    var foundIndex = -1;
+    for (var i = 0; i < source.length; i++) {
+        if (source[i] && source[i].Id === entry.Id) {
+            foundIndex = i;
+            break;
+        }
+    }
+
+    if (foundIndex < 0) {
+        return {
+            profiles:[entry].concat(source),
+            entry:entry,
+            changed:true
+        };
+    }
+
+    var current = source[foundIndex] || {};
+    var next = _copyPlainObject(current);
+    var changed = false;
+    var hasRemember = rememberValue !== undefined && rememberValue !== null;
+
+    if (entry.Name !== current.Name) { next.Name = entry.Name; changed = true; }
+    if (entry.PrimaryImageTag !== String(current.PrimaryImageTag || "")) {
+        next.PrimaryImageTag = entry.PrimaryImageTag;
+        changed = true;
+    }
+    if (current.AvatarTagVerified !== true) { next.AvatarTagVerified = true; changed = true; }
+    if (hasRemember && current.Remember !== entry.Remember) {
+        next.Remember = entry.Remember;
+        changed = true;
+    }
+
+    if (!changed)
+        return { profiles:source, entry:entry, changed:false };
+
+    var profiles = source.slice(0);
+    profiles[foundIndex] = next;
+    return { profiles:profiles, entry:entry, changed:true };
+}
+
+function reconcilePublicProfiles(localUsers, publicUsers) {
+    var locals = localUsers || [];
+    var sourcePublic = publicUsers || [];
+    var byId = {};
+    var normalized = [];
+    var verified = [];
+    var i;
+
+    for (i = 0; i < sourcePublic.length; i++) {
+        var raw = sourcePublic[i];
+        if (!raw || !raw.Id) continue;
+        var pub = _copyPlainObject(raw);
+        pub.PrimaryImageTag = primaryImageTagOf(raw);
+        pub.AvatarTagVerified = true;
+        byId[pub.Id] = pub;
+        normalized.push(pub);
+    }
+
+    var next = [];
+    for (i = 0; i < locals.length; i++) {
+        var local = locals[i];
+        if (!local || !local.Id) continue;
+        var publicProfile = byId[local.Id];
+        if (!publicProfile) {
+            next.push(local);
+            continue;
+        }
+
+        var tag = primaryImageTagOf(publicProfile);
+        var name = publicProfile.Name || local.Name || "Profil";
+        next.push({
+            Id: local.Id,
+            Name: name,
+            PrimaryImageTag: tag,
+            AvatarTagVerified: true,
+            Remember: local.Remember === true
+        });
+        verified.push({ Id:local.Id, Name:name, PrimaryImageTag:tag });
+    }
+
+    return {
+        localUsers:next,
+        serverUsers:normalized,
+        verified:verified
+    };
+}
+
+function profilesFromStoredUsers(storedUsers) {
+    var source = storedUsers || [];
+    var out = [];
+    for (var i = 0; i < source.length; i++) {
+        var item = source[i];
+        if (!item || !item.userId) continue;
+        var storedTag = String(item.imageTag || "");
+        var owned = !!(storedTag && item.imageTagOwnerId === item.userId);
+        out.push({
+            Id: item.userId,
+            Name: item.userName || "Profil",
+            PrimaryImageTag: storedTag,
+            AvatarTagVerified: !storedTag || owned,
+            Remember: item.remember === true
+        });
+    }
+    return out;
+}
+
 // Met à jour uniquement les métadonnées d'avatar sans modifier lastUsed,
 // l'ordre des profils ni la politique de persistance du token. Cette API est
 // utilisée par LoginPage après validation de /Users/Public ou /Users/{id}.
@@ -1365,6 +1542,12 @@ function clearTokens() {
         if (list[i]) { list[i].accessToken = ""; list[i].remember = false; }
     }
     _writeUsersArr(list);
+}
+
+function shouldDropStoredToken(errCode) {
+    var code = "";
+    try { code = SafeLog.safeErrorCode(errCode, "network_error"); } catch(e0) { return false; }
+    return code === "invalid_token" || code === "http_400" || code === "http_401" || code === "http_403";
 }
 
 function clearUserToken(serverUrl, userId) {

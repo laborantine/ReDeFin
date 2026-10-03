@@ -1486,7 +1486,6 @@ FocusScope {
         }
 
         Rectangle {
-            id: qualityInfoCard
 
             width: 520
             height: 360
@@ -1549,7 +1548,6 @@ FocusScope {
             }
 
             Item {
-                id: qualityInfoInner
 
                 anchors.fill: parent
                 anchors.margins: 12
@@ -1674,7 +1672,6 @@ FocusScope {
                 }
 
                 Item {
-                    id: qualityInfoBody
 
                     anchors.left: parent.left
                     anchors.right: parent.right
@@ -1689,7 +1686,6 @@ FocusScope {
                     clip: true
 
                     Text {
-                        id: qualityInfoBodyText
 
                         anchors.left: parent.left
                         anchors.right: parent.right
@@ -1721,7 +1717,6 @@ FocusScope {
     }
 
     Rectangle {
-        id: settingsPanel
 
         width: 520
         height: 360
@@ -1795,7 +1790,6 @@ FocusScope {
         }
 
         Item {
-            id: panelInner
 
             anchors.fill: parent
 
@@ -1863,7 +1857,6 @@ FocusScope {
                 }
 
                 Item {
-                    id: headerTextBox
 
                     anchors.left:
                         root.activeTrackPanel
@@ -2383,7 +2376,6 @@ FocusScope {
 
                             // Charge serveur estimée.
                             Item {
-                                id: qualityCpuGauge
                                 width: 44
                                 height: parent.height
                                 anchors.left: parent.left
@@ -2441,7 +2433,6 @@ FocusScope {
 
                             // Fidélité visuelle estimée.
                             Item {
-                                id: qualityVisualGauge
                                 width: 46
                                 height: parent.height
                                 anchors.right: parent.right
@@ -2665,7 +2656,6 @@ FocusScope {
                         hasOverflow
 
                     Rectangle {
-                        id: panelScrollThumb
 
                         width: 4
 

@@ -1,13 +1,16 @@
 import QtQuick 2.15
+import "../js/MediaCatalog.js" as MediaCatalog
 import "../js/jellyfinBridge.js" as Jellyfin
-import "../js/SeasonUtils.js" as SeasonUtils
+import "../js/MediaRailLayout.js" as MediaRailLayout
 
 FocusScope {
     id: root
     width: parent ? parent.width : 1280
-    implicitHeight: hasContent ? (28 + 8 + topPadFor(imageHeight) + imageHeight + 61) : 0
+    implicitHeight: hasContent
+                    ? ((sectionTitleVisible ? 36 : 0) + topPadFor(imageHeight) + imageHeight + 61)
+                    : 0
     height: implicitHeight
-    visible: hasContent
+    visible: displayEnabled && hasContent
     enabled: visible
     focus: false
 
@@ -15,6 +18,12 @@ FocusScope {
     property string accessToken: ""
     property string itemId: ""
     property bool fetchEnabled: true
+    property bool displayEnabled: true
+    property bool sectionTitleVisible: true
+    property bool fillAvailableHeight: false
+    property bool compactPlayerStyle: false
+    property bool activateOnClick: false
+    property bool consumeBackKey: false
     property int sectionLeftMargin: 28
     property int cardWidth: 300
     property int imageHeight: 169
@@ -24,12 +33,12 @@ FocusScope {
     // Profil adaptatif images chapitres :
     // normal plus propre sans coût excessif, HQ uniquement sur le chapitre
     // réellement focusé et stabilisé.
-    readonly property real imageOversample: 1.30
-    readonly property int imageQuality: 85
+    property real imageOversample: compactPlayerStyle ? 1.20 : 1.30
+    property int imageQuality: compactPlayerStyle ? 82 : 85
     readonly property int requestImageWidth: Math.max(1, Math.round(cardWidth * imageOversample))
     readonly property int requestImageHeight: Math.max(1, Math.round(imageHeight * imageOversample))
-    readonly property real hqImageOversample: 1.50
-    readonly property int hqImageQuality: 90
+    property real hqImageOversample: compactPlayerStyle ? 1.40 : 1.50
+    property int hqImageQuality: compactPlayerStyle ? 88 : 90
     readonly property int requestHqImageWidth: Math.max(1, Math.round(cardWidth * hqImageOversample))
     readonly property int requestHqImageHeight: Math.max(1, Math.round(imageHeight * hqImageOversample))
     property int hqTargetIndex: -1
@@ -37,15 +46,20 @@ FocusScope {
     property int lastFocusedIndex: 0
     property var chapters: []
     property int _requestSeq: 0
+    property bool chaptersResolved: false
     readonly property bool hasContent: !!(chapters && chapters.length > 0)
+    readonly property int currentIndex: chapterList ? chapterList.currentIndex : -1
 
-    // Même feeling que CastPage / GuestPage / SimilarItems.
-    readonly property real focusScale: 1.14
-    readonly property int focusLiftPx: 6
+    // Même feeling que CastPage / GuestPage / SimilarItems par défaut. Le profil
+    // compact conserve le rendu plus léger utilisé pendant la lecture vidéo.
+    property real focusScalePeak: compactPlayerStyle ? 1.035 : 1.14
+    property real focusScaleRest: compactPlayerStyle ? 1.025 : Math.max(1.0, focusScalePeak - 0.02)
+    property int focusLiftPx: compactPlayerStyle ? 0 : 6
+    property int focusSafetyPadY: compactPlayerStyle ? 6 : 0
     readonly property real frameWidth: 2.0
     readonly property real frameInsetPx: 0.0
     readonly property real frameInnerEpsilon: 0.2
-    readonly property int edgeNudgePx: Math.max(0, Math.ceil(cardWidth * (focusScale - 1) * 0.55))
+    readonly property int edgeNudgePx: Math.max(0, Math.ceil(cardWidth * (focusScalePeak - 1) * 0.55))
     readonly property int edgePad: Math.max(18, edgeNudgePx + 10)
     readonly property int delegateWidth: cardWidth
     readonly property bool isScrolling: !!(chapterList && (chapterList.moving || chapterList.dragging || chapterList.flicking))
@@ -53,10 +67,12 @@ FocusScope {
 
     signal requestFocusAbove()
     signal requestFocusBelow()
+    signal requestBack()
+    signal userActivity()
     signal chapterActivated(int index, var chapter)
 
-    function frameMargin(){ return frameInsetPx + frameWidth / 2 + frameInnerEpsilon }
-    function topPadFor(h){ return Math.ceil(h * (focusScale - 1)) + focusLiftPx + Math.ceil(frameWidth) + 2 }
+    function frameMargin(){ return MediaRailLayout.frameMargin(frameInsetPx, frameWidth, frameInnerEpsilon) }
+    function topPadFor(h){ return MediaRailLayout.focusTopPad(h, focusScalePeak, focusLiftPx, frameWidth) }
     function _cancelHq(){
         hqPromotionTimer.stop()
         _hqPendingIndex = -1
@@ -76,6 +92,7 @@ FocusScope {
     }
     function _scheduleFetch(){
         _requestSeq++
+        chaptersResolved = false
         chapters = []
         focusRetry.stop()
         if (!fetchEnabled || !serverUrl || !accessToken || !itemId) { fetchTimer.stop(); return }
@@ -88,12 +105,14 @@ FocusScope {
             function(arr){
                 if (seq !== _requestSeq || expectedServer !== serverUrl || expectedToken !== accessToken || expectedId !== itemId) return
                 chapters = arr || []
+                chaptersResolved = true
                 if (lastFocusedIndex >= chapters.length) lastFocusedIndex = Math.max(0, chapters.length - 1)
                 chapterList.currentIndex = chapters.length ? lastFocusedIndex : -1
             },
             function(){
                 if (seq !== _requestSeq || expectedServer !== serverUrl || expectedToken !== accessToken || expectedId !== itemId) return
                 chapters = []
+                chaptersResolved = true
                 chapterList.currentIndex = -1
             }
         )
@@ -136,8 +155,17 @@ FocusScope {
         _focusIndexSoon(idx)
         return true
     }
+    function focusIndex(index){ return _focusIndex(index) }
     function forceFirstFocus(){ return _focusIndex(0) }
     function restoreLastFocus(){ return _focusIndex(lastFocusedIndex) }
+    function indexForPosition(positionMs, toleranceMs){
+        return MediaCatalog.chapterIndexForPosition(chapters, positionMs, toleranceMs === undefined ? 250 : toleranceMs)
+    }
+    function activateCurrent(){
+        if (!hasContent || chapterList.currentIndex < 0 || chapterList.currentIndex >= chapters.length) return false
+        chapterActivated(chapterList.currentIndex, chapters[chapterList.currentIndex])
+        return true
+    }
 
     onServerUrlChanged: _scheduleFetch()
     onAccessTokenChanged: _scheduleFetch()
@@ -163,7 +191,8 @@ FocusScope {
         repeat: false
         onTriggered: {
             var idx = chapterList ? (chapterList.currentIndex | 0) : -1
-            root.hqTargetIndex = (!root.isScrolling
+            root.hqTargetIndex = (root.visible
+                                  && !root.isScrolling
                                   && chapterList && chapterList.activeFocus
                                   && idx >= 0
                                   && idx === root._hqPendingIndex)
@@ -174,13 +203,14 @@ FocusScope {
     Text {
         id: sectionTitle
         text: "Chapitres"
+        visible: root.sectionTitleVisible
         color: "#FFFFFF"
         font.pixelSize: 20
         font.bold: true
         anchors.left: parent.left
         anchors.leftMargin: root.sectionLeftMargin
         anchors.top: parent.top
-        height: 28
+        height: root.sectionTitleVisible ? 28 : 0
         verticalAlignment: Text.AlignVCenter
     }
 
@@ -189,13 +219,16 @@ FocusScope {
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: sectionTitle.bottom
-        anchors.topMargin: 8
-        height: root.topPadFor(root.imageHeight) + root.imageHeight + 61
+        anchors.topMargin: root.sectionTitleVisible ? 8 : 0
+        height: root.fillAvailableHeight
+                ? Math.max(0, root.height - sectionTitle.height - (root.sectionTitleVisible ? 8 : 0))
+                : (root.topPadFor(root.imageHeight) + root.imageHeight + 61)
         orientation: ListView.Horizontal
         spacing: root.cardGap
         clip: true
         model: root.chapters
         currentIndex: -1
+        enabled: root.displayEnabled
 
         // Glide identique CastPage / GuestPage / SimilarItems.
         snapMode: ListView.NoSnap
@@ -255,197 +288,237 @@ FocusScope {
             }
 
             Item {
-                id: posterCard
-                x: 0
-                y: root.topPadFor(root.imageHeight)
+                id: cardVisual
+                x: root.compactPlayerStyle && chapterCard.selected
+                   ? (index === 0 ? root.edgeNudgePx : (index === root.chapters.length - 1 ? -root.edgeNudgePx : 0))
+                   : 0
+                y: root.compactPlayerStyle ? root.focusSafetyPadY : 0
                 width: root.cardWidth
-                height: root.imageHeight
-                transformOrigin: Item.Bottom
+                height: root.compactPlayerStyle ? (root.imageHeight + 50) : chapterList.height
+                transformOrigin: Item.Center
                 scale: 1.0
 
-                readonly property bool selected: chapterCard.selected
-                readonly property bool isFirst: index === 0
-                readonly property bool isLast: root.chapters && index === root.chapters.length - 1
-                readonly property bool allowLocalAnims: root.allowAnims
+                Behavior on x {
+                    enabled: root.compactPlayerStyle && root.allowAnims
+                    NumberAnimation { duration: 140; easing.type: Easing.OutCubic }
+                }
 
-                transform: Translate {
-                    x: posterCard.selected
-                       ? (posterCard.isFirst ? root.edgeNudgePx : (posterCard.isLast ? -root.edgeNudgePx : 0))
-                       : 0
-                    y: posterCard.selected ? -root.focusLiftPx : 0
-                    Behavior on x { enabled: posterCard.allowLocalAnims; NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
-                    Behavior on y { enabled: posterCard.allowLocalAnims; NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
+                Item {
+                    id: posterCard
+                    x: 0
+                    y: root.compactPlayerStyle ? 0 : root.topPadFor(root.imageHeight)
+                    width: root.cardWidth
+                    height: root.imageHeight
+                    transformOrigin: Item.Bottom
+                    scale: 1.0
+
+                    readonly property bool selected: chapterCard.selected
+                    readonly property bool isFirst: index === 0
+                    readonly property bool isLast: root.chapters && index === root.chapters.length - 1
+                    readonly property bool allowLocalAnims: root.allowAnims
+
+                    transform: Translate {
+                        x: !root.compactPlayerStyle && posterCard.selected
+                           ? (posterCard.isFirst ? root.edgeNudgePx : (posterCard.isLast ? -root.edgeNudgePx : 0))
+                           : 0
+                        y: !root.compactPlayerStyle && posterCard.selected ? -root.focusLiftPx : 0
+                        Behavior on x { enabled: posterCard.allowLocalAnims; NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
+                        Behavior on y { enabled: posterCard.allowLocalAnims; NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
+                    }
+
+                    Rectangle {
+                        anchors.fill: parent
+                        color: "#11141c"
+                        visible: true
+                    }
+
+                    Item {
+                        id: imageClip
+                        anchors.fill: parent
+                        anchors.margins: root.compactPlayerStyle ? root.frameWidth : 0
+                        clip: true
+
+                        Item {
+                            anchors.fill: parent
+                            visible: !chapterImage.source || chapterImage.status !== Image.Ready || chapterCard.imageFailed
+                            Rectangle { anchors.fill: parent; color: "#10131A" }
+                            Rectangle {
+                                id: clapperTop
+                                x: Math.round(parent.width * 0.18)
+                                y: Math.round(parent.height * 0.22)
+                                width: Math.round(parent.width * 0.64)
+                                height: Math.round(parent.height * 0.18)
+                                color: "#E9EDF5"
+                                rotation: -5
+                                transformOrigin: Item.Center
+                                clip: true
+                                Repeater {
+                                    model: 6
+                                    Rectangle {
+                                        width: Math.round(clapperTop.width / 8)
+                                        height: clapperTop.height * 1.8
+                                        x: index * Math.round(clapperTop.width / 5) - 8
+                                        y: -Math.round(clapperTop.height * 0.4)
+                                        color: "#151922"
+                                        rotation: -28
+                                    }
+                                }
+                            }
+                            Rectangle {
+                                x: Math.round(parent.width * 0.20)
+                                y: Math.round(parent.height * 0.43)
+                                width: Math.round(parent.width * 0.60)
+                                height: Math.round(parent.height * 0.37)
+                                color: "#171B24"
+                                border.width: 2
+                                border.color: "#D9DFEA"
+                                Rectangle { x: 14; y: 16; width: parent.width - 28; height: 2; color: "#7A8392" }
+                                Rectangle { x: 14; y: 31; width: parent.width - 28; height: 2; color: "#7A8392" }
+                                Rectangle { x: 14; y: 46; width: Math.round((parent.width - 28) * 0.62); height: 2; color: "#7A8392" }
+                            }
+                        }
+
+                        Image {
+                            id: chapterImage
+                            anchors.fill: parent
+                            source: MediaCatalog.chapterImageUrl(Jellyfin, root.serverUrl, root.itemId, root.chapters, index, root.requestImageWidth, root.requestImageHeight, root.imageQuality)
+                            asynchronous: true
+                            cache: true
+                            mipmap: false
+                            smooth: !root.isScrolling
+                            fillMode: Image.PreserveAspectCrop
+                            visible: status === Image.Ready && !chapterCard.imageFailed
+                            onSourceChanged: chapterCard.imageFailed = false
+                            onStatusChanged: {
+                                if (status === Image.Error) chapterCard.imageFailed = true
+                                else if (status === Image.Ready && chapterCard.selected)
+                                    root._scheduleHq(index)
+                            }
+                        }
+
+                        Image {
+                            id: chapterImageHq
+                            anchors.fill: parent
+                            source: (chapterCard.selected
+                                     && !root.isScrolling
+                                     && chapterImage.status === Image.Ready
+                                     && root.hqTargetIndex === index)
+                                    ? MediaCatalog.chapterImageUrl(Jellyfin, root.serverUrl, root.itemId, root.chapters, index, root.requestHqImageWidth, root.requestHqImageHeight, root.hqImageQuality) : ""
+                            asynchronous: true
+                            cache: false
+                            mipmap: false
+                            smooth: !root.isScrolling
+                            fillMode: Image.PreserveAspectCrop
+                            visible: source !== "" && status === Image.Ready && !chapterCard.imageFailed
+                            opacity: visible ? 1.0 : 0.0
+                            Behavior on opacity {
+                                enabled: root.allowAnims
+                                NumberAnimation { duration: root.compactPlayerStyle ? 90 : 100; easing.type: Easing.OutCubic }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        anchors.fill: posterCard
+                        color: "transparent"
+                        border.color: "#FFFFFF"
+                        border.width: root.frameWidth
+                        opacity: posterCard.selected ? 1.0 : 0.0
+                        antialiasing: false
+                        Behavior on opacity {
+                            enabled: posterCard.allowLocalAnims
+                            NumberAnimation { duration: root.compactPlayerStyle ? 125 : 110; easing.type: Easing.OutCubic }
+                        }
+                        z: 3
+                    }
+                }
+
+                Text {
+                    id: chapterName
+                    x: 0
+                    y: (root.compactPlayerStyle ? 0 : root.topPadFor(root.imageHeight))
+                       + root.imageHeight + (root.compactPlayerStyle ? 7 : 8)
+                    width: root.cardWidth
+                    text: MediaCatalog.chapterTitle(modelData)
+                    color: "#FFFFFF"
+                    font.pixelSize: root.compactPlayerStyle ? 17 : 18
+                    font.bold: chapterCard.selected
+                    elide: Text.ElideRight
+                    wrapMode: Text.NoWrap
+                    height: text.length > 0 ? (root.compactPlayerStyle ? 22 : 23) : 0
+                    visible: text.length > 0
+                }
+                Text {
+                    x: 0
+                    y: chapterName.visible
+                       ? (chapterName.y + chapterName.height + (root.compactPlayerStyle ? 1 : 2))
+                       : ((root.compactPlayerStyle ? 0 : root.topPadFor(root.imageHeight))
+                          + root.imageHeight + (root.compactPlayerStyle ? 7 : 8))
+                    width: root.cardWidth
+                    text: MediaCatalog.chapterTimeLabel(modelData)
+                    color: "#B8BDCC"
+                    font.pixelSize: root.compactPlayerStyle ? 15 : 16
+                    elide: Text.ElideRight
+                    wrapMode: Text.NoWrap
                 }
 
                 function _applyScaleImmediate(){
                     if (scaleIn && scaleIn.stop) scaleIn.stop()
                     if (scaleOut && scaleOut.stop) scaleOut.stop()
-                    posterCard.scale = posterCard.selected ? (root.focusScale - 0.02) : 1.0
+                    if (root.compactPlayerStyle) {
+                        posterCard.scale = 1.0
+                        cardVisual.scale = chapterCard.selected ? root.focusScaleRest : 1.0
+                    } else {
+                        cardVisual.scale = 1.0
+                        posterCard.scale = chapterCard.selected ? root.focusScaleRest : 1.0
+                    }
                 }
 
                 SequentialAnimation {
                     id: scaleIn
                     running: false
-                    PropertyAnimation { target: posterCard; property: "scale"; to: root.focusScale; duration: 120; easing.type: Easing.OutCubic }
-                    PropertyAnimation { target: posterCard; property: "scale"; to: (root.focusScale - 0.02); duration: 90; easing.type: Easing.OutCubic }
+                    PropertyAnimation {
+                        target: root.compactPlayerStyle ? cardVisual : posterCard
+                        property: "scale"
+                        to: root.focusScalePeak
+                        duration: root.compactPlayerStyle ? 130 : 120
+                        easing.type: Easing.OutCubic
+                    }
+                    PropertyAnimation {
+                        target: root.compactPlayerStyle ? cardVisual : posterCard
+                        property: "scale"
+                        to: root.focusScaleRest
+                        duration: 90
+                        easing.type: Easing.OutCubic
+                    }
                 }
                 NumberAnimation {
                     id: scaleOut
-                    target: posterCard
+                    target: root.compactPlayerStyle ? cardVisual : posterCard
                     property: "scale"
                     to: 1.0
-                    duration: 130
+                    duration: root.compactPlayerStyle ? 140 : 130
                     easing.type: Easing.OutCubic
                     running: false
                 }
 
-                onSelectedChanged: {
-                    if (!allowLocalAnims) { _applyScaleImmediate(); return }
-                    if (selected) { scaleOut.stop(); scaleIn.start() }
-                    else { scaleIn.stop(); scaleOut.start() }
-                }
                 onVisibleChanged: if (visible) _applyScaleImmediate()
-                Connections { target: root; function onIsScrollingChanged(){ if (root.isScrolling) posterCard._applyScaleImmediate() } }
-
-                Rectangle {
-                    anchors.fill: parent
-                    color: "#11141c"
-                    visible: true
-                }
-
-                Item {
-                    id: imageClip
-                    anchors.fill: parent
-                    clip: true
-
-                    Item {
-                        id: clapFallback
-                        anchors.fill: parent
-                        visible: !chapterImage.source || chapterImage.status !== Image.Ready || chapterCard.imageFailed
-                        Rectangle { anchors.fill: parent; color: "#10131A" }
-                        Rectangle {
-                            id: clapperTop
-                            x: Math.round(parent.width * 0.18)
-                            y: Math.round(parent.height * 0.22)
-                            width: Math.round(parent.width * 0.64)
-                            height: Math.round(parent.height * 0.18)
-                            color: "#E9EDF5"
-                            rotation: -5
-                            transformOrigin: Item.Center
-                            clip: true
-                            Repeater {
-                                model: 6
-                                Rectangle {
-                                    width: Math.round(clapperTop.width / 8)
-                                    height: clapperTop.height * 1.8
-                                    x: index * Math.round(clapperTop.width / 5) - 8
-                                    y: -Math.round(clapperTop.height * 0.4)
-                                    color: "#151922"
-                                    rotation: -28
-                                }
-                            }
-                        }
-                        Rectangle {
-                            x: Math.round(parent.width * 0.20)
-                            y: Math.round(parent.height * 0.43)
-                            width: Math.round(parent.width * 0.60)
-                            height: Math.round(parent.height * 0.37)
-                            color: "#171B24"
-                            border.width: 2
-                            border.color: "#D9DFEA"
-                            Rectangle { x: 14; y: 16; width: parent.width - 28; height: 2; color: "#7A8392" }
-                            Rectangle { x: 14; y: 31; width: parent.width - 28; height: 2; color: "#7A8392" }
-                            Rectangle { x: 14; y: 46; width: Math.round((parent.width - 28) * 0.62); height: 2; color: "#7A8392" }
-                        }
-                    }
-
-                    Image {
-                        id: chapterImage
-                        anchors.fill: parent
-                        source: SeasonUtils.chapterImageUrl(root.serverUrl, root.itemId, root.chapters, index, root.requestImageWidth, root.requestImageHeight, root.imageQuality)
-                        asynchronous: true
-                        cache: true
-                        mipmap: false
-                        smooth: !root.isScrolling
-                        fillMode: Image.PreserveAspectCrop
-                        visible: status === Image.Ready && !chapterCard.imageFailed
-                        onSourceChanged: chapterCard.imageFailed = false
-                        onStatusChanged: {
-                            if (status === Image.Error) chapterCard.imageFailed = true
-                            else if (status === Image.Ready && chapterCard.selected)
-                                root._scheduleHq(index)
-                        }
-                    }
-
-                    Image {
-                        id: chapterImageHq
-                        anchors.fill: parent
-                        source: (chapterCard.selected
-                                 && !root.isScrolling
-                                 && chapterImage.status === Image.Ready
-                                 && root.hqTargetIndex === index)
-                                ? SeasonUtils.chapterImageUrl(root.serverUrl, root.itemId, root.chapters, index, root.requestHqImageWidth, root.requestHqImageHeight, root.hqImageQuality) : ""
-                        asynchronous: true
-                        cache: false
-                        mipmap: false
-                        smooth: !root.isScrolling
-                        fillMode: Image.PreserveAspectCrop
-                        visible: source !== "" && status === Image.Ready && !chapterCard.imageFailed
-                        opacity: visible ? 1.0 : 0.0
-                        Behavior on opacity {
-                            enabled: root.allowAnims
-                            NumberAnimation { duration: 100; easing.type: Easing.OutCubic }
-                        }
-                    }
-                }
-
-                // Cadre focus exactement superposé à la vignette.
-                // Aucune marge : le bord blanc épouse pixel pour pixel imageClip
-                // et reste dans le même Item transformé que le poster, donc il suit
-                // exactement le zoom, le lift et l'edge-nudge.
-                Rectangle {
-                    anchors.fill: imageClip
-                    anchors.margins: 0
-                    color: "transparent"
-                    border.color: "#FFFFFF"
-                    border.width: root.frameWidth
-                    opacity: posterCard.selected ? 1.0 : 0.0
-                    antialiasing: false
-                    Behavior on opacity {
-                        enabled: posterCard.allowLocalAnims
-                        NumberAnimation { duration: 110; easing.type: Easing.OutCubic }
-                    }
-                    z: 3
-                }
             }
 
-            Text {
-                id: chapterName
-                x: 0
-                y: root.topPadFor(root.imageHeight) + root.imageHeight + 8
-                width: root.cardWidth
-                text: SeasonUtils.chapterTitle(modelData)
-                color: "#FFFFFF"
-                font.pixelSize: 18
-                font.bold: chapterCard.selected
-                elide: Text.ElideRight
-                wrapMode: Text.NoWrap
-                height: text.length > 0 ? 23 : 0
-                visible: text.length > 0
+            onSelectedChanged: {
+                if (!root.allowAnims) { cardVisual._applyScaleImmediate(); return }
+                if (selected) { scaleOut.stop(); scaleIn.start() }
+                else { scaleIn.stop(); scaleOut.start() }
             }
-            Text {
-                x: 0
-                y: chapterName.visible ? (chapterName.y + chapterName.height + 2)
-                                       : (root.topPadFor(root.imageHeight) + root.imageHeight + 8)
-                width: root.cardWidth
-                text: SeasonUtils.chapterTimeLabel(modelData)
-                color: "#B8BDCC"
-                font.pixelSize: 16
-                elide: Text.ElideRight
-                wrapMode: Text.NoWrap
+            Connections {
+                target: root
+                function onIsScrollingChanged(){
+                    if (root.isScrolling) cardVisual._applyScaleImmediate()
+                }
             }
 
             Keys.onPressed: {
+                root.userActivity()
                 if (event.key === Qt.Key_Left) {
                     if (index > 0) root._focusIndex(index - 1)
                     event.accepted = true
@@ -458,11 +531,17 @@ FocusScope {
                     root.requestFocusBelow(); event.accepted = true
                 } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Select || event.key === Qt.Key_Ok) {
                     root.chapterActivated(index, modelData); event.accepted = true
+                } else if (root.consumeBackKey && (event.key === Qt.Key_Back || event.key === Qt.Key_Escape)) {
+                    root.requestBack(); event.accepted = true
                 }
             }
             MouseArea {
                 anchors.fill: parent
-                onClicked: root._focusIndex(index)
+                onClicked: {
+                    root.userActivity()
+                    root._focusIndex(index)
+                    if (root.activateOnClick) root.chapterActivated(index, modelData)
+                }
             }
         }
     }

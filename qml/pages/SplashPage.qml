@@ -4,6 +4,7 @@
 // ✅ Loader circulaire (CircleDots) identique au style utilisé dans les pages (type Detail/MoviePage).
 
 import QtQuick 2.15
+import "../js/NavigationContext.js" as NavContext
 import "../js/UserStore.js" as Store
 
 FocusScope {
@@ -102,7 +103,6 @@ FocusScope {
         }
 
         Loader {
-            id: loadingDots
             anchors.horizontalCenter: parent.horizontalCenter
             active: true
             sourceComponent: circleDotsLoaderComp
@@ -120,8 +120,7 @@ FocusScope {
 
     function _storeServerNavContext(su) {
         try {
-            var api = shared && shared.__redefinNavApi ? shared.__redefinNavApi : null
-            return api && api.storeValues ? api.storeValues({ serverUrl: su || "", fbx: fbx || null }) : false
+            return NavContext.storeValues(shared, { serverUrl: su || "", fbx: fbx || null })
         } catch(e) { return false }
     }
 

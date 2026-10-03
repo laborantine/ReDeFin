@@ -107,9 +107,7 @@ function buildProgressiveUrl(serverUrl, accessToken, itemId, options) {
 // Reprise serveur progressive dédiée aux changements de piste.
 // Cette URL doit lancer un vrai job FFmpeg avec StartTimeTicks tout en
 // conservant les codecs vidéo/audio par stream-copy lorsque Jellyfin le permet.
-function buildServerSeekProgressiveUrl(serverUrl, accessToken, itemId, options) {
-    options = options || {}
-
+function _progressiveJobBaseUrl(serverUrl, accessToken, itemId, options) {
     var cont = String(options.container || "mkv").toLowerCase().replace(/[^a-z0-9]/g, "") || "mkv"
     var url = _u(serverUrl, "/Videos/" + encodeURIComponent(itemId) + "/stream." + encodeURIComponent(cont))
     url = _appendParam(url, "ApiKey", accessToken)
@@ -119,6 +117,12 @@ function buildServerSeekProgressiveUrl(serverUrl, accessToken, itemId, options) 
     url = _appendParam(url, "Container", cont)
     if (typeof options.startTimeTicks === "number" && options.startTimeTicks > 0)
         url = _appendParam(url, "StartTimeTicks", options.startTimeTicks)
+    return url
+}
+
+function buildServerSeekProgressiveUrl(serverUrl, accessToken, itemId, options) {
+    options = options || {}
+    var url = _progressiveJobBaseUrl(serverUrl, accessToken, itemId, options)
     url = _appendOpt(url, options, "videoCodec", "VideoCodec")
     if (options.audioCodec)
         url = _appendParam(url, "AudioCodec", options.audioCodec)
@@ -133,16 +137,7 @@ function buildServerSeekProgressiveUrl(serverUrl, accessToken, itemId, options) 
 }
 function buildHighQualityProgressiveTranscodeUrl(serverUrl, accessToken, itemId, options) {
     options = options || {}
-
-    var cont = String(options.container || "mkv").toLowerCase().replace(/[^a-z0-9]/g, "") || "mkv"
-    var url = _u(serverUrl, "/Videos/" + encodeURIComponent(itemId) + "/stream." + encodeURIComponent(cont))
-    url = _appendParam(url, "ApiKey", accessToken)
-    url = _appendTrackParams(url, options)
-    url = _appendOpt(url, options, "mediaSourceId", "MediaSourceId")
-    url = _appendOpt(url, options, "playSessionId", "PlaySessionId")
-    url = _appendParam(url, "Container", cont)
-    if (typeof options.startTimeTicks === "number" && options.startTimeTicks > 0)
-        url = _appendParam(url, "StartTimeTicks", options.startTimeTicks)
+    var url = _progressiveJobBaseUrl(serverUrl, accessToken, itemId, options)
 
     var map = [
         ["videoCodec", "VideoCodec"], ["audioCodec", "AudioCodec"],

@@ -199,21 +199,6 @@ FocusScope {
             }
 
         Component {
-            id: musicNoteComp
-            Item {
-                anchors.fill: parent
-                Rectangle { anchors.fill: parent; color: "#2e3355" }
-                Text {
-                    anchors.centerIn: parent
-                    text: "♪"
-                    color: "#cfd6ff"
-                    font.pixelSize: Math.round(Math.min(parent.width, parent.height) * 0.42)
-                    font.bold: true
-                    opacity: 0.95
-                }
-            }
-        }
-        Component {
             id: videoLogoComp
             Item {
                 anchors.fill: parent
@@ -614,7 +599,6 @@ FocusScope {
                 }
 
                 Loader {
-                    id: fallbackLoader
                     anchors.fill: parent
                     active: cardRoot._needFallback
                     visible: active

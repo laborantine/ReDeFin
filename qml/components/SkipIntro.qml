@@ -56,7 +56,6 @@ FocusScope {
     readonly property bool priorityFocusActive:
         effectiveShow && !_exitAnimating && focusClaimed
 
-    function showPanel() { show = true }
     function hidePanel() { show = false }
 
     /* ===================== UI / PERF ===================== */
@@ -537,7 +536,6 @@ FocusScope {
             // la largeur augmente. La coupe droite de cette fenêtre produit un
             // bord de progression parfaitement vertical, sans curseur ni joint.
             Item {
-                id: sweepViewport
                 anchors.left: parent.left
                 anchors.top: parent.top
                 anchors.bottom: parent.bottom
@@ -545,7 +543,6 @@ FocusScope {
                 clip: true
 
                 Rectangle {
-                    id: sweepFill
                     x: 0
                     y: 0
                     width: fillClip.width

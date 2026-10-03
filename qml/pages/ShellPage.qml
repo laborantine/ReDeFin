@@ -13,8 +13,10 @@
 // ✅ MoviePage universel : injection libraryMode/browserTitle + restauration restoreIndex/restoreY.
 
 import QtQuick 2.15
+import "../js/NavigationContext.js" as NavContext
 import fbx.system 1.0
 import "../js/jellyfinBridge.js" as JellyfinBridge
+import "../js/JellyfinHttpTransport.js" as HttpTransport
 import "../js/UserStore.js" as Users
 import "../components" as Components
 import "../js/clientId.js" as ClientId
@@ -121,7 +123,7 @@ FocusScope {
         }
 
         var base =
-                _baseOf(currentPage).toLowerCase()
+                NavContext.baseOf(currentPage).toLowerCase()
 
         // Le Splash reste exclusivement consacré au boot.
         if (!base || base === "splashpage.qml")
@@ -177,7 +179,7 @@ FocusScope {
         if (active)
             _circleDotsRuntimeEnabled = true
         else {
-            var baseNow = _baseOf(currentPage).toLowerCase()
+            var baseNow = NavContext.baseOf(currentPage).toLowerCase()
             if (baseNow === "splashpage.qml" || baseNow === "serverpage.qml" || baseNow === "loginpage.qml")
                 _circleDotsRuntimeEnabled = false
         }
@@ -202,7 +204,7 @@ FocusScope {
     }
 
     function _prepareDetailCurtainBeforeNavigation(pageName) {
-        var base = _baseOf(pageName).toLowerCase()
+        var base = NavContext.baseOf(pageName).toLowerCase()
         if (!_circleDotsRuntimeEnabled) return
         if (base === "detailmoviepage.qml" || base === "detailseriepage.qml")
             _beginPageCurtainTransition()
@@ -263,7 +265,7 @@ FocusScope {
         var p = pageLoader ? pageLoader.item : null
         if (!p) return false
         try { if (p.hasOwnProperty("shellLoading")) return p.shellLoading === true } catch(e0) {}
-        var base = _baseOf(currentPage).toLowerCase()
+        var base = NavContext.baseOf(currentPage).toLowerCase()
         return false
     }
     readonly property string _pageReportedLoadingError: {
@@ -307,8 +309,7 @@ FocusScope {
     // `shared` peut stocker des états inter-pages (ex: discoveredServers, __detailFocus, etc.)
     property var    shared: ({ discoveredServers: [] })
     onSharedChanged: {
-        _installSharedNavApi()
-        _installSharedDetailFocusApi()
+
     }
 
     // Injecté depuis main.qml : Settings Freebox (fbx.application.Settings via Application.Settings)
@@ -383,8 +384,8 @@ FocusScope {
     }
     function _configureHttpWatchdog() {
         try {
-            if (JellyfinBridge && JellyfinBridge.setHttpWatchdogWake) {
-                JellyfinBridge.setHttpWatchdogWake(function(active) {
+            if (HttpTransport && HttpTransport.setHttpWatchdogWake) {
+                HttpTransport.setHttpWatchdogWake(function(active) {
                     try { if (shell) shell._setHttpWatchdogActive(active === true) } catch(eCb) {}
                 })
             }
@@ -397,7 +398,7 @@ FocusScope {
         running: false
         onTriggered: {
             try {
-                var remaining = JellyfinBridge.sweepHttpWatchdogs(Date.now())
+                var remaining = HttpTransport.sweepHttpWatchdogs(Date.now())
                 if (!(remaining > 0))
                     shell._setHttpWatchdogActive(false)
             } catch(e0) {
@@ -406,7 +407,6 @@ FocusScope {
         }
     }
 
-    function _normalize(str){ return (str||"").trim() }
     function _normalizeSessionServerUrl(value) {
         try {
             if (JellyfinBridge && JellyfinBridge.normalizeServerUrl)
@@ -414,320 +414,49 @@ FocusScope {
         } catch(e0) {}
         return ""
     }
-    function _baseOf(url) { return _normalize(url).split("?")[0] }
-    function _qsOf(url)   {
-        var s = _normalize(url)
-        var p = s.indexOf("?")
-        return (p >= 0) ? s.substring(p + 1) : ""
-    }
-
-    function extractParam(param, str) {
-        var q = (String(str || "").split("?")[1] || "")
-        if (!q.length) return ""
-        var params = q.split("&")
-        for (var i = 0; i < params.length; ++i) {
-            var kv = params[i].split("=")
-            if (kv[0] === param) return decodeURIComponent(kv[1] || "")
-        }
-        return ""
-    }
-
-    function buildUrl(page, params) {
-        var qs = []
-        for (var k in params) {
-            if (params[k] !== undefined && params[k] !== null)
-                qs.push(k + "=" + encodeURIComponent(params[k]))
-        }
-        return page + (qs.length ? ("?" + qs.join("&")) : "")
-    }
-
-    function setParam(url, key, value) {
-        var base = _baseOf(url)
-        var qs = _qsOf(url)
-        var parts = qs ? qs.split("&") : []
-        var out = []
-        for (var i = 0; i < parts.length; ++i) {
-            var k = parts[i].split("=")[0]
-            if (k && k !== key && parts[i] !== "")
-                out.push(parts[i])
-        }
-        out.push(key + "=" + encodeURIComponent(value))
-        return base + (out.length ? ("?" + out.join("&")) : "")
-    }
-
-    function stripParams(url, keys) {
-        var base = _baseOf(url)
-        var qs = _qsOf(url)
-        if (!qs) return base
-        var parts = qs.split("&")
-        var out = []
-        for (var i = 0; i < parts.length; ++i) {
-            var p = parts[i]
-            if (!p) continue
-            var k = p.split("=")[0]
-            if (keys.indexOf(k) >= 0) continue
-            out.push(p)
-        }
-        return base + (out.length ? ("?" + out.join("&")) : "")
-    }
-
-    function _isCtxRoute(url) {
-        return extractParam("ctx", url) === "1"
-    }
-
-    function _stripSensitiveQueryForCtx(url) {
-        if (!_isCtxRoute(url)) return url
-        return stripParams(url, [
-            "serverUrl",
-            "accessToken",
-            "userId",
-            "userName",
-            "userImageTag"
-        ])
-    }
-
-    function _sharedNavContext() {
-        try {
-            return shared ? shared.__redefinNavContext : null
-        } catch(e) {
-            return null
-        }
-    }
 
 
-    // API runtime unique de navigation sensible. Les pages gardent leurs décisions
-    // de navigation/focus, mais ne recopient plus la plomberie ctx=1.
-    function _clearSharedNavContext() {
-        try {
-            if (shared) shared.__redefinNavContext = null
-            return true
-        } catch(e) {}
-        return false
-    }
 
-    function _navContextFresh(ctx, maxAgeMs) {
-        if (!ctx) return false
-        var maxAge = Number(maxAgeMs || 0)
-        if (maxAge <= 0) return true
-        var ts = Number(ctx.ts || 0)
-        if (ts <= 0) return true
-        var age = Date.now() - ts
-        return age >= 0 && age <= maxAge
-    }
+    
 
-    function _storeNavContextValues(values) {
-        try {
-            if (!shared) return false
-            values = values || ({})
-            shared.__redefinNavContext = ({
-                accessToken: values.accessToken || "",
-                userId: values.userId || "",
-                serverUrl: values.serverUrl || "",
-                userName: values.userName || "",
-                userImageTag: values.userImageTag || "",
-                fbx: values.fbx || null,
-                remember: values.remember === true,
-                forceServerUrl: values.forceServerUrl === true,
-                sourcePage: values.sourcePage || "",
-                personSource: values.personSource || "",
-                personId: values.personId || "",
-                ts: Date.now()
-            })
-            return true
-        } catch(e) {}
-        return false
-    }
 
-    function _storeNavContextFromTarget(target) {
-        if (!target) return false
-        try {
-            return _storeNavContextValues({
-                accessToken: target.accessToken || "",
-                userId: target.userId || "",
-                serverUrl: target.serverUrl || "",
-                userName: target.userName || "",
-                userImageTag: target.userImageTag || "",
-                fbx: target.fbx || null,
-                remember: target.remember === true || target.rememberProfileOnLogin === true
-            })
-        } catch(e) {}
-        return false
-    }
 
-    function _storeServerNavContextFromTarget(target) {
-        if (!target) return false
-        try {
-            return _storeNavContextValues({
-                serverUrl: target.serverUrl || "",
-                fbx: target.fbx || null,
-                remember: false
-            })
-        } catch(e) {}
-        return false
-    }
+    
 
-    function _hydrateTargetFromSharedNav(target, overwrite, maxAgeMs, clearAlways) {
-        if (!target) return false
-        var ctx = _sharedNavContext()
-        if (!ctx) return false
-        if (!_navContextFresh(ctx, maxAgeMs)) {
-            _clearSharedNavContext()
-            return false
-        }
-        var changed = false
-        var fields = ["accessToken", "userId", "serverUrl", "userName", "userImageTag"]
-        try {
-            for (var i = 0; i < fields.length; i++) {
-                var key = fields[i]
-                var value = ctx[key]
-                if (value === undefined || value === null || String(value) === "") continue
-                if (!(key in target)) continue
-                var current = String(target[key] || "")
-                if (overwrite === true ? current !== String(value) : current === "") {
-                    target[key] = String(value)
-                    changed = true
-                }
-            }
-            if (("fbx" in target) && !target.fbx && ctx.fbx) {
-                target.fbx = ctx.fbx
-                changed = true
-            }
-        } catch(e) {}
-        if (clearAlways === true || changed)
-            _clearSharedNavContext()
-        return changed
-    }
 
-    function _appendNavParam(url, key, value) {
-        if (value === undefined || value === null || value === "") return url
-        return url + (String(url).indexOf("?") >= 0 ? "&" : "?")
-             + encodeURIComponent(String(key)) + "=" + encodeURIComponent(String(value))
-    }
 
-    function _navBaseForTarget(target, pageName) {
-        _storeNavContextFromTarget(target)
-        return String(pageName || "") + "?ctx=1"
-    }
 
-    function _navRouteForTarget(target, pageName, params) {
-        var url = _navBaseForTarget(target, pageName)
-        params = params || ({})
-        for (var key in params) {
-            try { if (!Object.prototype.hasOwnProperty.call(params, key)) continue } catch(e0) { continue }
-            url = _appendNavParam(url, key, params[key])
-        }
-        return url
-    }
 
-    function _installSharedNavApi() {
-        try {
-            if (!shared) return false
-            if (shared.__redefinNavApi && shared.__redefinNavApi.version === 2) return true
-            shared.__redefinNavApi = ({
-                version: 2,
-                peek: function() { return shell._sharedNavContext() },
-                clear: function() { return shell._clearSharedNavContext() },
-                hydrate: function(target, overwrite, maxAgeMs, clearAlways) {
-                    return shell._hydrateTargetFromSharedNav(target, overwrite === true, maxAgeMs || 0, clearAlways === true)
-                },
-                storeTarget: function(target) { return shell._storeNavContextFromTarget(target) },
-                storeServerTarget: function(target) { return shell._storeServerNavContextFromTarget(target) },
-                storeValues: function(values) { return shell._storeNavContextValues(values) },
-                base: function(target, pageName) { return shell._navBaseForTarget(target, pageName) },
-                append: function(url, key, value) { return shell._appendNavParam(url, key, value) },
-                route: function(target, pageName, params) { return shell._navRouteForTarget(target, pageName, params) }
-            })
-            return true
-        } catch(e) {}
-        return false
-    }
+    
 
-    /* ====== Focus persistant des fiches : stockage partagé borné ====== */
-    function _detailFocusRoot() {
-        if (!shared) return null
-        if (!shared.__detailFocus) shared.__detailFocus = ({})
-        return shared.__detailFocus
-    }
 
-    function _detailFocusSnapshotBucket() {
-        var root = _detailFocusRoot()
-        if (!root) return null
-        if (!root.__snapshots) root.__snapshots = ({})
-        return root.__snapshots
-    }
 
-    function _detailFocusArm(itemId, scope) {
-        var root = _detailFocusRoot()
-        itemId = String(itemId || "")
-        if (!root || !itemId.length) return false
-        if (!root.__arms) root.__arms = ({})
-        JellyfinBridge.putBoundedMemory(root.__arms, itemId, ({
-            scope: String(scope || ""),
-            t: Date.now()
-        }), 48)
-        return true
-    }
+    
 
-    function _detailFocusIsArmed(itemId) {
-        var root = _detailFocusRoot()
-        itemId = String(itemId || "")
-        return !!(root && root.__arms && itemId.length && root.__arms[itemId])
-    }
 
-    function _detailFocusActiveScope(itemId) {
-        var root = _detailFocusRoot()
-        itemId = String(itemId || "")
-        if (!root || !root.__arms || !itemId.length || !root.__arms[itemId]) return ""
-        return String(root.__arms[itemId].scope || "").toLowerCase()
-    }
 
-    function _detailFocusDisarm(itemId) {
-        var root = _detailFocusRoot()
-        itemId = String(itemId || "")
-        if (!root || !root.__arms || !itemId.length || !root.__arms[itemId]) return false
-        delete root.__arms[itemId]
-        return true
-    }
+    
 
-    function _detailFocusPut(key, snapshot) {
-        var bucket = _detailFocusSnapshotBucket()
-        key = String(key || "")
-        if (!bucket || !key.length || !snapshot) return false
-        return JellyfinBridge.putBoundedMemory(bucket, key, snapshot, 48)
-    }
 
-    function _detailFocusGet(key) {
-        var bucket = _detailFocusSnapshotBucket()
-        key = String(key || "")
-        return bucket && key.length && bucket[key] ? bucket[key] : null
-    }
 
-    function _detailFocusRemove(key) {
-        var bucket = _detailFocusSnapshotBucket()
-        key = String(key || "")
-        if (!bucket || !key.length || !Object.prototype.hasOwnProperty.call(bucket, key)) return false
-        delete bucket[key]
-        return true
-    }
+    
 
-    function _installSharedDetailFocusApi() {
-        try {
-            if (!shared) return false
-            if (shared.__redefinDetailFocusApi && shared.__redefinDetailFocusApi.version === 2) return true
-            shared.__redefinDetailFocusApi = ({
-                version: 2,
-                arm: function(itemId, scope) { return shell._detailFocusArm(itemId, scope) },
-                isArmed: function(itemId) { return shell._detailFocusIsArmed(itemId) },
-                activeScope: function(itemId) { return shell._detailFocusActiveScope(itemId) },
-                disarm: function(itemId) { return shell._detailFocusDisarm(itemId) },
-                put: function(key, snapshot) { return shell._detailFocusPut(key, snapshot) },
-                get: function(key) { return shell._detailFocusGet(key) },
-                remove: function(key) { return shell._detailFocusRemove(key) }
-            })
-            return true
-        } catch(e) {}
-        return false
-    }
+
+
+    
+
+
+
+    
+
+
+
+    
+
+
+
+    
+
 
     function _isWanHttpServerUrl(url) {
         try {
@@ -842,7 +571,7 @@ FocusScope {
 
     function _adoptForcedServerNavContext() {
         try {
-            var ctx = _sharedNavContext()
+            var ctx = NavContext.peek(shared)
             if (!_isFreshForcedServerNavContext(ctx))
                 return false
 
@@ -866,7 +595,7 @@ FocusScope {
 
     function _hasValidSharedNavContext() {
         try {
-            var ctx = _sharedNavContext()
+            var ctx = NavContext.peek(shared)
             return !!(ctx && ctx.accessToken && ctx.userId && ctx.serverUrl)
         } catch(e) {
             return false
@@ -875,7 +604,7 @@ FocusScope {
 
     function _syncSessionFromSharedNavContext() {
         try {
-            var ctx = _sharedNavContext()
+            var ctx = NavContext.peek(shared)
             if (!ctx) return false
             if (!_isBadParam(ctx.serverUrl) && !_normalizeSessionServerUrl(ctx.serverUrl))
                 return false
@@ -920,7 +649,7 @@ FocusScope {
         try {
             serverUrl = _normalizeSessionServerUrl(serverUrl)
             if (!serverUrl) return false
-            return _storeNavContextValues({
+            return NavContext.storeValues(shared, {
                 serverUrl: serverUrl,
                 fbx: fbx || null,
                 remember: false
@@ -950,7 +679,7 @@ FocusScope {
                 return false
 
             sessionServerUrl = _normalizeSessionServerUrl(sessionServerUrl)
-            return _storeNavContextValues({
+            return NavContext.storeValues(shared, {
                 accessToken: sessionAccessToken || "",
                 userId: sessionUserId || "",
                 serverUrl: sessionServerUrl || "",
@@ -965,13 +694,13 @@ FocusScope {
     }
 
     function _focusKeyFor(url) {
-        var base = _baseOf(url).toLowerCase()
+        var base = NavContext.baseOf(url).toLowerCase()
         if (base === "moviepage.qml") {
-            var folder = extractParam("folderId", url) || ""
+            var folder = NavContext.param("folderId", url) || ""
             // MoviePage porte désormais tous les navigateurs média. Le mode fait
             // donc partie de l'identité de la page afin qu'un focus Collections,
             // Séries ou Mixte ne puisse jamais écraser celui d'un autre mode.
-            var mode = String(extractParam("libraryMode", url) || "movies").toLowerCase()
+            var mode = String(NavContext.param("libraryMode", url) || "movies").toLowerCase()
             if (mode !== "series" && mode !== "mixed" && mode !== "collections")
                 mode = "movies"
             return base + "|" + folder + "|" + mode
@@ -1006,12 +735,12 @@ FocusScope {
     }
 
     function _withStartIndexIfReturningFromDetails(targetUrl, currentBase) {
-        var base = _baseOf(targetUrl).toLowerCase()
+        var base = NavContext.baseOf(targetUrl).toLowerCase()
         if (!_shouldRestoreFocusOn(base, currentBase))
             return targetUrl
         var idx = _recallFocus(targetUrl)
         if (idx >= 0)
-            return setParam(targetUrl, "startIndex", idx)
+            return NavContext.withParam(targetUrl, "startIndex", idx)
         return targetUrl
     }
 
@@ -1131,6 +860,419 @@ FocusScope {
     property string sessionUserImageTag: ""
     property bool sessionRemember: false
 
+    // Contrôle distant Jellyfin : les pistes transportées par Play sont
+    // appliquées lorsque le PlayerOverlay et ses tables de streams sont prêts.
+    property bool _remoteAudioPending: false
+    property int _remoteAudioStreamIndex: -1
+    property bool _remoteSubtitlePending: false
+    property int _remoteSubtitleStreamIndex: -1
+    property string _remotePendingTrackItemId: ""
+    property int _remoteTrackApplyAttempts: 0
+    property bool _remoteSeekPending: false
+    property double _remoteSeekTicks: 0
+    property bool _remoteResumeAfterSeek: false
+
+    function _remotePlayer(){
+        try {
+            return playerOverlayLoader && playerOverlayLoader.item
+                    ? playerOverlayLoader.item : null
+        } catch(e) {}
+        return null
+    }
+
+    function _remoteHasOwn(obj, key){
+        try { return !!obj && Object.prototype.hasOwnProperty.call(obj, key) }
+        catch(e) {}
+        try { return !!obj && obj.hasOwnProperty && obj.hasOwnProperty(key) }
+        catch(e2) {}
+        return false
+    }
+
+    function _remoteNormalizeItemIds(value){
+        var out = []
+        if (value && value.length !== undefined && typeof value !== "string") {
+            for (var i=0; i<value.length; ++i) {
+                var id = String(value[i] || "")
+                if (id.length && out.indexOf(id) < 0) out.push(id)
+            }
+            return out
+        }
+        var raw = String(value || "")
+        if (!raw.length) return out
+        var parts = raw.split(",")
+        for (var j=0; j<parts.length; ++j) {
+            var sid = String(parts[j] || "").trim()
+            if (sid.length && out.indexOf(sid) < 0) out.push(sid)
+        }
+        return out
+    }
+
+    function _clearRemotePendingTracks(){
+        _remoteAudioPending = false
+        _remoteAudioStreamIndex = -1
+        _remoteSubtitlePending = false
+        _remoteSubtitleStreamIndex = -1
+        _remotePendingTrackItemId = ""
+        _remoteTrackApplyAttempts = 0
+        _remoteSeekPending = false
+        _remoteSeekTicks = 0
+        _remoteResumeAfterSeek = false
+        remoteTrackApplyTimer.stop()
+    }
+
+    function _queueRemotePlayOverrides(data, itemId, sameItem){
+        _clearRemotePendingTracks()
+        _remotePendingTrackItemId = String(itemId || "")
+
+        if (_remoteHasOwn(data, "AudioStreamIndex")) {
+            var ai = Number(data.AudioStreamIndex)
+            if (isFinite(ai) && !isNaN(ai) && ai >= 0) {
+                _remoteAudioPending = true
+                _remoteAudioStreamIndex = Math.floor(ai)
+            }
+        }
+
+        if (_remoteHasOwn(data, "SubtitleStreamIndex")) {
+            var si = Number(data.SubtitleStreamIndex)
+            if (isFinite(si) && !isNaN(si)) {
+                _remoteSubtitlePending = true
+                _remoteSubtitleStreamIndex = Math.floor(si)
+            }
+        }
+
+        if (sameItem && _remoteHasOwn(data, "StartPositionTicks")) {
+            var ticks = Number(data.StartPositionTicks)
+            if (isFinite(ticks) && !isNaN(ticks) && ticks >= 0) {
+                _remoteSeekPending = true
+                _remoteSeekTicks = ticks
+                _remoteResumeAfterSeek = true
+            }
+        }
+
+        if (_remoteAudioPending || _remoteSubtitlePending || _remoteSeekPending)
+            remoteTrackApplyTimer.restart()
+    }
+
+    function _applyRemotePendingOverrides(){
+        if (!_remotePendingTrackItemId.length)
+            return true
+        if (String(playerItemId || "") !== _remotePendingTrackItemId) {
+            _clearRemotePendingTracks()
+            return true
+        }
+
+        var p = _remotePlayer()
+        if (!p || String(p.itemId || "") !== _remotePendingTrackItemId
+                || !p.remoteControlReady || !p.remoteControlReady()) {
+            _remoteTrackApplyAttempts++
+            if (_remoteTrackApplyAttempts < 35)
+                remoteTrackApplyTimer.restart()
+            else
+                _clearRemotePendingTracks()
+            return false
+        }
+
+        var complete = true
+
+        if (_remoteSeekPending) {
+            if (p.remoteSeekTicks && p.remoteSeekTicks(_remoteSeekTicks)) {
+                _remoteSeekPending = false
+                if (_remoteResumeAfterSeek && p.remoteUnpause)
+                    p.remoteUnpause()
+                _remoteResumeAfterSeek = false
+            } else {
+                complete = false
+            }
+        }
+
+        if (_remoteAudioPending) {
+            if (!p.remoteSetAudioStreamIndex
+                    || p.remoteSetAudioStreamIndex(_remoteAudioStreamIndex)) {
+                _remoteAudioPending = false
+            } else {
+                complete = false
+            }
+        }
+
+        if (_remoteSubtitlePending) {
+            if (!p.remoteSetSubtitleStreamIndex
+                    || p.remoteSetSubtitleStreamIndex(_remoteSubtitleStreamIndex)) {
+                _remoteSubtitlePending = false
+            } else {
+                complete = false
+            }
+        }
+
+        if (!_remoteAudioPending && !_remoteSubtitlePending && !_remoteSeekPending) {
+            _clearRemotePendingTracks()
+            _scheduleRemoteStateReport()
+            return true
+        }
+
+        _remoteTrackApplyAttempts++
+        if (_remoteTrackApplyAttempts < 35)
+            remoteTrackApplyTimer.restart()
+        else
+            _clearRemotePendingTracks()
+        return complete
+    }
+
+    function _remotePreparePlaylist(ids, currentId){
+        playlist.resetAll()
+        playlist.setList(ids || [])
+        if (currentId && playlist.syncTo)
+            playlist.syncTo(currentId)
+        shell.playerPlaylist = playlist.copyList()
+        shell.playerPlaylistTitle = ""
+        shell.playerPlaylistStartAtZero = false
+    }
+
+    function _remoteQueueItems(ids, insertNext){
+        ids = _remoteNormalizeItemIds(ids)
+        if (!ids.length) return false
+
+        var current = String(playerItemId || "")
+        var base = playlist.copyList()
+        if (!base.length && current.length)
+            base = [current]
+
+        var clean = []
+        for (var i=0; i<base.length; ++i) {
+            var oldId = String(base[i] || "")
+            if (oldId.length && clean.indexOf(oldId) < 0)
+                clean.push(oldId)
+        }
+        for (var j=0; j<ids.length; ++j) {
+            var removeAt = clean.indexOf(ids[j])
+            if (removeAt >= 0)
+                clean.splice(removeAt, 1)
+        }
+
+        var pos = clean.length
+        if (insertNext && current.length) {
+            var ci = clean.indexOf(current)
+            pos = ci >= 0 ? ci + 1 : clean.length
+        }
+        var args = [pos, 0]
+        for (var k=0; k<ids.length; ++k) args.push(ids[k])
+        clean.splice.apply(clean, args)
+
+        playlist.resetAll()
+        playlist.setList(clean)
+        if (current.length && playlist.syncTo)
+            playlist.syncTo(current)
+        shell.playerPlaylist = playlist.copyList()
+        shell.playerPlaylistTitle = ""
+        shell.playerPlaylistStartAtZero = false
+        return true
+    }
+
+    function _handleRemotePlay(data){
+        data = data || ({})
+        var ids = _remoteNormalizeItemIds(data.ItemIds)
+        if (!ids.length)
+            return false
+
+        var command = String(data.PlayCommand || "PlayNow")
+        if ((command === "PlayNext" || command === "PlayLast") && playerActive)
+            return _remoteQueueItems(ids, command === "PlayNext")
+
+        var startIndex = Number(data.StartIndex)
+        if (!isFinite(startIndex) || isNaN(startIndex)
+                || startIndex < 0 || startIndex >= ids.length)
+            startIndex = 0
+        startIndex = Math.floor(startIndex)
+        var itemId = ids[startIndex]
+        if (!itemId.length)
+            return false
+
+        var sameItem = playerActive && String(playerItemId || "") === itemId
+        _remotePreparePlaylist(ids, itemId)
+
+        shell.playerAccessToken = shell.sessionAccessToken
+        shell.playerUserId = shell.sessionUserId
+        shell.playerServerUrl = shell.sessionServerUrl
+        shell.playerItemTitle = ""
+
+        if (!sameItem && _remoteHasOwn(data, "StartPositionTicks")) {
+            var ticks = Number(data.StartPositionTicks)
+            if (isFinite(ticks) && !isNaN(ticks) && ticks >= 0) {
+                try {
+                    shell.shared.__redefinExplicitPlaybackStart = ({
+                        source: "remote",
+                        itemId: itemId,
+                        serverUrl: shell.sessionServerUrl,
+                        userId: shell.sessionUserId,
+                        startMs: Math.max(0, Math.floor(ticks / 10000)),
+                        ts: Date.now()
+                    })
+                } catch(e0) {}
+            }
+        }
+
+        shell.playerItemId = itemId
+        _queueRemotePlayOverrides(data, itemId, sameItem)
+
+        if (sameItem) {
+            var samePlayer = _remotePlayer()
+            if (!_remoteSeekPending && samePlayer && samePlayer.remoteUnpause)
+                samePlayer.remoteUnpause()
+            return true
+        }
+
+        if (playerActive) {
+            var p = _remotePlayer()
+            if (p && p.hasOwnProperty("forcePlaylistStartAtZero"))
+                p.forcePlaylistStartAtZero = false
+            if (p && p.remoteSwitchItem)
+                return p.remoteSwitchItem(itemId)
+            if (p && p.hasOwnProperty("itemId")) {
+                p.itemId = itemId
+                return true
+            }
+            return false
+        }
+
+        return _requestPlayerLaunch()
+    }
+
+    function _scheduleRemoteStateReport(){
+        remoteStateReportTimer.restart()
+    }
+
+    function _handleRemotePlaystate(data){
+        data = data || ({})
+        var p = _remotePlayer()
+        if (!p) return false
+
+        var command = String(data.Command || "").toLowerCase()
+        var ok = false
+        var report = false
+
+        if (command === "pause") {
+            ok = p.remotePause ? p.remotePause() : false
+            report = ok
+        } else if (command === "unpause" || command === "play") {
+            ok = p.remoteUnpause ? p.remoteUnpause() : false
+            report = ok
+        } else if (command === "playpause" || command === "togglepause") {
+            ok = p.mediaToggle ? p.mediaToggle() : false
+            report = ok
+        } else if (command === "stop") {
+            return p.remoteStop ? p.remoteStop() : false
+        } else if (command === "seek") {
+            var ticks = Number(data.SeekPositionTicks)
+            ok = p.remoteSeekTicks && isFinite(ticks) && !isNaN(ticks)
+                    ? p.remoteSeekTicks(ticks) : false
+            report = ok
+        } else if (command === "nexttrack") {
+            return p.transportNext ? p.transportNext("remote-next") : false
+        } else if (command === "previoustrack") {
+            return p.transportPrev ? p.transportPrev("remote-prev") : false
+        } else if (command === "rewind") {
+            ok = p.transportRewind ? p.transportRewind("remote-rewind") !== false : false
+            report = ok
+        } else if (command === "fastforward") {
+            ok = p.transportForward ? p.transportForward("remote-forward") !== false : false
+            report = ok
+        }
+
+        if (report)
+            _scheduleRemoteStateReport()
+        return ok
+    }
+
+    function _remoteArgumentIndex(data){
+        var args = data && data.Arguments ? data.Arguments : ({})
+        var raw = args.Index
+        if (raw === undefined || raw === null) raw = args.AudioStreamIndex
+        if (raw === undefined || raw === null) raw = args.SubtitleStreamIndex
+        var n = Number(raw)
+        return (isFinite(n) && !isNaN(n)) ? Math.floor(n) : null
+    }
+
+    function _handleRemoteGeneralCommand(data){
+        data = data || ({})
+        var name = String(data.Name || "")
+        var args = data.Arguments ? data.Arguments : ({})
+
+        // DisplayMessage est indépendant du PlayerOverlay : le message doit
+        // pouvoir apparaître sur Home, une fiche ou pendant une lecture.
+        if (name === "DisplayMessage") {
+            var header = String(args.Header || "")
+            var text = String(args.Text || "")
+            var timeoutMs = Number(args.TimeoutMs || 5000)
+            return remoteMessageOverlay.showMessage(header, text, timeoutMs)
+        }
+
+        var p = _remotePlayer()
+        if (!p) return false
+        var idx = _remoteArgumentIndex(data)
+
+        if (name === "SetAudioStreamIndex" && idx !== null) {
+            var audioOk = p.remoteSetAudioStreamIndex
+                    ? p.remoteSetAudioStreamIndex(idx) : false
+            if (audioOk) _scheduleRemoteStateReport()
+            return audioOk
+        }
+        if (name === "SetSubtitleStreamIndex" && idx !== null) {
+            var subtitleOk = p.remoteSetSubtitleStreamIndex
+                    ? p.remoteSetSubtitleStreamIndex(idx) : false
+            if (subtitleOk) _scheduleRemoteStateReport()
+            return subtitleOk
+        }
+        return false
+    }
+
+    Timer {
+        id: remoteTrackApplyTimer
+        interval: 180
+        repeat: false
+        onTriggered: shell._applyRemotePendingOverrides()
+    }
+
+    Timer {
+        id: remoteStateReportTimer
+        interval: 350
+        repeat: false
+        onTriggered: {
+            var p = shell._remotePlayer()
+            if (p && p.remoteReportState)
+                p.remoteReportState("remote-command")
+        }
+    }
+
+    Components.JellyfinRemoteControl {
+        id: jellyfinRemoteControl
+        serverUrl: shell.sessionServerUrl
+        accessToken: shell.sessionAccessToken
+        deviceId: {
+            try {
+                if (shell.settings && shell.settings.jellyfinDeviceId)
+                    return String(shell.settings.jellyfinDeviceId)
+            } catch(e0) {}
+            try { return String(ClientId.clientId() || "") } catch(e1) {}
+            return ""
+        }
+        active: shell._hasValidSessionContext()
+                && (Components.AppSettings
+                    ? Components.AppSettings.remoteControlEnabled !== false
+                    : true)
+
+        onPlayRequested: shell._handleRemotePlay(data)
+        onPlaystateRequested: shell._handleRemotePlaystate(data)
+        onGeneralCommandRequested: shell._handleRemoteGeneralCommand(data)
+    }
+
+    // Notification distante Jellyfin, volontairement au-dessus du Player,
+    // des curtains et des pages. Elle ne prend jamais le focus et n'intercepte
+    // aucune touche de la télécommande.
+    Components.RemoteMessageOverlay {
+        id: remoteMessageOverlay
+        anchors.fill: parent
+        z: 8000
+    }
+
     // Empreinte uniquement mémoire servant à détecter les transitions de profil.
     // Le token n'est jamais dupliqué en clair dans cette propriété.
     property string _apiSessionScopeFingerprint: ""
@@ -1162,6 +1304,8 @@ FocusScope {
     }
 
     function _resetSessionContext() {
+        _clearRemotePendingTracks()
+        try { remoteMessageOverlay.clearAll() } catch(eRemoteMessage) {}
         // Purge aussi lorsque la session est déjà vide mais qu'un cache public ou
         // une requête coalescée subsiste encore.
         _clearApiCaches(true)
@@ -1257,7 +1401,7 @@ FocusScope {
 
     function _captureDetailSnapshotFromPage() {
         try {
-            var base = _baseOf(currentPage).toLowerCase()
+            var base = NavContext.baseOf(currentPage).toLowerCase()
             if (!_isSnapshotDetailPage(base)) return false
             var page = pageLoader.item
             if (!page || !page.hasOwnProperty("item") || !page.item || !page.item.Id) return false
@@ -1327,24 +1471,24 @@ FocusScope {
     // les données sensibles ne doivent jamais être injectées dans les routes.
     // Elles voyagent via shared.__redefinNavContext et via l'injection de propriétés du Loader.
     function _ensureSessionParams(url) {
-        url = _normalize(url)
+        url = NavContext.trim(url)
         if (!url) return url
 
-        var baseL = _baseOf(url).toLowerCase()
+        var baseL = NavContext.baseOf(url).toLowerCase()
 
         // ctx=1 : le contexte sensible voyage via shared.__redefinNavContext, jamais dans l'URL.
-        if (_isCtxRoute(url)) {
+        if (NavContext.usesSharedContext(url)) {
             _storeSessionContextForCtx()
-            return _stripSensitiveQueryForCtx(url)
+            return NavContext.stripCredentials(url)
         }
 
         // LoginPage : si une ancienne route transporte serverUrl, on la déplace en mémoire
         // puis on retourne une route ctx propre.
         if (baseL === "loginpage.qml") {
-            var curSrv = extractParam("serverUrl", url)
+            var curSrv = NavContext.param("serverUrl", url)
             var srvForCtx = !_isBadParam(curSrv) ? curSrv : sessionServerUrl
 
-            url = stripParams(url, [
+            url = NavContext.withoutParams(url, [
                 "serverUrl", "accessToken", "userId", "userName", "userImageTag",
                 "folderId", "itemId", "boxSetId", "seasonId", "seriesId", "preselectEpisodeId", "startIndex", "restoreIndex", "restoreY", "libraryMode", "browserTitle", "ageMax"
             ])
@@ -1357,11 +1501,11 @@ FocusScope {
 
         // Server/Splash : on ne colle rien.
         if (baseL === "serverpage.qml" || baseL === "splashpage.qml")
-            return stripParams(url, ["serverUrl", "accessToken", "userId", "userName", "userImageTag"])
+            return NavContext.withoutParams(url, ["serverUrl", "accessToken", "userId", "userName", "userImageTag"])
 
         // Toutes les autres pages reçoivent les secrets via les propriétés injectées
         // au Loader, pas via query string. On nettoie seulement d'éventuelles anciennes routes.
-        return stripParams(url, ["serverUrl", "accessToken", "userId", "userName", "userImageTag"])
+        return NavContext.withoutParams(url, ["serverUrl", "accessToken", "userId", "userName", "userImageTag"])
     }
 
     /* ===================== QUARANTAINE MMS ======================== */
@@ -1510,8 +1654,7 @@ FocusScope {
     }
 
     Component.onCompleted: {
-        _installSharedNavApi()
-        _installSharedDetailFocusApi()
+
         try { if (JellyfinBridge.setFbx) JellyfinBridge.setFbx(fbx) } catch(e) {}
         _configureHttpWatchdog()
         _initClientIdentityFromFbx()
@@ -1614,7 +1757,6 @@ FocusScope {
         return next
     }
 
-
     /* ================== APPLICATION SETTINGS (PERSIST) ============= */
 
     // PROD Freebox : pas de polling permanent. UserStore persiste les profils
@@ -1622,10 +1764,10 @@ FocusScope {
     Component.onDestruction: {
         try {
             shell._setHttpWatchdogActive(false)
-            if (JellyfinBridge && JellyfinBridge.setHttpWatchdogWake)
-                JellyfinBridge.setHttpWatchdogWake(null)
-            if (JellyfinBridge && JellyfinBridge.cancelAllHttpRequests)
-                JellyfinBridge.cancelAllHttpRequests("shutdown")
+            if (HttpTransport && HttpTransport.setHttpWatchdogWake)
+                HttpTransport.setHttpWatchdogWake(null)
+            if (HttpTransport && HttpTransport.cancelAllHttpRequests)
+                HttpTransport.cancelAllHttpRequests("shutdown")
         } catch(e0) {}
     }
 
@@ -1657,20 +1799,20 @@ FocusScope {
     }
 
     function _navigateTo(nextPage) {
-        nextPage = _normalize(nextPage)
+        nextPage = NavContext.trim(nextPage)
         if (!nextPage) return
 
         // Ouvrir le sélecteur de profils n'est pas une déconnexion. On consolide
         // d'abord le profil courant si l'utilisateur a choisi "Rester connecté".
-        if (_baseOf(nextPage).toLowerCase() === "loginpage.qml")
+        if (NavContext.baseOf(nextPage).toLowerCase() === "loginpage.qml")
             _persistRememberedSessionBeforeProfilePicker()
 
         nextPage = _ensureSessionParams(nextPage)
-        nextPage = _stripSensitiveQueryForCtx(nextPage)
-        if (_isCtxRoute(nextPage)) _syncSessionFromSharedNavContext()
+        nextPage = NavContext.stripCredentials(nextPage)
+        if (NavContext.usesSharedContext(nextPage)) _syncSessionFromSharedNavContext()
 
-        var baseNext = _baseOf(nextPage)
-        var baseCurr = _baseOf(currentPage)
+        var baseNext = NavContext.baseOf(nextPage)
+        var baseCurr = NavContext.baseOf(currentPage)
         var baseNextL = baseNext.toLowerCase()
         var baseCurrL = baseCurr.toLowerCase()
         var enteringProfilePicker = baseNextL === "loginpage.qml"
@@ -1711,7 +1853,7 @@ FocusScope {
             && baseCurrL !== "loginpage.qml"
             && !sameBase
             && !enteringProfilePicker) {
-            navStack.push(_stripSensitiveQueryForCtx(currentPage))
+            navStack.push(NavContext.stripCredentials(currentPage))
             if (navStack.length > 50)
                 navStack.splice(0, navStack.length - 50)
         }
@@ -1728,10 +1870,10 @@ FocusScope {
     }
 
     function goBackOrHome() {
-        var currentBase = _baseOf(currentPage).toLowerCase()
+        var currentBase = NavContext.baseOf(currentPage).toLowerCase()
         if (navStack.length > 0) {
             var prev = navStack.pop()
-            var prevBase = _baseOf(prev).toLowerCase()
+            var prevBase = NavContext.baseOf(prev).toLowerCase()
             if (prevBase === "homepage.qml")
                 _requestFastHomeReturn(currentBase)
             if (prevBase === "moviepage.qml")
@@ -1746,9 +1888,9 @@ FocusScope {
 
             _requestFastHomeReturn(currentBase)
             _storeSessionContextForCtx()
-            var home = buildUrl("HomePage.qml", {
+            var home = NavContext.url("HomePage.qml", {
                 ctx:    "1",
-                ageMax: extractParam("ageMax", currentPage) || "99"
+                ageMax: NavContext.param("ageMax", currentPage) || "99"
             })
             try { Components.AppSettings.setContext(sessionServerUrl || "", sessionUserId || "") } catch(e0) {}
             currentPage = home
@@ -1756,11 +1898,11 @@ FocusScope {
     }
 
     function handleNavigation(pageName) {
-        pageName = _normalize(pageName)
+        pageName = NavContext.trim(pageName)
         if (!pageName) return
 
-        var baseCurr = _baseOf(currentPage).toLowerCase()
-        var baseNext = _baseOf(pageName).toLowerCase()
+        var baseCurr = NavContext.baseOf(currentPage).toLowerCase()
+        var baseNext = NavContext.baseOf(pageName).toLowerCase()
 
         // Snapshot du focus MoviePage avant de quitter
         try {
@@ -1853,17 +1995,17 @@ FocusScope {
             userName: shell.sessionUserName,
             userImageTag: shell.sessionUserImageTag,
 
-            folderId: extractParam("folderId", safeCurrentPage),
-            itemId: extractParam("itemId", safeCurrentPage),
-            boxSetId: extractParam("boxSetId", safeCurrentPage),
-            seasonId: extractParam("seasonId", safeCurrentPage),
-            seriesId: extractParam("seriesId", safeCurrentPage),
-            preselectEpisodeId: extractParam("preselectEpisodeId", safeCurrentPage),
+            folderId: NavContext.param("folderId", safeCurrentPage),
+            itemId: NavContext.param("itemId", safeCurrentPage),
+            boxSetId: NavContext.param("boxSetId", safeCurrentPage),
+            seasonId: NavContext.param("seasonId", safeCurrentPage),
+            seriesId: NavContext.param("seriesId", safeCurrentPage),
+            preselectEpisodeId: NavContext.param("preselectEpisodeId", safeCurrentPage),
 
             // MoviePage universel : le mode ne doit pas être perdu par ShellPage.
-            libraryMode: extractParam("libraryMode", safeCurrentPage),
-            browserTitle: extractParam("browserTitle", safeCurrentPage),
-            ageMax: extractParam("ageMax", safeCurrentPage)
+            libraryMode: NavContext.param("libraryMode", safeCurrentPage),
+            browserTitle: NavContext.param("browserTitle", safeCurrentPage),
+            ageMax: NavContext.param("ageMax", safeCurrentPage)
         }
     }
 
@@ -1873,7 +2015,7 @@ FocusScope {
         if (pageItem.hasOwnProperty("shared")) pageItem.shared = shell.shared
         if (pageItem.hasOwnProperty("fbx")) pageItem.fbx = shell.fbx
 
-        var loginCtx = shell._sharedNavContext()
+        var loginCtx = NavContext.peek(shared)
         var loginServerUrl = params.serverUrl
         if (_isBadParam(loginServerUrl) && loginCtx && !_isBadParam(loginCtx.serverUrl))
             loginServerUrl = String(loginCtx.serverUrl)
@@ -1889,7 +2031,7 @@ FocusScope {
         // shared arrive en premier afin que les routes ctx=1 puissent hydrater
         // leur contexte avant le fallback sur la session Shell.
         if (pageItem.hasOwnProperty("shared")) pageItem.shared = shell.shared
-        if (shell._isCtxRoute(safeCurrentPage)) shell._syncSessionFromSharedNavContext()
+        if (NavContext.usesSharedContext(safeCurrentPage)) shell._syncSessionFromSharedNavContext()
 
         for (var key in params) {
             if (!pageItem.hasOwnProperty(key)) continue
@@ -1901,19 +2043,19 @@ FocusScope {
             }
         }
 
-        var startIndexRaw = extractParam("startIndex", shell.currentPage)
+        var startIndexRaw = NavContext.param("startIndex", shell.currentPage)
         if (startIndexRaw !== "" && pageItem.hasOwnProperty("startIndex")) {
             var startIndex = parseInt(startIndexRaw)
             if (!isNaN(startIndex)) pageItem.startIndex = startIndex
         }
 
-        var restoreIndexRaw = extractParam("restoreIndex", shell.currentPage)
+        var restoreIndexRaw = NavContext.param("restoreIndex", shell.currentPage)
         if (restoreIndexRaw !== "" && pageItem.hasOwnProperty("restoreIndex")) {
             var restoreIndex = parseInt(restoreIndexRaw)
             if (!isNaN(restoreIndex)) pageItem.restoreIndex = restoreIndex
         }
 
-        var restoreYRaw = extractParam("restoreY", shell.currentPage)
+        var restoreYRaw = NavContext.param("restoreY", shell.currentPage)
         if (restoreYRaw !== "" && pageItem.hasOwnProperty("restoreY")) {
             var restoreY = Number(restoreYRaw)
             if (isFinite(restoreY) && !isNaN(restoreY)) pageItem.restoreY = restoreY
@@ -1964,20 +2106,12 @@ FocusScope {
         shell._snapshotSeasonHintsFromPage()
 
         // Une playlist émise par DetailSeriePage représente toute la série et
-        // doit repartir du premier élément. On retire donc d'abord les filtres
-        // et le curseur éventuellement laissés par SeasonPage.
-        try { if (playlist.allowedIds !== undefined) playlist.allowedIds = null } catch(ePl0) {}
-        try {
-            if (playlist.clear) playlist.clear()
-            else { playlist.list = []; playlist.index = -1; playlist.currentItemId = "" }
-        } catch(ePl1) {
-            try { playlist.index = -1; playlist.currentItemId = "" } catch(ePl2) {}
-        }
-
-        playlist.list = (itemIds || [])
-                .map(function(id) { return String(id || "") })
-                .filter(function(id) { return id.length > 0 })
-        shell.playerPlaylist = playlist.list.slice(0)
+        // doit repartir du premier élément. L'API Playlist purge explicitement
+        // le périmètre et le curseur laissés par SeasonPage avant la nouvelle liste.
+        playlist.resetAll()
+        playlist.setList(itemIds || [])
+        playlist.setTitle(listTitle || "")
+        shell.playerPlaylist = playlist.copyList()
         shell.playerPlaylistTitle = listTitle || ""
         shell.playerPlaylistStartAtZero = true
 
@@ -1993,7 +2127,7 @@ FocusScope {
         if (pageItem.requestPlay && pageItem.requestPlay.connect) {
             pageItem.requestPlay.connect(function(itemId, accessToken, userId, serverUrl, itemTitle) {
                 shell._snapshotSeasonHintsFromPage()
-                playlist.list = []
+                playlist.resetAll()
                 shell.playerPlaylist = []
                 shell.playerPlaylistTitle = ""
                 shell.playerPlaylistStartAtZero = false
@@ -2018,7 +2152,7 @@ FocusScope {
             pageItem.discoveredServersUpdated.connect(function(list) {
                 shell.shared.discoveredServers = (list && list.slice) ? list.slice(0) : (list || [])
                 if (pageLoader.item
-                        && _baseOf(shell.currentPage).toLowerCase() === "loginpage.qml") {
+                        && NavContext.baseOf(shell.currentPage).toLowerCase() === "loginpage.qml") {
                     var loginPage = pageLoader.item
                     if (loginPage.hasOwnProperty("setDiscoveredServers"))
                         loginPage.setDiscoveredServers(shell.shared.discoveredServers)
@@ -2031,8 +2165,8 @@ FocusScope {
 
     function _persistLoadedPageContext(baseNow) {
         if (baseNow === "loginpage.qml") {
-            var loginCtx = shell._sharedNavContext()
-            var server = extractParam("serverUrl", shell.currentPage)
+            var loginCtx = NavContext.peek(shared)
+            var server = NavContext.param("serverUrl", shell.currentPage)
                     || shell.sessionServerUrl || (loginCtx && loginCtx.serverUrl) || ""
             if (server && server.length && shell.saveSettingsRequested)
                 shell.saveSettingsRequested({ serverUrl:server })
@@ -2066,7 +2200,7 @@ FocusScope {
 
         shell._wireLoadedPageNavigation(pageItem)
 
-        var baseNow = _baseOf(shell.currentPage).toLowerCase()
+        var baseNow = NavContext.baseOf(shell.currentPage).toLowerCase()
         var isLogin = baseNow === "loginpage.qml"
         var fastHomeReturn = baseNow === "homepage.qml" ? shell._takeFastHomeReturn() : false
 
@@ -2074,8 +2208,8 @@ FocusScope {
                 && pageItem.hasOwnProperty("enableAvatarProfileNavigation"))
             pageItem.enableAvatarProfileNavigation = true
 
-        var safeCurrentPage = shell._stripSensitiveQueryForCtx(shell.currentPage)
-        if (shell._isCtxRoute(safeCurrentPage)) shell._syncSessionFromSharedNavContext()
+        var safeCurrentPage = NavContext.stripCredentials(shell.currentPage)
+        if (NavContext.usesSharedContext(safeCurrentPage)) shell._syncSessionFromSharedNavContext()
         var params = shell._loadedPageParams(safeCurrentPage)
 
         if (isLogin) shell._injectLoginPageContext(pageItem, params)
@@ -2099,8 +2233,9 @@ FocusScope {
     Loader {
         id: pageLoader
         anchors.fill: parent
-        source: !playerActive ? _stripSensitiveQueryForCtx(currentPage) : ""
-        visible: !playerActive
+        source: (!playerActive && !shell._directPlayReloadPending)
+                ? NavContext.stripCredentials(currentPage) : ""
+        visible: !playerActive && !shell._directPlayReloadPending
         asynchronous: true
         onStatusChanged: {
             if (status === Loader.Loading) {
@@ -2132,6 +2267,7 @@ FocusScope {
         // Il n'apparaît qu'à partir de l'intention réelle d'entrer dans HomePage,
         // puis reste disponible pour les transitions de la session connectée.
         visible: !shell.playerActive &&
+                 !shell._directPlayReloadPending &&
                  shell._circleDotsRuntimeEnabled &&
                  (shell._homeLaunchPending ||
                   pageLoader.status === Loader.Loading ||
@@ -2248,7 +2384,16 @@ FocusScope {
             }
         }
 
-        // Aucun fond : le PlayerOverlay reste visible pendant le chargement.
+        // Pendant un reload DirectPlay le PlayerOverlay est détruit quelques
+        // millisecondes pour libérer le pipeline intelce. Un fond noir local évite
+        // d'exposer la page sous-jacente sans réutiliser le rideau global ReDeFin.
+        Rectangle {
+            anchors.fill: parent
+            color: "#000000"
+            visible: shell._directPlayReloadPending && !shell.playerActive
+        }
+
+        // Loader vidéo du Player : aucun logo ReDeFin dans cette transition.
         Components.CircleDotsLoader {
             id: playerLaunchCircle
             anchors.centerIn: parent
@@ -2323,7 +2468,7 @@ FocusScope {
             // de détruire le Player. pageLoader est recréé de façon asynchrone
             // après playerActive=false ; sans ce verrou, une frame de la fiche
             // peut devenir visible entre deux états de chargement.
-            var returnBase = shell._baseOf(shell.currentPage).toLowerCase()
+            var returnBase = NavContext.baseOf(shell.currentPage).toLowerCase()
             if (shell._circleDotsRuntimeEnabled && returnBase === "detailseriepage.qml")
                 shell._beginPageCurtainTransition()
 
@@ -2372,6 +2517,11 @@ FocusScope {
                 item.requestDirectPlayReload.connect(_handleDirectPlayReload)
             }
 
+            // Les indexes Audio/ST transportés par un Play Jellyfin sont
+            // appliqués uniquement après préparation complète du lecteur.
+            if (shell._remotePendingTrackItemId.length)
+                remoteTrackApplyTimer.restart()
+
             try { item.forceActiveFocus() } catch(e2) {}
 
             try {
@@ -2406,7 +2556,7 @@ FocusScope {
         playerPlaylist = []
         playerPlaylistTitle = ""
         playerPlaylistStartAtZero = false
-        try { playlist.list = [] } catch(e2) {}
+        playlist.resetAll()
 
         _resetSessionContext()
         try { if (shared) shared.__redefinNavContext = null } catch(e3) {}

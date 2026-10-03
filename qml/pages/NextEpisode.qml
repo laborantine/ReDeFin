@@ -199,7 +199,6 @@ FocusScope {
 
     /* ===== UI ===== */
     Item {
-        id: dock
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         anchors.rightMargin: root.safeMarginRight
@@ -225,7 +224,6 @@ FocusScope {
                 spacing: 8
 
                 Text {
-                    id: txtCountdown
                     text: "Prochain épisode dans " + root.secondsLeft + " s"
                     textFormat: Text.PlainText
                     color: "#f1f4ff"
@@ -235,7 +233,6 @@ FocusScope {
                 }
 
                 Text {
-                    id: txtTitle
                     text: root.nextTitle   // déjà clampé à 30 chars
                     textFormat: Text.PlainText
                     color: "#ffffff"
@@ -264,7 +261,6 @@ FocusScope {
                 }
 
                 Row {
-                    id: rowButtons
                     spacing: 10
 
                     // Regarder maintenant

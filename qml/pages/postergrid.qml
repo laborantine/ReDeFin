@@ -1,6 +1,7 @@
 import QtQuick 2.15
 import "../js/jellyfinBridge.js" as Jellyfin
 import "../js/MediaCatalog.js" as MediaCatalog
+import "../js/MediaRailLayout.js" as MediaRailLayout
 import "../js/SafeLog.js" as SafeLog
 Item {
     id: postergrid
@@ -121,7 +122,7 @@ Item {
                     _saveHomeCacheSoon()
                 }
             } else if (name === "resumeItems") {
-                arr = _prepareRowMetrics(arr, "resume")
+                arr = MediaRailLayout.prepareHomeRowMetrics(arr, "resume", homeCardLayout)
                 if (!MediaCatalog.homeItemsEqual(resumeItems, arr)) {
                     if (!resumeItems || resumeItems.length === 0) _restartHomeImageSettle()
                     resumeItems = arr
@@ -137,7 +138,8 @@ Item {
         } catch(e) {}
     }
     function _setLatestByFolderIfChanged(arr) {
-        arr = _prepareLatestGroupsForCards(MediaCatalog.safeArray(arr))
+        var incomingCount = arr && arr.length ? arr.length : 0
+        arr = MediaRailLayout.prepareHomeLatestGroups(MediaCatalog.safeArray(arr), homeCardLayout)
         if (!MediaCatalog.homeLatestGroupsEqual(latestByFolder || [], arr)) {
             if (!latestByFolder || latestByFolder.length === 0) _restartHomeImageSettle()
             latestByFolder = arr
@@ -835,18 +837,9 @@ Item {
             }
         }
     }
-    readonly property int homeCacheSchemaVersion: 16; readonly property int homeCacheMaxEntries: 2
+    readonly property int homeCacheSchemaVersion: 17; readonly property int homeCacheMaxEntries: 2
     property string _lastHomeCacheRestoreKey: ""
     property double _lastHomeCacheRestoreCacheTs: 0
-    property double _lastHomeCacheRestoreAtMs: 0
-    readonly property int homeCacheRestoreDedupMs: 900
-    function _touchHomeCache(store, key, now) {
-        return MediaCatalog.touchHomeCache(store, key, homeCacheSchemaVersion, homeCacheFreshMs, now)
-    }
-    function _trimHomeCacheStore(store, keepKey) {
-        MediaCatalog.trimHomeCacheStore(store, keepKey, homeCacheSchemaVersion,
-                                       homeCacheFreshMs, homeCacheMaxEntries, Date.now())
-    }
     function _homeCacheKey(){ return "home|" + SafeLog.shortHash(serverUrl) + "|" + SafeLog.shortHash(userId) + "|" + SafeLog.shortHash("") }
     function _homeCacheStore() { return _sharedStore("__redefinPosterGridHomeCache") }
     function _saveHomeCacheSoon() {
@@ -888,34 +881,64 @@ Item {
                 resumeItems: postergrid.resumeItems || [],
                 nextUpItems: postergrid.nextUpItems || [],
                 latestByFolder: postergrid.latestByFolder || [],
+                // Un snapshot pris pendant la file Latest ou après un échec
+                // ne doit pas empêcher de recharger les dossiers au retour.
+                latestAllComplete: postergrid._latestAllComplete && !postergrid._latestHadFailures,
                 latestIndicesByGroup: cacheLatestIndices,
                 currentFolderIndex: cacheFolderIndex,
                 currentResumeIndex: cacheResumeIndex,
                 currentNextUpIndex: cacheNextUpIndex,
                 currentLatestGroup: cacheLatestGroup
             })
-            postergrid._trimHomeCacheStore(st, cacheKey)
+            MediaCatalog.trimHomeCacheStore(st, cacheKey, postergrid.homeCacheSchemaVersion,
+                                               postergrid.homeCacheFreshMs, postergrid.homeCacheMaxEntries, Date.now())
         } catch(e) {}
     }
     function _restoreHomeCacheIfFresh() {
         try {
+            // Une restauration demandée pendant un refresh du même profil ne
+            // doit pas remplacer les résultats qui arrivent encore du réseau.
+            if (fetchedOnce && _latestLibs.length > 0 && !_latestAllComplete
+                    && _activeFetchKey === _fetchKey()) return false
             var st = _homeCacheStore()
             if (!st) {
                 return false
             }
             var now = Date.now()
-            var cacheKey = _homeCacheKey(); var c = _touchHomeCache(st, cacheKey, now)
+            var cacheKey = _homeCacheKey(); var c = MediaCatalog.touchHomeCache(st, cacheKey, homeCacheSchemaVersion, homeCacheFreshMs, now)
             if (!c) {
-                _trimHomeCacheStore(st, "")
+                MediaCatalog.trimHomeCacheStore(st, "", homeCacheSchemaVersion, homeCacheFreshMs, homeCacheMaxEntries, now)
+                return false
+            }
+            if (c.latestAllComplete !== true) {
                 return false
             }
             var cacheTs = Number(c.ts || 0)
-            if (_lastHomeCacheRestoreKey === cacheKey && _lastHomeCacheRestoreCacheTs === cacheTs && _lastHomeCacheRestoreAtMs > 0 && (now - _lastHomeCacheRestoreAtMs) >= 0 && (now - _lastHomeCacheRestoreAtMs) <= homeCacheRestoreDedupMs && fetchedOnce === true && libraryFetchCompleted === true && resumeFetchCompleted === true && nextUpFetchCompleted === true && latestFetchCompleted === true) {
+            if (_lastHomeCacheRestoreKey === cacheKey && _lastHomeCacheRestoreCacheTs === cacheTs
+                    && fetchedOnce === true && libraryFetchCompleted === true
+                    && resumeFetchCompleted === true && nextUpFetchCompleted === true
+                    && latestFetchCompleted === true) {
                 return true
             }
-            _trimHomeCacheStore(st, cacheKey)
-            var cachedLibrary = MediaCatalog.safeArray(c.libraryItems); var cachedResume  = _prepareRowMetrics(MediaCatalog.safeArray(c.resumeItems), "resume"); var cachedNextUp  = MediaCatalog.safeArray(c.nextUpItems)
-            var cachedLatest  = _prepareLatestGroupsForCards(MediaCatalog.safeArray(c.latestByFolder))
+            MediaCatalog.trimHomeCacheStore(st, cacheKey, homeCacheSchemaVersion, homeCacheFreshMs, homeCacheMaxEntries, now)
+            // Annule les callbacks de l'ancienne session avant d'installer le
+            // snapshot du nouveau profil. Un ancien dossier ne peut ainsi
+            // pas revenir dans le modèle restauré.
+            _fetchSeq++
+            _nextUpSeq++
+            _cancelLatestReloads("home_cache_restored")
+            _cancelLatestInitialRequests("home_cache_restored")
+            latestPumpTimer.stop()
+            latestInitialReadyTimer.stop()
+            _latestLibs = []
+            _latestTemp = []
+            _latestPos = 0
+            _latestInFlight = 0
+            _latestAllComplete = true
+            _latestInitialComplete = true
+            _latestHadFailures = false
+            var cachedLibrary = MediaCatalog.safeArray(c.libraryItems); var cachedResume  = MediaRailLayout.prepareHomeRowMetrics(MediaCatalog.safeArray(c.resumeItems), "resume", homeCardLayout); var cachedNextUp  = MediaCatalog.safeArray(c.nextUpItems)
+            var cachedLatest  = MediaRailLayout.prepareHomeLatestGroups(MediaCatalog.safeArray(c.latestByFolder), homeCardLayout)
             if (!MediaCatalog.homeItemsEqual(libraryItems || [], cachedLibrary)) libraryItems = cachedLibrary
             if (!MediaCatalog.homeItemsEqual(resumeItems  || [], cachedResume))  resumeItems  = cachedResume
             if (!MediaCatalog.homeItemsEqual(nextUpItems  || [], cachedNextUp))  nextUpItems  = cachedNextUp
@@ -941,7 +964,6 @@ Item {
             scheduleFocusRestore()
             _lastHomeCacheRestoreKey = cacheKey
             _lastHomeCacheRestoreCacheTs = cacheTs
-            _lastHomeCacheRestoreAtMs = Date.now()
             return true
         } catch(e) {
             return false
@@ -1011,10 +1033,19 @@ Item {
     // Scroll manuel conservé pour « Continuer de regarder » et les rails « Récemment ajouté ». « Mes médias » et « À suivre » utilisent, eux, le comportement ListView natif historique de l'ancien « À suivre ».
     readonly property int railScrollDurationMs: 180
     readonly property int railRevealMarginPx: 10
-    function topPadFor(h){ return Math.ceil(h * (zoomScale - 1)) + frameWidth + 2 + focusLiftPx; }
-    readonly property int topPadLandscape: topPadFor(tileH); readonly property int libraryTopPad: topPadFor(libraryTileH); readonly property int topPadPortrait: topPadFor(portH); readonly property int cardHLandscape: tileH + titleH + topPadLandscape
-    readonly property int libraryCardH: libraryTileH + titleH + libraryTopPad; readonly property int cardHPortrait: portH + titleH + topPadPortrait
-    readonly property int hydrationStep: 6; readonly property int hydrationMax:  30; property int  hydrationRadius: 6; property bool hydrationDone: false
+    function topPadFor(h) {
+        return MediaRailLayout.focusTopPad(h, zoomScale, focusLiftPx, frameWidth)
+    }
+    readonly property int topPadLandscape: topPadFor(tileH)
+    readonly property int libraryTopPad: topPadFor(libraryTileH)
+    readonly property int topPadPortrait: topPadFor(portH)
+    readonly property int cardHLandscape: tileH + titleH + topPadLandscape
+    readonly property int libraryCardH: libraryTileH + titleH + libraryTopPad
+    readonly property int cardHPortrait: portH + titleH + topPadPortrait
+    readonly property int hydrationStep: 6
+    readonly property int hydrationMax: 30
+    property int hydrationRadius: 6
+    property bool hydrationDone: false
     readonly property bool hydrationAllowed: !!(pageActive && !isScrollingEff && focusSection === 3 && latestByFolder && latestByFolder.length > 0)
     Timer {
         id: hydrationTimer; interval: 120; repeat: false; running: false
@@ -1058,85 +1089,29 @@ Item {
         spacing: spacingW
     })
     function _mediaCardUsesLandscape(it, sectionKind) {
-        return MediaCatalog.homeCardUsesLandscape(it, sectionKind)
+        return MediaRailLayout.homeCardUsesLandscape(it, sectionKind)
     }
     function mediaCardTileWidthFor(it, sectionKind) {
-        return MediaCatalog.homeCardTileWidthFor(it, sectionKind, portW, resumeLandscapeW)
+        return MediaRailLayout.homeCardTileWidthFor(it, sectionKind, portW, resumeLandscapeW)
     }
     function mediaCardTileHeightFor(it, sectionKind){ return portH; }
     function mediaCardTopPadFor(it, sectionKind){ return topPadPortrait; }
     function mediaCardSidePadFor(it, sectionKind) {
-        return MediaCatalog.homeCardSidePadFor(it, sectionKind, portraitSidePad, focusPadSide)
+        return MediaRailLayout.homeCardSidePadFor(it, sectionKind, portraitSidePad, focusPadSide)
     }
     function mediaCardDelegateWidthFor(it, sectionKind) {
         return mediaCardTileWidthFor(it, sectionKind)
                 + mediaCardSidePadFor(it, sectionKind) * 2
     }
     function mediaCardPreferBackdropFor(it, sectionKind) {
-        return MediaCatalog.homeCardPrefersBackdrop(it, sectionKind)
+        return MediaRailLayout.homeCardPrefersBackdrop(it, sectionKind)
     }
     function mediaCardFallbackKindFor(it, sectionKind) {
-        return MediaCatalog.homeCardFallbackKind(it, sectionKind)
+        return MediaRailLayout.homeCardFallbackKind(it, sectionKind)
     }
-    function _prepareRowMetrics(items, sectionKind) {
-        return MediaCatalog.prepareHomeRowMetrics(items, sectionKind, homeCardLayout)
-    }
-    function _rowItemWidthAt(arr, idx, sectionKind) {
-        return MediaCatalog.homeRowItemWidthAt(arr, idx, sectionKind, homeCardLayout)
-    }
-    function _rowItemBleedAt(arr, idx, sectionKind) {
-        return MediaCatalog.homeRowItemBleedAt(arr, idx, sectionKind, homeCardLayout)
-    }
-    function _rowItemLeftAt(arr, idx, sectionKind, spacing) {
-        return MediaCatalog.homeRowItemLeftAt(arr, idx, sectionKind, spacing, homeCardLayout)
-    }
-    function _rowLogicalWidth(arr, sectionKind, spacing, edgePad, viewportWidth) {
-        return MediaCatalog.homeRowLogicalWidth(arr, sectionKind, spacing, edgePad,
-                                                 viewportWidth, homeCardLayout)
-    }
-    function _rowRealDelegateGeometry(list, idx) {
-        if (!list || idx < 0) return null
-        var delegateItem = null
-        try {
-            if (list.itemAtIndex) delegateItem = list.itemAtIndex(idx)
-        } catch(e0) {}
-        if (!delegateItem) return null
-        try {
-            var p = delegateItem.mapToItem(list, 0, 0); var vx = Number(p ? p.x : NaN); var vy = Number(p ? p.y : NaN); var w = Number(delegateItem.width); var h = Number(delegateItem.height); var cx = Number(list.contentX || 0)
-            var contentLeft = Number(delegateItem.x)
-            if (!isFinite(vx) || isNaN(vx) || !isFinite(w) || isNaN(w) || w <= 0) return null
-            return ({
-                item: delegateItem, viewportX: vx, viewportY: (isFinite(vy) && !isNaN(vy)) ? vy : 0, width: w, height: (isFinite(h) && !isNaN(h)) ? h : 0, contentX: cx, contentLeft: (isFinite(contentLeft) && !isNaN(contentLeft)) ? contentLeft : (cx + vx)
-            })
-        } catch(e1) {
-            return null
-        }
-    }
-    function _resumeSnapshotViewportGeometry(){ if (!resumeList || resumeList.count <= 0) return null; var idx = MediaCatalog.clampIndex(currentResumeIndex, resumeList.count); return _rowRealDelegateGeometry(resumeList, idx); }
+    function _resumeSnapshotViewportGeometry(){ if (!resumeList || resumeList.count <= 0) return null; var idx = MediaCatalog.clampIndex(currentResumeIndex, resumeList.count); return MediaRailLayout.homeRowRealDelegateGeometry(resumeList, idx); }
 
     // MOTEUR MANUEL DE GLISSEMENT HORIZONTAL Utilisé uniquement par « Continuer de regarder » et « Récemment ajouté ». « Mes médias » et « À suivre » conservent le glide natif historique ListView (SnapOneItem + ApplyRange + highlightMoveDuration 120).
-    function _railNativeMinX(list) {
-        if (!list) return 0
-        var ox = Number(list.originX)
-        if (isFinite(ox) && !isNaN(ox)) return ox
-        var cx = Number(list.contentX)
-        return (isFinite(cx) && !isNaN(cx)) ? cx : 0
-    }
-    function _railNativeMaxX(list) {
-        if (!list) return 0
-        var minX = _railNativeMinX(list)
-        var cw = Number(list.contentWidth)
-        var vw = Number(list.width)
-        if (!isFinite(cw) || isNaN(cw) || cw < 0) cw = 0
-        if (!isFinite(vw) || isNaN(vw) || vw < 0) vw = 0
-        return Math.max(minX, minX + Math.max(0, cw - vw))
-    }
-    function _railNativeClampX(list, value) {
-        if (!list) return 0
-        var x = Number(value)
-        if (!isFinite(x) || isNaN(x)) x = _railNativeMinX(list)
-        return Math.max(_railNativeMinX(list), Math.min(_railNativeMaxX(list), x))
-    }
     function _animateRailX(list, animation, target) {
         if (!list || !animation) return
         target = Number(target)
@@ -1166,13 +1141,13 @@ Item {
         if (isFinite(target) && !isNaN(target)) list.contentX = target
     }
     // Alias conservés pour la restauration spécifique de Continuer de regarder.
-    function _resumeNativeClampX(list, value) { return _railNativeClampX(list, value) }
+    function _resumeNativeClampX(list, value) { return MediaRailLayout.nativeListClampX(list, value) }
     function _resumeRealTargetX(list, idx) {
         if (!list || idx < 0) return NaN
-        var real = _rowRealDelegateGeometry(list, idx)
+        var real = MediaRailLayout.homeRowRealDelegateGeometry(list, idx)
         if (!real) return NaN
         var arr = cappedResumeItems || []
-        var bleed = _rowItemBleedAt(arr, idx, "resume")
+        var bleed = MediaRailLayout.homeRowItemBleedAt(arr, idx, "resume", homeCardLayout)
         var pad = railRevealMarginPx
         var visualLeft = real.viewportX - bleed
         var visualRight = real.viewportX + real.width + bleed
@@ -1187,10 +1162,10 @@ Item {
         if (toIdx >= arr.length || fromIdx >= arr.length) return NaN
         var spacing = Number(list.spacing || 0)
         if (!isFinite(spacing) || isNaN(spacing)) spacing = 0
-        var currentReal = _rowRealDelegateGeometry(list, fromIdx)
-        var targetWidth = _rowItemWidthAt(arr, toIdx, "resume")
-        var currentWidth = _rowItemWidthAt(arr, fromIdx, "resume")
-        var targetBleed = _rowItemBleedAt(arr, toIdx, "resume")
+        var currentReal = MediaRailLayout.homeRowRealDelegateGeometry(list, fromIdx)
+        var targetWidth = MediaRailLayout.homeRowItemWidthAt(arr, toIdx, "resume", homeCardLayout)
+        var currentWidth = MediaRailLayout.homeRowItemWidthAt(arr, fromIdx, "resume", homeCardLayout)
+        var targetBleed = MediaRailLayout.homeRowItemBleedAt(arr, toIdx, "resume", homeCardLayout)
         var pad = railRevealMarginPx
         if (currentReal) {
             var predictedViewportX
@@ -1206,26 +1181,14 @@ Item {
         var step = direction < 0 ? -(targetWidth + spacing) : (currentWidth + spacing)
         return _resumeNativeClampX(list, Number(list.contentX || 0) + step)
     }
-    function _rowMinX(list){
-        return list ? MediaCatalog.homeRowMinX(list.originX, list.edgePad) : 0
-    }
-    function _rowMaxX(list){
-        if (!list) return 0
-        var minX = _rowMinX(list)
-        return MediaCatalog.rowMaxX(minX, list.logicalContentWidth, list.width)
-    }
-    function _rowClampX(list, x) {
-        if (!list) return 0
-        return MediaCatalog.rowClampX(x, _rowMinX(list), _rowMaxX(list))
-    }
     function _rowTargetX(list, arr, idx, sectionKind) {
         if (!list) return 0
-        if (!arr || idx < 0 || idx >= arr.length) return _rowMinX(list)
+        if (!arr || idx < 0 || idx >= arr.length) return MediaRailLayout.homeListMinX(list)
 
-        var bleed = _rowItemBleedAt(arr, idx, sectionKind)
+        var bleed = MediaRailLayout.homeRowItemBleedAt(arr, idx, sectionKind, homeCardLayout)
         var pad = railRevealMarginPx
         if (sectionKind === "resume") {
-            var real = _rowRealDelegateGeometry(list, idx)
+            var real = MediaRailLayout.homeRowRealDelegateGeometry(list, idx)
             if (real) {
                 var realVisualLeft = real.viewportX - bleed
                 var realVisualRight = real.viewportX + real.width + bleed
@@ -1233,13 +1196,13 @@ Item {
                 if (realVisualLeft < pad) delta = realVisualLeft - pad
                 else if (realVisualRight > list.width - pad)
                     delta = realVisualRight - (list.width - pad)
-                return _rowClampX(list, Number(list.contentX || 0) + delta)
+                return MediaRailLayout.homeListClampX(list, Number(list.contentX || 0) + delta)
             }
         }
 
-        return MediaCatalog.homeRowTargetX(arr, idx, sectionKind, list.spacing,
+        return MediaRailLayout.homeRowTargetX(arr, idx, sectionKind, list.spacing,
                                              list.contentX, list.width, pad,
-                                             _rowMinX(list), _rowMaxX(list),
+                                             MediaRailLayout.homeListMinX(list), MediaRailLayout.homeListMaxX(list),
                                              homeCardLayout)
     }
     function _ensureRowIndexVisible(list, items, idx, sectionKind, animation, animateMove, seq) {
@@ -1251,9 +1214,6 @@ Item {
         }
         if (animateMove === true) Qt.callLater(apply)
         else apply()
-    }
-    function _prepareLatestGroupsForCards(groups) {
-        return MediaCatalog.prepareHomeLatestGroups(groups, homeCardLayout)
     }
     function latestIndexFor(group) { var v = (latestIndicesByGroup && latestIndicesByGroup.length > group) ? latestIndicesByGroup[group] : 0; return (typeof v === "number" && v >= 0) ? v : 0 }
     function _forceLatestIndexForGroup(group, idx) {
@@ -1285,13 +1245,9 @@ Item {
         var idx = MediaCatalog.clampIndex(latestIndexFor(group), Math.min(items.length, sectionMaxItems))
         return (idx >= 0 && idx < items.length) ? items[idx] : null
     }
-    function navIdsForEpisodeLike(it) {
-        return MediaCatalog.navigationIdsForEpisodeLike(it)
-    }
-
     function openEpisodeLike(it) {
         if (!it) return
-        var ids = navIdsForEpisodeLike(it)
+        var ids = MediaCatalog.navigationIdsForEpisodeLike(it)
         if (ids.seasonId && ids.seriesId) { requestSeasonPage(ids.seriesId, ids.seasonId, ids.episodeId); return }
         var seriesId = ids.seriesId || (it.SeriesId || "")
         if (!seriesId) { requestSeasonPage("", "", ids.episodeId); return }
@@ -1405,13 +1361,17 @@ Item {
         else playItem(it)
     }
     readonly property int latestFullLimit: 50; readonly property int latestMaxInflight: 2; readonly property int latestStartDelayMs: 110; readonly property int latestProximityLibraryStep: 3
-    readonly property int latestInitialRequestTimeoutMs: 6500
+    // Le transport Jellyfin a déjà un délai de 15 s. Ne pas supprimer une
+    // réponse encore valide à 6,5 s sur un serveur lent.
+    readonly property int latestInitialRequestTimeoutMs: 16500
+    readonly property int latestInitialReadyMs: 1800
     property var _latestLibs: []; property int _latestPos: 0; property int _latestInFlight: 0; property int _latestQueueSeq: 0; property var _latestReloadHandles: ({})
     property var _latestInitialPending: ({})
 
-    property int _latestStageTarget: 0; property bool _latestInitialComplete: false; property bool _latestAllComplete: false; property bool latestFetchCompleted: false
+    property int _latestStageTarget: 0; property bool _latestInitialComplete: false; property bool _latestAllComplete: false; property bool _latestHadFailures: false; property bool latestFetchCompleted: false
     function _latestQueueDone(){ return _latestLibs && _latestPos >= _latestLibs.length && _latestInFlight <= 0; }
     Timer { id: latestPumpTimer; interval: postergrid.latestStartDelayMs; repeat: false; onTriggered: postergrid._pumpLatestInitial() }
+    Timer { id: latestInitialReadyTimer; interval: postergrid.latestInitialReadyMs; repeat: false; onTriggered: postergrid.latestFetchCompleted = true }
     Timer { id: latestInitialWatchdog; interval: 500; repeat: true; running: postergrid._alive && postergrid._latestInFlight > 0; onTriggered: postergrid._sweepLatestInitialRequests() }
     function _registerLatestInitialRequest(idx, handle) {
         var key = String(idx)
@@ -1428,7 +1388,7 @@ Item {
         }
         return rec
     }
-    function _cancelLatestInitialRequests(reason, finishAsFailure) {
+    function _cancelLatestInitialRequests(reason) {
         var pending = _latestInitialPending || ({})
         var keys = []
         for (var key in pending)
@@ -1437,17 +1397,13 @@ Item {
             var rec = pending[keys[i]]
             if (!rec) continue
             var handle = rec.handle
-            if (finishAsFailure === true) _finishLatestRequest(rec.idx, null, reason || "cancel")
-            else {
-                try { delete pending[keys[i]] } catch(e0) {}
-                _latestInFlight = Math.max(0, _latestInFlight - 1)
-            }
+            delete pending[keys[i]]
+            _latestInFlight = Math.max(0, _latestInFlight - 1)
             try {
                 if (handle && typeof handle.cancel === "function") handle.cancel(reason || "cancelled")
             } catch(e1) {}
         }
-        if (finishAsFailure !== true)
-            _latestInitialPending = ({})
+        _latestInitialPending = ({})
     }
     function _sweepLatestInitialRequests() {
         if (!_alive || _latestInFlight <= 0) return
@@ -1471,7 +1427,8 @@ Item {
 
     function _startLatestInitialQueue(libs, fetchSeq) {
         _cancelLatestReloads("latest_queue_restarted")
-        _cancelLatestInitialRequests("latest_queue_restarted", false)
+        _cancelLatestInitialRequests("latest_queue_restarted")
+        latestInitialReadyTimer.stop()
         postergrid._latestInitialPending = ({})
         postergrid._latestQueueSeq = (fetchSeq !== undefined && fetchSeq !== null) ? fetchSeq : postergrid._fetchSeq
         postergrid._latestLibs = MediaCatalog.safeArray(libs)
@@ -1491,36 +1448,65 @@ Item {
         postergrid._latestStageTarget = postergrid._latestLibs.length
         postergrid._latestInitialComplete = false
         postergrid._latestAllComplete = false
-        postergrid.latestFetchCompleted = false
+        postergrid._latestHadFailures = false
+        // Des données déjà visibles (cache ou refresh) n'ont pas à attendre
+        // la fin de toutes les bibliothèques pour rouvrir Home.
+        postergrid.latestFetchCompleted = !!(postergrid.latestByFolder && postergrid.latestByFolder.length > 0)
         if (!postergrid.fetchedOnce || !postergrid.latestByFolder || postergrid.latestByFolder.length === 0) postergrid._setLatestByFolderIfChanged([])
-        if (!_focusRestorePending && !_restoringFocus) {
+        if ((!postergrid.latestByFolder || postergrid.latestByFolder.length === 0)
+                && !_focusRestorePending && !_restoringFocus) {
             postergrid.latestIndicesByGroup = []
             postergrid.currentLatestGroup = 0
         }
         if (postergrid._latestLibs.length === 0) {
+            postergrid._setLatestByFolderIfChanged([])
             postergrid._latestInitialComplete = true
-                postergrid.latestFetchCompleted = true
+            postergrid.latestFetchCompleted = true
             postergrid._rebuildLatestByFolderFromTemp()
             return
         }
+        if (!postergrid.latestFetchCompleted) latestInitialReadyTimer.restart()
         latestPumpTimer.restart()
     }
     function _publishLatestFromTemp() {
+        var previous = postergrid.latestByFolder || []
+        var previousIndices = postergrid.latestIndicesByGroup || []
+        var previousFocus = previous[postergrid.currentLatestGroup]
+        var selectedId = previousFocus ? String(previousFocus.id || "") : ""
+        var positions = ({})
+        for (var p = 0; p < previous.length; ++p) {
+            if (previous[p] && previous[p].id)
+                positions["#" + String(previous[p].id)] = p
+        }
         var out = []
         for (var i=0; i<postergrid._latestTemp.length; i++) {
             var e = postergrid._latestTemp[i]
             if (e && ((e.items && e.items.length > 0) || (e._evicted && e._hadItems))) out.push(e)
         }
         postergrid._setLatestByFolderIfChanged(out)
-        var inds = (postergrid.latestIndicesByGroup && postergrid.latestIndicesByGroup.slice) ? postergrid.latestIndicesByGroup.slice(0) : []
-        while (inds.length < out.length) inds.push(0)
-        if (!postergrid.latestIndicesByGroup || inds.length !== postergrid.latestIndicesByGroup.length) postergrid.latestIndicesByGroup = inds
-        if (!_focusRestorePending && !_restoringFocus) postergrid.currentLatestGroup = MediaCatalog.clampIndex(postergrid.currentLatestGroup, out.length)
+        var inds = [], indicesChanged = out.length !== previousIndices.length
+        var focusedIndex = -1
+        for (var j = 0; j < out.length; ++j) {
+            var id = String(out[j].id || "")
+            var previousPosition = positions["#" + id]
+            inds[j] = previousPosition !== undefined ? (previousIndices[previousPosition] || 0) : 0
+            if (inds[j] !== previousIndices[j]) indicesChanged = true
+            if (selectedId && selectedId === id) focusedIndex = j
+        }
+        if (indicesChanged) postergrid.latestIndicesByGroup = inds
+        if (!_focusRestorePending && !_restoringFocus)
+            postergrid.currentLatestGroup = focusedIndex >= 0 ? focusedIndex
+                    : MediaCatalog.clampIndex(postergrid.currentLatestGroup, out.length)
     }
     function _rebuildLatestByFolderFromTemp() {
+        var wasComplete = postergrid._latestAllComplete
         postergrid._publishLatestFromTemp()
         postergrid._latestAllComplete = postergrid._latestQueueDone()
-        postergrid.latestFetchCompleted = postergrid._latestAllComplete
+        if (postergrid._latestAllComplete) {
+            latestInitialReadyTimer.stop()
+            postergrid.latestFetchCompleted = true
+            if (!wasComplete) postergrid._saveHomeCacheNow()
+        }
     }
     function _fetchLatestForFolderId(parentId, limit, groupItems, ok, ko) {
         return Jellyfin.fetchHomeLatestItemsForParent(
@@ -1626,10 +1612,21 @@ Item {
         try { delete pending[key] } catch(e0) {}
         _latestInitialPending = pending
         _latestInFlight = Math.max(0, _latestInFlight - 1)
-        _latestTemp[idx] = entry
+        if (!entry) {
+            _latestHadFailures = true
+            var folder = _latestLibs[idx]
+            console.warn("Home latest: " + String(reason || "network_error").replace(/[^a-z0-9_-]/gi, "").substr(0, 40)
+                         + " (folder " + SafeLog.shortHash(folder && folder.Id) + ")")
+        }
+        // Un échec transitoire ne retire pas un rail restauré du cache.
+        _latestTemp[idx] = entry || _latestTemp[idx] || null
         var stageDone = _latestPos >= _latestStageTarget && _latestInFlight <= 0
         if (stageDone && !_latestInitialComplete) _latestInitialComplete = true
         _rebuildLatestByFolderFromTemp()
+        if (entry && entry.items && entry.items.length > 0) {
+            latestInitialReadyTimer.stop()
+            latestFetchCompleted = true
+        }
         if (stageDone) {
             _resetHydration()
             updateBackdrop()
@@ -1653,6 +1650,7 @@ Item {
         }
         if (postergrid._latestInFlight >= postergrid.latestMaxInflight) { latestPumpTimer.restart(); return }
         var idx = postergrid._latestPos++; var lib = postergrid._latestLibs[idx]
+        var requestSeq = postergrid._latestQueueSeq
         if (!lib || !lib.Id) {
             postergrid._latestTemp[idx] = null
             var invalidStageDone = postergrid._latestPos >= target && postergrid._latestInFlight <= 0
@@ -1670,18 +1668,24 @@ Item {
                     MediaCatalog.isSeriesLibraryFolder(lib),
                     function(arr) {
                 try {
-                    if (!postergrid._safeCanTouch(postergrid._latestQueueSeq)) return
+                    if (!postergrid._safeCanTouch(requestSeq) || requestSeq !== postergrid._latestQueueSeq) return
                     postergrid._finishLatestRequest(idx, {
                         id: lib.Id, name: lib.Name || "Section", items: MediaCatalog.safeArray(arr), ct: lib.CollectionType || "", t: lib.Type || ""
                     }, "success")
-                } catch(e1) {}
+                } catch(e1) {
+                }
             }, function(code) {
                 try {
-                    if (postergrid._safeCanTouch(postergrid._latestQueueSeq)) postergrid._finishLatestRequest(idx, null, String(code || "error"))
-                } catch(e2) {}
+                    if (postergrid._safeCanTouch(requestSeq) && requestSeq === postergrid._latestQueueSeq)
+                        postergrid._finishLatestRequest(idx, null, String(code || "error"))
+                } catch(e2) {
+                }
             }
         )
-        postergrid._registerLatestInitialRequest(idx, latestHandle)
+        // Une réponse servie synchroniquement par le cache peut déjà avoir
+        // terminé le slot ; ne pas recréer un faux pending après le callback.
+        if (requestSeq === postergrid._latestQueueSeq && postergrid._latestInitialPending[String(idx)])
+            postergrid._registerLatestInitialRequest(idx, latestHandle)
         if (postergrid._latestPos < target) latestPumpTimer.restart()
     }
     function requestMoreLatestForProximity() {
@@ -1698,20 +1702,13 @@ Item {
     }
     function forceHomeBootstrapCompletion(reason) {
         if (!_alive) return false
-        try { latestPumpTimer.stop() } catch(e0) {}
-        _cancelLatestInitialRequests(reason || "home-timeout", true)
-        try { latestPumpTimer.stop() } catch(e1) {}
-        _latestPos = _latestLibs ? _latestLibs.length : _latestPos
-        _latestStageTarget = _latestPos
-        _latestInitialComplete = true
-        _latestAllComplete = true
+        // La fin du rideau n'annule pas les téléchargements des rails ; les
+        // réponses tardives doivent encore pouvoir remplir chaque dossier.
+        latestInitialReadyTimer.stop()
         latestFetchCompleted = true
         libraryFetchCompleted = true
         resumeFetchCompleted = true
         nextUpFetchCompleted = true
-        _fetchInFlight = false
-        _bootFetchPending = false
-        _rebuildLatestByFolderFromTemp()
         _resetHydration()
         updateBackdrop()
         prepareHomeReveal(reason || "home-timeout")
@@ -1812,6 +1809,7 @@ Item {
         function failLibraryItems() {
             if (!root._fetchStillValid(seq)) return
             root._fetchInFlight = false
+            console.warn("Home views: fetch failed")
             root._clearDataAfterFetchFailure()
         }
         Jellyfin.fetchViews(root.serverUrl, root.accessToken, root.userId, applyLibraryItems, failLibraryItems)
@@ -1849,22 +1847,17 @@ Item {
         var root = postergrid; var seq = (fetchSeq !== undefined && fetchSeq !== null) ? fetchSeq : root._fetchSeq
         try {
             if (!root._safeCanTouch(seq)) return
-            if (!root.fetchedOnce || !root.latestByFolder || root.latestByFolder.length === 0) root._setLatestByFolderIfChanged([])
-            root._latestTemp = []
-            root.latestFetchCompleted = false
-            if (!root._focusRestorePending && !root._restoringFocus) root.latestIndicesByGroup = []
             var libs = MediaCatalog.safeArray(root.libraryItems).filter(function(i){
                 return i
                         && (i.CollectionType || i.IsFolder)
                         && !MediaCatalog.isKnownUnsupportedLibraryFolder(i)
             })
-            if (libs.length === 0) {
-                root.latestFetchCompleted = true
-                if (!root.latestByFolder || root.latestByFolder.length === 0) root._setLatestByFolderIfChanged([])
-                return
-            }
             root._startLatestInitialQueue(libs, seq)
-        } catch(e) {}
+        } catch(e) {
+            console.warn("Home latest: queue setup failed")
+            root._latestHadFailures = true
+            root.latestFetchCompleted = true
+        }
     }
 
     Component.onCompleted: {
@@ -1887,8 +1880,9 @@ Item {
         _fetchSeq++
         _nextUpSeq++
         _latestQueueSeq++
+        latestInitialReadyTimer.stop()
         _cancelLatestReloads("destroyed")
-        _cancelLatestInitialRequests("destroyed", false)
+        _cancelLatestInitialRequests("destroyed")
         try { if (latestInitialWatchdog.running) latestInitialWatchdog.stop() } catch(eLatestWd) {}
         try { if (_visRefetch.running) _visRefetch.stop() } catch(e1) {}
         try { if (hydrationTimer.running) hydrationTimer.stop() } catch(e2) {}
@@ -1900,7 +1894,7 @@ Item {
         try { if (latestDataEvictTimer.running) latestDataEvictTimer.stop() } catch(e9) {}
         try { if (latestReloadRetryTimer.running) latestReloadRetryTimer.stop() } catch(e10) {}
     }
-    function _resetHomeCacheRestoreDedup(){ _lastHomeCacheRestoreKey=""; _lastHomeCacheRestoreCacheTs=0; _lastHomeCacheRestoreAtMs=0 }
+    function _resetHomeCacheRestoreDedup(){ _lastHomeCacheRestoreKey=""; _lastHomeCacheRestoreCacheTs=0 }
     onAccessTokenChanged: { _resetHomeCacheRestoreDedup(); if (ready) ensureBootFetch() }
     onUserIdChanged: { _resetHomeCacheRestoreDedup(); if (ready) ensureBootFetch() }
     onServerUrlChanged: { _resetHomeCacheRestoreDedup(); if (ready) ensureBootFetch() }
@@ -1908,7 +1902,11 @@ Item {
     onLibraryItemsChanged:   {  updateBackdrop() }
     onResumeItemsChanged:    {  updateBackdrop() }
     onNextUpItemsChanged:    {  updateBackdrop() }
-    onLatestByFolderChanged: {  updateBackdrop(); scheduleFocusRestore(); scheduleLatestEvict() }
+    onLatestByFolderChanged: {
+        updateBackdrop()
+        scheduleFocusRestore()
+        scheduleLatestEvict()
+    }
     onPageActiveChanged: {
         if (pageActive) Qt.callLater(function(){
             if (postergrid._alive && postergrid.focusRepairEnabled) postergrid.scheduleHomeFocusRepair()
@@ -2208,7 +2206,7 @@ Item {
                         if (count <= 0) return false
                         var x = Number(savedX)
                         if (!isFinite(x) || isNaN(x)) return false
-                        folderList.contentX = postergrid._railNativeClampX(
+                        folderList.contentX = MediaRailLayout.nativeListClampX(
                                     folderList,
                                     x)
                         return true
@@ -2384,7 +2382,7 @@ Item {
                             var x = Number(savedX)
                             if (isFinite(x) && !isNaN(x)) resumeList.contentX = postergrid._resumeNativeClampX( resumeList, x)
                         }
-                        var real = postergrid._rowRealDelegateGeometry( resumeList, selectedIndex)
+                        var real = MediaRailLayout.homeRowRealDelegateGeometry( resumeList, selectedIndex)
                         if (real && hasViewportAnchor) {
                             var delta = real.viewportX - viewportX
                             if (Math.abs(delta) >= 0.5) {
@@ -2430,7 +2428,7 @@ Item {
                                 return
                             }
                             var idx = resumeList.selectedIndex
-                            var real = postergrid._rowRealDelegateGeometry( resumeList, idx)
+                            var real = MediaRailLayout.homeRowRealDelegateGeometry( resumeList, idx)
                             if (!real) {
                                 resumeList._positionIndexIntoView(idx)
                             } else {
@@ -2689,7 +2687,7 @@ Item {
                             return latestSection.sectionModelActive ? (latestSection.sectionItems || []) : []
                         }
                         readonly property real logicalContentWidth:
-                            postergrid._rowLogicalWidth(_modelArray(), latestSection.cardSectionKind, spacing, edgePad, width)
+                            MediaRailLayout.homeRowLogicalWidth(_modelArray(), latestSection.cardSectionKind, spacing, edgePad, width, postergrid.homeCardLayout)
                         contentWidth: logicalContentWidth
                         function ensureSelectedItemVisible(animateMove) {
                             var seq = ++_ensureVisibleSeq

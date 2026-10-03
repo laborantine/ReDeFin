@@ -18,6 +18,7 @@
 
 import QtQuick 2.15
 import "../js/jellyfinBridge.js" as Jellyfin
+import "../js/MediaRailLayout.js" as MediaRailLayout
 
 FocusScope {
     id: root
@@ -81,7 +82,7 @@ FocusScope {
     property int firstPosterLeftShift: 10
 
     function topPadFor(h) {
-        return Math.ceil(h * (focusScale - 1)) + focusLiftPx + Math.ceil(frameWidth) + 2
+        return MediaRailLayout.focusTopPad(h, focusScale, focusLiftPx, frameWidth)
     }
 
     property int labelH: 22
@@ -97,7 +98,7 @@ FocusScope {
     readonly property real frameInnerEpsilon: 0.2
     readonly property real aaEps: -2.0
     property real frameBorderOutset: 0.8
-    function frameMargin() { return frameInsetPx + frameWidth/2 + frameInnerEpsilon }
+    function frameMargin(){ return MediaRailLayout.frameMargin(frameInsetPx, frameWidth, frameInnerEpsilon) }
 
     readonly property int reqPosterW: Math.round(posterW * posterOversample)
     readonly property int reqPosterH: Math.round(posterH * posterOversample)
@@ -958,7 +959,6 @@ FocusScope {
                                     }
                                 }
                                 Image {
-                                    id: seasonImgHq
                                     anchors.fill: parent
                                     fillMode: Image.PreserveAspectCrop
                                     source: (seasonCard.activeFocus && !root.isScrolling && seasonImg.status === Image.Ready

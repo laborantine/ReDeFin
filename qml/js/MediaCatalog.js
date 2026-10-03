@@ -46,6 +46,69 @@ function mediaAgeTag(it) {
 function formatDateShortFr(value) {
     return _catalogDateLong(value);
 }
+function formatDateLongFr(value) {
+    return _catalogDateLong(value);
+}
+function mediaTicksToSeconds(ticks) {
+    var value = Number(ticks || 0);
+    return value > 0 ? Math.floor(value / 10000000) : 0;
+}
+function formatRuntimeMinutesFromTicks(ticks) {
+    var ms = Math.round(Number(ticks || 0) / 10000);
+    if (!ms) return "";
+    var seconds = Math.round(ms / 1000);
+    return Math.floor(seconds / 60) + " min";
+}
+function formatTicksToHhMm(ticks) {
+    var totalSec = mediaTicksToSeconds(ticks);
+    if (!totalSec) return "";
+    var hours = Math.floor(totalSec / 3600);
+    var minutes = Math.floor((totalSec % 3600) / 60);
+    if (hours > 0)
+        return hours + " h " + _catalogPad2(minutes);
+    return minutes + " min";
+}
+function formatEndClockFromTicks(ticks) {
+    var value = Number(ticks || 0);
+    if (value <= 0) return "";
+    var date = new Date(Date.now() + Math.floor(value / 10000));
+    return _catalogPad2(date.getHours()) + ":" + _catalogPad2(date.getMinutes());
+}
+function formatEndTimeFromTicks(ticks) {
+    var ms = Math.round(Number(ticks || 0) / 10000);
+    if (!ms) return "";
+    var end = new Date(Date.now() + ms);
+    return _catalogPad2(end.getHours()) + ":" + _catalogPad2(end.getMinutes());
+}
+function seriesYearFromDateLike(value) {
+    if (value === undefined || value === null) return "";
+    var text = safeString(value);
+    if (text.length >= 4) {
+        var year = parseInt(text.substr(0, 4), 10);
+        if (year > 1800 && year < 2500) return String(year);
+    }
+    var numeric = Number(value || 0);
+    return numeric > 1800 && numeric < 2500 ? String(Math.floor(numeric)) : "";
+}
+function seriesYearRangeParts(item, seasons, ended) {
+    var start = "", end = "";
+    if (item) {
+        start = seriesYearFromDateLike(item.ProductionYear)
+                || seriesYearFromDateLike(item.PremiereDate || item.StartDate || item.DateCreated);
+        end = seriesYearFromDateLike(item.EndDate || item.DateEnded || item.EndYear);
+    }
+    if (!end && ended && seasons && seasons.length) {
+        var best = 0;
+        for (var i = 0; i < seasons.length; ++i) {
+            var season = seasons[i];
+            var value = seriesYearFromDateLike(season && (season.ProductionYear || season.PremiereDate));
+            var numeric = Number(value || 0);
+            if (numeric > best) best = numeric;
+        }
+        if (best > 0) end = String(best);
+    }
+    return { start:start, end:end };
+}
 function mediaCodecLabel(codec) {
     var c = String(codec || "").toLowerCase();
     if (c === "hevc" || c === "h265" || c === "h.265") return "HEVC";
@@ -207,14 +270,14 @@ function personalMediaStreamInfo(it) {
 /* Helpers purs partagés avec jellyfinBridge                                 */
 /* ------------------------------------------------------------------------- */
 /*
- * Ces fonctions ne font aucun I/O et n'ont aucun état réseau. Elles vivent ici
- * pour éviter que jellyfinBridge mélange transport/API et mécanique de pagination.
- * Les pages de bibliothèque conservent uniquement l'orchestration QML et le focus.
+ * Ces fonctions ne font aucun I/O et n'ont aucun état réseau. Elles décrivent
+ * les objets Jellyfin et les sections du catalogue ; MediaBrowser porte le tri
+ * et la fenêtre de pagination des pages de bibliothèque.
  */
 function _rdfS(v) {
     return (v === undefined || v === null) ? "" : String(v);
 }
-function _rdfInt(v) {
+function intValue(v) {
     var n = Number(v);
     if (!isFinite(n) || isNaN(n)) return 0;
     return Math.floor(n);
@@ -304,7 +367,7 @@ function clampScrollableContentY(contentHeight, viewportHeight, value) {
 }
 function titleTextCapPx(averageCharacterWidth, characterLimit) {
     var aw = Number(averageCharacterWidth || 0);
-    var limit = Math.max(1, _rdfInt(characterLimit));
+    var limit = Math.max(1, intValue(characterLimit));
     if (!isFinite(aw) || aw <= 0) aw = 18;
     return Math.max(220, Math.round(aw * limit + 10));
 }
@@ -639,343 +702,11 @@ function seriesEpisodeMinutes(it) {
     n = Number(n);
     return isFinite(n) && n > 0 ? Math.round(n) : 0;
 }
-function emptyText(mode, musicVideoMode) {
-    if (musicVideoMode) return "Aucun clip trouvé.";
-    var m = normalizeMode(mode);
-    if (m === "personal") return "Aucune photo ou vidéo trouvée.";
-    if (m === "collections") return "Aucune collection trouvée.";
-    return m === "series" ? "Aucune série trouvée."
-         : (m === "mixed" ? "Aucun film ou série trouvé." : "Aucun film trouvé.");
-}
-var FOLDER_SORT_LABELS = [
-    "Nom",
-    "Date d'ajout",
-    "Date de sortie",
-    "Note de la communauté",
-    "Dernière lecture",
-    "Durée de lecture"
-];
-function folderSortOptionLabels() {
-    return FOLDER_SORT_LABELS.slice(0);
-}
-function _sortCleanName(it) {
-    var n = _rdfS((it && (it.SortName || it.Name)) || "");
-    return n.toLowerCase ? n.toLowerCase() : n;
-}
-function _sortDateMs(v) {
-    v = _rdfS(v);
-    if (!v) return 0;
-    try {
-        var t = Date.parse(v);
-        return isFinite(t) ? t : 0;
-    } catch (e) {
-        return 0;
-    }
-}
-function _sortYearMs(v) {
-    var y = Number(v || 0);
-    if (!isFinite(y) || y <= 0) return 0;
-    return Date.UTC(Math.floor(y), 0, 1);
-}
-function _sortNum(v) {
-    var n = Number(v || 0);
-    return (isFinite(n) && !isNaN(n)) ? n : 0;
-}
-function _sortDateAddedKey(it) {
-    if (!it) return 0;
-    return _sortDateMs(it.DateCreated)
-        || _sortDateMs(it.DateLastMediaAdded)
-        || _sortDateMs(it.DateLastRefreshed)
-        || _sortDateMs(it.PremiereDate)
-        || _sortYearMs(it.ProductionYear);
-}
-function _sortReleaseDateKey(it) {
-    if (!it) return 0;
-    return _sortDateMs(it.PremiereDate) || _sortYearMs(it.ProductionYear);
-}
-function _sortLastPlayedKey(it) {
-    var ud = userDataOf(it);
-    return _sortDateMs(ud.LastPlayedDate)
-        || _sortDateMs(it.LastPlayedDate)
-        || _sortDateMs(it.DatePlayed);
-}
-function _folderSortKey(it, mode) {
-    mode = _rdfInt(mode);
-    if (mode === 1) return _sortDateAddedKey(it);
-    if (mode === 2) return _sortReleaseDateKey(it);
-    if (mode === 3) return _sortNum(it && it.CommunityRating);
-    if (mode === 4) return _sortLastPlayedKey(it);
-    if (mode === 5) return _sortNum(it && (it.RunTimeTicks || it.CumulativeRunTimeTicks));
-    return _sortCleanName(it);
-}
-function folderSortCompare(a, b, mode) {
-    mode = _rdfInt(mode);
-    var desc = mode > 0;
-    if (mode === 0) {
-        var na = _sortCleanName(a), nb = _sortCleanName(b);
-        return na < nb ? -1 : (na > nb ? 1 : 0);
-    }
-    var ka = _folderSortKey(a, mode), kb = _folderSortKey(b, mode);
-    var az = (ka === undefined || ka === null || ka === "" || ka === 0);
-    var bz = (kb === undefined || kb === null || kb === "" || kb === 0);
-    if (az && !bz) return 1;
-    if (bz && !az) return -1;
-    if (ka < kb) return desc ? 1 : -1;
-    if (ka > kb) return desc ? -1 : 1;
-    var fa = _sortCleanName(a), fb = _sortCleanName(b);
-    return fa < fb ? -1 : (fa > fb ? 1 : 0);
-}
-function folderSortItems(items, mode) {
-    var arr = (items || []).slice(0);
-    arr.sort(function(a, b) {
-        return folderSortCompare(a, b, mode);
-    });
-    return arr;
-}
-// Helpers purs de fenêtre de pagination partagés par Movie/Collection/PersonalMedia.
-function _browserString(v) { return _rdfS(v); }
-function _browserInt(v) { return _rdfInt(v); }
-function _browserPosInt(v) { return Math.max(0, _rdfInt(v)); }
-// Ils ne touchent ni au GridView ni au focus : les pages gardent l'orchestration UI.
-
-function _mediaBrowserReturnStack(shared) {
-    if (!shared) return null;
-    if (!shared.__mediaBrowserReturnStack) shared.__mediaBrowserReturnStack = [];
-    return shared.__mediaBrowserReturnStack;
-}
-function _trimMediaBrowserReturnStack(shared) {
-    var stack = _mediaBrowserReturnStack(shared);
-    if (!stack) return null;
-    var now = Date.now();
-    var out = [];
-    for (var i = 0; i < stack.length; ++i) {
-        var entry = stack[i];
-        if (entry && entry.folderId && (now - Number(entry.ts || 0)) < 1200000) out.push(entry);
-    }
-    while (out.length > 12) out.shift();
-    shared.__mediaBrowserReturnStack = out;
-    return out;
-}
-function pushBrowserReturn(shared, folderId, childFolderId, browserTitle, index, y, libraryMode) {
-    var stack = _trimMediaBrowserReturnStack(shared);
-    if (!stack || !folderId) return false;
-    stack.push({
-        folderId: _rdfS(folderId), childFolderId: _rdfS(childFolderId), browserTitle: _rdfS(browserTitle),
-        index: _rdfInt(index), y: Math.max(0, Math.floor(Number(y) || 0)),
-        libraryMode: normalizeMode(libraryMode), ts: Date.now()
-    });
-    while (stack.length > 12) stack.shift();
-    shared.__mediaBrowserReturnStack = stack;
-    return true;
-}
-function popBrowserParent(shared, currentFolderId) {
-    var stack = _trimMediaBrowserReturnStack(shared);
-    if (!stack || !stack.length) return null;
-    var top = stack[stack.length - 1];
-    if (!top || (top.childFolderId && _rdfS(top.childFolderId) !== _rdfS(currentFolderId))) return null;
-    var entry = stack.pop();
-    shared.__mediaBrowserReturnStack = stack;
-    return entry || null;
-}
-
-function browserRestoreIndex(restoreIndex, startIndex) {
-    var restore = _browserInt(restoreIndex);
-    if (Number(restoreIndex) >= 0) return restore;
-    var start = _browserInt(startIndex);
-    return Number(startIndex) >= 0 ? start : -1;
-}
-function browserRestoreY(restoreY) {
-    var y = Number(restoreY);
-    return isFinite(y) && y >= 0 ? y : -1;
-}
-function browserSortedWindow(items, mode, serverSortedPage, keepId, currentIndex, forceFirst) {
-    var sorted = serverSortedPage === true ? (items || []) : folderSortItems(items || [], mode);
-    if (!sorted.length) return { items: sorted, index: -1 };
-    var idx = forceFirst === true ? 0 : (keepId ? browserFindItemIndexById(sorted, keepId) : _browserInt(currentIndex));
-    if (idx < 0 || idx >= sorted.length) idx = 0;
-    return { items: sorted, index: idx };
-}
-function browserSelectedItemId(items, localIndex) {
-    localIndex = _browserInt(localIndex);
-    var it = items && localIndex >= 0 && localIndex < items.length ? items[localIndex] : null;
-    return it && it.Id ? _browserString(it.Id) : "";
-}
-function browserSelectedItem(items, localIndex) {
-    localIndex = _browserInt(localIndex);
-    return items && localIndex >= 0 && localIndex < items.length ? items[localIndex] : null;
-}
-function browserFindItemIndexById(items, id) {
-    id = _browserString(id); items = items || [];
-    if (!id) return -1;
-    for (var i = 0; i < items.length; i++) if (items[i] && _browserString(items[i].Id) === id) return i;
-    return -1;
-}
-function browserGlobalIndex(items, windowStart, localIndex) {
-    localIndex = _browserInt(localIndex); windowStart = _browserPosInt(windowStart);
-    if (localIndex < 0) return -1;
-    var it = items && localIndex < items.length ? items[localIndex] : null;
-    return (it && it._windowGlobalIndex !== undefined) ? _browserInt(it._windowGlobalIndex) : windowStart + localIndex;
-}
-function browserLocalIndex(items, windowStart, globalIndex) {
-    items = items || []; windowStart = _browserPosInt(windowStart); globalIndex = _browserInt(globalIndex);
-    if (globalIndex < 0) return -1;
-    for (var i = 0; i < items.length; i++) {
-        var it = items[i];
-        var gi = (it && it._windowGlobalIndex !== undefined) ? _browserInt(it._windowGlobalIndex) : windowStart + i;
-        if (gi === globalIndex) return i;
-    }
-    return -1;
-}
-function browserWindowKnownEnd(items, windowStart) {
-    items = items || []; windowStart = _browserPosInt(windowStart);
-    if (!items.length) return windowStart;
-    var last = items[items.length - 1];
-    return (last && last._windowGlobalIndex !== undefined) ? _browserInt(last._windowGlobalIndex) + 1 : windowStart + items.length;
-}
-function browserPreviousPageStart(windowStart, pageSize) {
-    windowStart = _browserPosInt(windowStart);
-    pageSize = Math.max(1, _browserPosInt(pageSize));
-    if (windowStart <= 0) return -1;
-    var start = Math.max(0, windowStart - pageSize);
-    return start < windowStart ? start : -1;
-}
-function browserViewportLoadDirection(localIndex, itemCount, hasPrevious, hasMore, prependThreshold, appendThreshold) {
-    localIndex = _browserInt(localIndex);
-    itemCount = _browserPosInt(itemCount);
-    if (localIndex < 0) return 0;
-    if (hasPrevious === true && localIndex <= _browserPosInt(prependThreshold)) return -1;
-    var appendAt = Math.max(0, itemCount - Math.max(1, _browserPosInt(appendThreshold)));
-    if (hasMore === true && localIndex >= appendAt) return 1;
-    return 0;
-}
 function hasPrimaryOrThumb(it) {
     if (!it) return false;
     var tags = it.ImageTags || {};
     return !!(tags.Primary || tags.Thumb);
 }
-function browserLoadedIds(items) {
-    items = items || []; var seen = {};
-    for (var i = 0; i < items.length; i++) { var id = items[i] && items[i].Id ? _browserString(items[i].Id) : ""; if (id) seen[id] = 1; }
-    return seen;
-}
-
-function browserInitialPagingState(targetIndex, pageSize) {
-    var size = Math.max(1, _browserPosInt(pageSize));
-    var target = _browserInt(targetIndex);
-    var start = target >= 0 ? Math.max(0, Math.floor(target / size) * size) : 0;
-    return {
-        windowStartIndex: start,
-        nextStart: start,
-        hasMore: true,
-        hasPrevious: start > 0
-    };
-}
-function browserPageProgress(page, start, pageSize, prepend) {
-    page = page || {};
-    start = Math.max(0, _browserInt(start));
-    var size = Math.max(1, _browserPosInt(pageSize));
-    var items = page.items || [];
-    if (prepend === true) {
-        return { hasPrevious: start > 0, nextStart: null, hasMore: null };
-    }
-    var nextStart = (page.nextStartIndex !== undefined && page.nextStartIndex !== null)
-            ? _browserInt(page.nextStartIndex)
-            : start + size;
-    if (nextStart <= start && items.length > 0) nextStart = start + items.length;
-    if (nextStart <= start) nextStart = start + size;
-    return { hasPrevious: null, nextStart: nextStart, hasMore: page.hasMore === true };
-}
-function browserAppendWindowItems(currentItems, incomingItems, start, prepend, pageSize, windowMaxItems, keepId, currentWindowStart) {
-    currentItems = currentItems || [];
-    incomingItems = incomingItems || [];
-    start = Math.max(0, _browserInt(start));
-    prepend = prepend === true;
-    var size = Math.max(1, _browserPosInt(pageSize));
-    var maxItems = Math.max(size, _browserPosInt(windowMaxItems));
-    keepId = _browserString(keepId);
-    currentWindowStart = Math.max(0, _browserInt(currentWindowStart));
-
-    var seen = browserLoadedIds(currentItems);
-    var incoming = [];
-    for (var i = 0; i < incomingItems.length; i++) {
-        var it = incomingItems[i];
-        var id = it && it.Id ? _browserString(it.Id) : "";
-        if (!id || seen[id]) continue;
-        seen[id] = 1;
-        var decorated = {};
-        for (var k in it) decorated[k] = it[k];
-        decorated._windowGlobalIndex = start + i;
-        incoming.push(decorated);
-    }
-    if (!incoming.length) {
-        return {
-            items: currentItems,
-            added: 0,
-            windowStartIndex: currentItems.length ? browserGlobalIndex(currentItems, currentWindowStart, 0) : currentWindowStart,
-            nextStart: null,
-            hasMore: null,
-            hasPrevious: null,
-            loadedIds: browserLoadedIds(currentItems)
-        };
-    }
-
-    var current = currentItems.slice(0);
-    var next = prepend ? incoming.concat(current) : current.concat(incoming);
-    var nextStart = null, hasMore = null, hasPrevious = null;
-
-    if (next.length > maxItems) {
-        var removeCount = Math.min(size, next.length);
-        if (prepend) {
-            var tailStart = next.length - removeCount;
-            var keepInTail = false;
-            for (var ti = tailStart; ti < next.length; ti++) {
-                if (keepId && next[ti] && _browserString(next[ti].Id) === keepId) { keepInTail = true; break; }
-            }
-            if (!keepInTail) {
-                var firstRemoved = next[tailStart];
-                nextStart = firstRemoved && firstRemoved._windowGlobalIndex !== undefined
-                        ? _browserInt(firstRemoved._windowGlobalIndex)
-                        : start + tailStart;
-                hasMore = true;
-                next.splice(tailStart, removeCount);
-            }
-        } else {
-            var keepInHead = false;
-            for (var hi = 0; hi < removeCount; hi++) {
-                if (keepId && next[hi] && _browserString(next[hi].Id) === keepId) { keepInHead = true; break; }
-            }
-            if (!keepInHead) {
-                next.splice(0, removeCount);
-                hasPrevious = true;
-            }
-        }
-    }
-
-    var windowStart = next.length && next[0]._windowGlobalIndex !== undefined
-            ? _browserInt(next[0]._windowGlobalIndex)
-            : (prepend ? start : currentWindowStart);
-    return {
-        items: next,
-        added: incoming.length,
-        windowStartIndex: windowStart,
-        nextStart: nextStart,
-        hasMore: hasMore,
-        hasPrevious: hasPrevious,
-        loadedIds: browserLoadedIds(next)
-    };
-}
-function browserResolvedSortMode(persistedMode, sharedState, optionCount, fallbackMode) {
-    var count = Math.max(1, _browserInt(optionCount));
-    var p = _browserInt(persistedMode);
-    if (p >= 0 && p < count && Number(persistedMode) >= 0) return p;
-    if (sharedState && typeof sharedState.sort === "number") { var s = _browserInt(sharedState.sort); if (s >= 0 && s < count) return s; }
-    var f = _browserInt(fallbackMode); return (f >= 0 && f < count) ? f : 0;
-}
-function browserReadSharedState(bucket, key) {
-    if (!bucket || !key) return null;
-    return Object.prototype.hasOwnProperty.call(bucket, key) ? bucket[key] : null;
-}
-
 function collectionIsSeriesType(it) {
     var t = (it && (it.Type || it.CollectionType))
           ? _rdfS(it.Type || it.CollectionType).toLowerCase()
@@ -1135,17 +866,14 @@ function primaryImageUrl(Jellyfin, serverUrl, it, options) {
     var tag = primaryImageTag(it);
     return tag ? Jellyfin.itemImageUrl(serverUrl, it.Id, "Primary", tag, options || {}) : "";
 }
+function backdropOrPrimaryUrl(Jellyfin, serverUrl, it, options) {
+    if (!Jellyfin || !it || !serverUrl) return "";
+    return Jellyfin.itemBackdropOrPrimaryUrl(serverUrl, it, options || {});
+}
 function collectionPrimaryImageUrl(Jellyfin, serverUrl, it, options) {
     if (!Jellyfin || !it || !it.Id || !serverUrl) return "";
     var tag = collectionPrimaryImageTag(it);
     return tag ? Jellyfin.itemImageUrl(serverUrl, it.Id, "Primary", tag, options || {}) : "";
-}
-function collectionPosterOrThumbImageUrl(Jellyfin, serverUrl, it, options) {
-    if (!Jellyfin || !it || !it.Id || !serverUrl) return "";
-    var primary = collectionPrimaryImageTag(it);
-    if (primary) return Jellyfin.itemImageUrl(serverUrl, it.Id, "Primary", primary, options || {});
-    var thumb = collectionThumbImageTag(it);
-    return thumb ? Jellyfin.itemImageUrl(serverUrl, it.Id, "Thumb", thumb, options || {}) : "";
 }
 function collectionLogoImageUrl(Jellyfin, serverUrl, it, options) {
     if (!Jellyfin || !it || !it.Id || !serverUrl) return "";
@@ -1358,7 +1086,7 @@ function _homeResumeItemAllowed(it) {
 function filterHomeResumeItems(items, limit) {
     items = items || [];
     var out = [];
-    var max = _rdfInt(limit);
+    var max = intValue(limit);
     if (max <= 0) max = 50;
 
     for (var i = 0; i < items.length && out.length < max; i++) {
@@ -1438,326 +1166,62 @@ function homeLatestGroupsEqual(a, b) {
     return true;
 }
 function homeSectionLimit(limit) {
-    var n = _rdfInt(limit);
+    var n = intValue(limit);
     if (n <= 0) n = 50;
     return Math.max(1, Math.min(50, n));
 }
 
 /* ------------------------------------------------------------------------- */
-/* Projections de cartes Home et Search                                      */
-/* ------------------------------------------------------------------------- */
-
-function trimObjectMemo(memo, maxEntries) {
-    var source = memo || ({});
-    var keys = Object.keys(source);
-    var limit = Math.max(1, Number(maxEntries) | 0);
-    if (keys.length <= limit) return source;
-    var out = ({});
-    var start = Math.max(0, keys.length - limit);
-    for (var i = start; i < keys.length; ++i) out[keys[i]] = source[keys[i]];
-    return out;
-}
-
-function homeCardUsesLandscape(item, sectionKind) {
-    var kind = safeString(sectionKind).toLowerCase();
-    if (kind === "nextup") return true;
-    if (kind === "latest-series") return false;
-    if (!item || item.IsFolder === true) return true;
-    var type = itemTypeLower(item);
-    if (type === "episode" || type === "video" || type === "musicvideo" || type === "trailer")
-        return true;
-    if (type.indexOf("folder") >= 0 || type === "collectionfolder" || type === "userview")
-        return true;
-    return safeString(item.CollectionType) !== "" && type !== "movie" && type !== "series";
-}
-
-function homeCardTileWidthFor(item, sectionKind, portraitWidth, landscapeWidth) {
-    return homeCardUsesLandscape(item, sectionKind) ? landscapeWidth : portraitWidth;
-}
-
-function homeCardSidePadFor(item, sectionKind, portraitPad, landscapePad) {
-    return homeCardUsesLandscape(item, sectionKind) ? landscapePad : portraitPad;
-}
-
-function homeCardFocusBleedFor(item, sectionKind, portraitBleed, landscapeBleed) {
-    return homeCardUsesLandscape(item, sectionKind) ? landscapeBleed : portraitBleed;
-}
-
-function homeCardPrefersBackdrop(item, sectionKind) {
-    var kind = safeString(sectionKind).toLowerCase();
-    return kind !== "nextup" && homeCardUsesLandscape(item, kind);
-}
-
-function homeCardFallbackKind(item, sectionKind) {
-    var kind = safeString(sectionKind).toLowerCase();
-    if (kind === "library") return "folder";
-    if (kind === "nextup") return "series";
-    var type = itemTypeLower(item);
-    if (type === "series" || type === "season") return "series";
-    if (type === "episode") return "episode";
-    if (type === "movie") return "movie";
-    return homeCardUsesLandscape(item, kind) ? "video" : "";
-}
-
-function prepareHomeRowMetrics(items, sectionKind, layout) {
-    var list = items || [];
-    var cfg = layout || ({});
-    var x = 0;
-    for (var i = 0; i < list.length; ++i) {
-        var item = list[i];
-        if (!item) continue;
-        var tileWidth = homeCardTileWidthFor(item, sectionKind,
-                                             Number(cfg.portraitWidth || 0),
-                                             Number(cfg.landscapeWidth || 0));
-        var sidePad = homeCardSidePadFor(item, sectionKind,
-                                         Number(cfg.portraitSidePad || 0),
-                                         Number(cfg.landscapeSidePad || 0));
-        var width = tileWidth + sidePad * 2;
-        item._pgDelegateWidth = width;
-        item._pgFocusBleed = homeCardFocusBleedFor(item, sectionKind,
-                                                   Number(cfg.portraitFocusBleed || 0),
-                                                   Number(cfg.landscapeFocusBleed || 0));
-        item._pgRowLeft = x;
-        x += width + Number(cfg.spacing || 0);
-    }
-    return list;
-}
-
-function homeRowItemWidthAt(items, index, sectionKind, layout) {
-    var item = items && index >= 0 && index < items.length ? items[index] : null;
-    var cached = Number(item && item._pgDelegateWidth || 0);
-    if (cached > 0) return cached;
-    if (!item) return 0;
-    var cfg = layout || ({});
-    return homeCardTileWidthFor(item, sectionKind, Number(cfg.portraitWidth || 0),
-                                Number(cfg.landscapeWidth || 0))
-         + homeCardSidePadFor(item, sectionKind, Number(cfg.portraitSidePad || 0),
-                              Number(cfg.landscapeSidePad || 0)) * 2;
-}
-
-function homeRowItemBleedAt(items, index, sectionKind, layout) {
-    var item = items && index >= 0 && index < items.length ? items[index] : null;
-    var cached = Number(item && item._pgFocusBleed || 0);
-    if (cached > 0) return cached;
-    if (!item) return 0;
-    var cfg = layout || ({});
-    return homeCardFocusBleedFor(item, sectionKind, Number(cfg.portraitFocusBleed || 0),
-                                 Number(cfg.landscapeFocusBleed || 0));
-}
-
-function homeRowItemLeftAt(items, index, sectionKind, spacing, layout) {
-    if (!items || index <= 0) return 0;
-    if (index < items.length && items[index] && items[index]._pgRowLeft !== undefined)
-        return Number(items[index]._pgRowLeft || 0);
-    var x = 0;
-    for (var i = 0; i < Math.min(index, items.length); ++i)
-        x += homeRowItemWidthAt(items, i, sectionKind, layout) + Number(spacing || 0);
-    return x;
-}
-
-function homeRowLogicalWidth(items, sectionKind, spacing, edgePad, viewportWidth, layout) {
-    if (!items || items.length === 0) return viewportWidth;
-    var last = items.length - 1;
-    var total = Number(edgePad || 0) * 2
-              + homeRowItemLeftAt(items, last, sectionKind, spacing, layout)
-              + homeRowItemWidthAt(items, last, sectionKind, layout);
-    return Math.max(Number(viewportWidth || 0), total);
-}
-
-/* ------------------------------------------------------------------------- */
-/* Géométrie pure des rails QML                                              */
-/* ------------------------------------------------------------------------- */
-
-function searchRowItemWidthAt(items, index) {
-    var item = items && index >= 0 && index < items.length ? items[index] : null;
-    return Math.max(0, Number(item && item._searchDelegateWidth || 0));
-}
-
-function searchRowItemLeftAt(items, index) {
-    var item = items && index >= 0 && index < items.length ? items[index] : null;
-    return Math.max(0, Number(item && item._searchRowLeft || 0));
-}
-
-function searchRowItemBleedAt(items, index) {
-    var item = items && index >= 0 && index < items.length ? items[index] : null;
-    return Math.max(0, Number(item && item._searchFocusBleed || 0));
-}
-
-function searchRowLogicalWidth(items, spacing, edgePad, viewportWidth) {
-    if (!items || items.length === 0) return Number(viewportWidth || 0);
-    var last = items.length - 1;
-    return Math.max(Number(viewportWidth || 0),
-                    Number(edgePad || 0) * 2 + searchRowItemLeftAt(items, last)
-                    + searchRowItemWidthAt(items, last));
-}
-
-function searchRowMinX(edgePad) {
-    return -Math.max(0, Number(edgePad || 0));
-}
-
-function rowMaxX(minimum, logicalContentWidth, viewportWidth) {
-    var minX = Number(minimum || 0);
-    return Math.max(minX, minX + Math.max(0, Number(logicalContentWidth || 0))
-                    - Math.max(0, Number(viewportWidth || 0)));
-}
-
-function rowClampX(value, minimum, maximum) {
-    var minX = Number(minimum || 0);
-    var maxX = Math.max(minX, Number(maximum || minX));
-    var x = Number(value || 0);
-    if (!isFinite(x) || isNaN(x)) x = minX;
-    return Math.max(minX, Math.min(maxX, x));
-}
-
-function searchRowTargetX(items, index, contentX, viewportWidth, edgePad, logicalContentWidth, padding) {
-    var minX = searchRowMinX(edgePad);
-    var maxX = rowMaxX(minX, logicalContentWidth, viewportWidth);
-    if (!items || index < 0 || index >= items.length) return minX;
-
-    var left = searchRowItemLeftAt(items, index);
-    var width = searchRowItemWidthAt(items, index);
-    var bleed = searchRowItemBleedAt(items, index);
-    var pad = Math.max(0, Number(padding || 0));
-    var current = Number(contentX || 0);
-    var visualLeft = left - bleed;
-    var visualRight = left + width + bleed;
-    var target = current;
-
-    if (visualLeft < current + pad) target = visualLeft - pad;
-    else if (visualRight > current + Number(viewportWidth || 0) - pad)
-        target = visualRight - Number(viewportWidth || 0) + pad;
-
-    return rowClampX(target, minX, maxX);
-}
-
-function homeRowMinX(originX, edgePad) {
-    var ox = Number(originX);
-    return isFinite(ox) && !isNaN(ox) ? ox : -Math.max(0, Number(edgePad || 0));
-}
-
-function homeRowTargetX(items, index, sectionKind, spacing, contentX, viewportWidth,
-                        revealMargin, minimum, maximum, layout) {
-    var minX = Number(minimum || 0);
-    var maxX = Math.max(minX, Number(maximum || minX));
-    if (!items || index < 0 || index >= items.length) return minX;
-
-    var left = homeRowItemLeftAt(items, index, sectionKind, spacing, layout);
-    var width = homeRowItemWidthAt(items, index, sectionKind, layout);
-    var bleed = homeRowItemBleedAt(items, index, sectionKind, layout);
-    var pad = Math.max(0, Number(revealMargin || 0));
-    var current = Number(contentX || 0);
-    var visualLeft = left - bleed;
-    var visualRight = left + width + bleed;
-    var target = current;
-
-    if (visualLeft < current + pad) target = visualLeft - pad;
-    else if (visualRight > current + Number(viewportWidth || 0) - pad)
-        target = visualRight - Number(viewportWidth || 0) + pad;
-
-    return rowClampX(target, minX, maxX);
-}
-
-function searchIsFolderType(typeName) {
-    var type = safeString(typeName).toLowerCase();
-    return type === "folder" || type === "collectionfolder" || type === "userview" ||
-           type === "aggregatefolder" || type === "userrootfolder" ||
-           type === "manualplaylistsfolder" || type === "playlistsfolder";
-}
-
-function searchIsMovieLike(item) {
-    var type = itemTypeLower(item);
-    return type === "movie" || type === "video" || type === "musicvideo";
-}
-
-function searchSectionKey(item) {
-    var type = itemTypeLower(item);
-    if (type === "series") return "series";
-    if (type === "episode") return "episodes";
-    if (searchIsMovieLike(item))
-        return safeString(item && item._searchLibraryId) ? "library-only" : "movies";
-    if (type === "boxset") return "collections";
-    if (searchIsFolderType(type) || (item && item.IsFolder === true)) return "folders";
-    return "others";
-}
-
-function searchSectionTitle(key) {
-    if (key === "series") return "Séries";
-    if (key === "episodes") return "Épisodes de séries";
-    if (key === "movies") return "Films";
-    if (key === "collections") return "Collections";
-    return "Autres résultats";
-}
-
-function searchItemUsesFolderLayout(item) {
-    return searchIsFolderType(itemTypeLower(item)) || !!(item && item.IsFolder === true);
-}
-
-function searchItemUsesLandscape(item, sectionKey) {
-    if (sectionKey === "episodes") return true;
-    if (sectionKey === "series" || sectionKey === "movies" || sectionKey === "collections") return false;
-    if (searchItemUsesFolderLayout(item)) return true;
-    var type = itemTypeLower(item);
-    return type === "episode" || type === "video" || type === "musicvideo" || type === "trailer";
-}
-
-function searchItemLayout(item, sectionKey, layout) {
-    var cfg = layout || ({});
-    var folder = searchItemUsesFolderLayout(item);
-    var landscape = searchItemUsesLandscape(item, sectionKey);
-    var tileWidth = folder ? Number(cfg.libraryTileWidth || 0)
-                           : (landscape ? Number(cfg.landscapeWidth || 0) : Number(cfg.portraitWidth || 0));
-    var tileHeight = folder ? Number(cfg.libraryTileHeight || 0) : Number(cfg.portraitHeight || 0);
-    var sidePad = (folder || landscape) ? Number(cfg.focusSidePad || 0)
-                                       : Number(cfg.portraitSidePad || 0);
-    var topPad = Math.ceil(tileHeight * (Number(cfg.zoomScale || 1) - 1))
-               + Number(cfg.frameWidth || 0) + 2 + Number(cfg.focusLift || 0);
-    var cardWidth = tileWidth + sidePad * 2;
-    var cardHeight = tileHeight + Number(cfg.titleHeight || 0) + topPad;
-    var focusBleed = Math.max(0, Math.ceil((tileWidth * (Number(cfg.zoomScale || 1) - 1)) * 0.5)
-                                  + 3 - sidePad);
-    return { tileWidth:tileWidth, tileHeight:tileHeight, sidePad:sidePad, topPad:topPad,
-             cardWidth:cardWidth, cardHeight:cardHeight, focusBleed:focusBleed,
-             landscape:landscape };
-}
-
-function prepareSearchSectionItems(items, sectionKey, layout) {
-    var source = items || [], out = [], x = 0, maxHeight = 0, maxBleed = 0;
-    for (var i = 0; i < source.length; ++i) {
-        var original = source[i], item = {};
-        if (original) {
-            for (var key in original)
-                if (Object.prototype.hasOwnProperty.call(original, key)) item[key] = original[key];
-        }
-        var metrics = searchItemLayout(item, sectionKey, layout);
-        item._searchRowLeft = x;
-        item._searchDelegateWidth = metrics.cardWidth;
-        item._searchCardHeight = metrics.cardHeight;
-        item._searchFocusBleed = metrics.focusBleed;
-        item._searchTileW = metrics.tileWidth;
-        item._searchTileH = metrics.tileHeight;
-        item._searchSidePad = metrics.sidePad;
-        item._searchTopPad = metrics.topPad;
-        out.push(item);
-        x += metrics.cardWidth + Number(layout && layout.spacing || 0);
-        maxHeight = Math.max(maxHeight, metrics.cardHeight);
-        maxBleed = Math.max(maxBleed, metrics.focusBleed);
-    }
-    return { items:out, cardHeight:maxHeight, edgePad:maxBleed + 14 };
-}
-
-function searchCardFallbackKind(item) {
-    var type = itemTypeLower(item);
-    if (type === "series") return "series";
-    if (type === "episode") return "episode";
-    if (type === "movie" || type === "video" || type === "musicvideo") return "movie";
-    if (type === "boxset") return "collection";
-    if (searchIsFolderType(type) || (item && item.IsFolder === true)) return "folder";
-    return "video";
-}
-
-/* ------------------------------------------------------------------------- */
 /* DTO compacts et métadonnées de fiches                                     */
 /* ------------------------------------------------------------------------- */
+
+// Projection légère pour les tags du header du navigateur.
+// Le cache et son cycle de vie restent dans moviepage.qml.
+function mergeHeaderItemDetails(base, detail) {
+    if (!base) return detail || null
+    if (!detail) return base
+    var out = {}
+    var k
+    for (k in base) out[k] = base[k]
+    for (k in detail) {
+        if (detail[k] !== undefined && detail[k] !== null)
+            out[k] = detail[k]
+    }
+    return out
+}
+
+function compactHeaderStreams(streams) {
+    var out = []
+    for (var i = 0; streams && i < streams.length; ++i) {
+        var st = streams[i]
+        if (!st) continue
+        out.push({
+            Type: st.Type || "", Codec: st.Codec || "", Width: Number(st.Width || 0),
+            Height: Number(st.Height || 0), ChannelLayout: st.ChannelLayout || "",
+            Channels: Number(st.Channels || 0), Language: st.Language || "",
+            DisplayTitle: st.DisplayTitle || "", Title: st.Title || "", Name: st.Name || "",
+            BitRate: Number(st.BitRate || 0), IsDefault: !!st.IsDefault
+        })
+    }
+    return out
+}
+
+function compactHeaderItemDetails(detail) {
+    if (!detail) return null
+    var out = ({
+        Id: detail.Id, Type: detail.Type, CollectionType: detail.CollectionType,
+        Name: detail.Name, RunTimeTicks: detail.RunTimeTicks,
+        RunTimeSeconds: detail.RunTimeSeconds, AverageRuntime: detail.AverageRuntime,
+        Runtime: detail.Runtime, OfficialRating: detail.OfficialRating,
+        CustomRating: detail.CustomRating, CommunityRating: detail.CommunityRating,
+        ProductionYear: detail.ProductionYear, PremiereDate: detail.PremiereDate,
+        Width: detail.Width, Height: detail.Height,
+        Bitrate: detail.Bitrate, Container: detail.Container
+    })
+    if (detail.MediaStreams !== undefined && detail.MediaStreams !== null)
+        out.MediaStreams = compactHeaderStreams(detail.MediaStreams)
+    return out
+}
 
 function collectionDetailsNeedHydration(item) {
     if (!item) return true;
@@ -1815,21 +1279,6 @@ function mergePersonMetadata(richPerson, userScopedPerson) {
     if (!rich.DeathDate && scoped.DeathDate) rich.DeathDate = scoped.DeathDate;
     if (!rich.EndDate && scoped.EndDate) rich.EndDate = scoped.EndDate;
     return rich;
-}
-
-function prepareHomeLatestGroups(groups, layout) {
-    groups = safeArray(groups);
-    var out = [];
-    for (var i = 0; i < groups.length; ++i) {
-        var group = groups[i];
-        if (!group || isKnownUnsupportedLibraryFolder(group)) continue;
-        var prepared = shallowCloneObject(group);
-        var sectionKind = isSeriesLibraryFolder(prepared) ? "latest-series" : "latest";
-        prepared._pgSectionKind = sectionKind;
-        prepared.items = prepareHomeRowMetrics(safeArray(group.items), sectionKind, layout);
-        out.push(prepared);
-    }
-    return out;
 }
 
 function navigationIdsForEpisodeLike(item) {
@@ -1945,166 +1394,456 @@ function personCreditsPageContains(items, railKind) {
     return false;
 }
 
-/* ===== Transformations séries/épisodes partagées ===== */
-function _catalogString(v) {
-    return (v === undefined || v === null) ? "" : (v + "");
+// Métadonnées d’épisode, chapitres et choix d’images de saison.
+// Les constructeurs d’URL reçoivent le bridge explicitement : aucun import réseau.
+function pad2(n) {
+    n = +n;
+    return (n < 10 ? "0" : "") + n;
 }
-function seriesYearFromDateLike(v) {
-    if (v === undefined || v === null) return "";
-    var s = _catalogString(v);
-    if (s.length >= 4) {
-        var y = parseInt(s.substr(0, 4), 10);
-        if (y > 1800 && y < 2500) return _catalogString(y);
-    }
-    var n = Number(v || 0);
-    return (n > 1800 && n < 2500) ? _catalogString(Math.floor(n)) : "";
+
+function chapterTitle(chapter) {
+    if (!chapter || chapter.Name === undefined || chapter.Name === null) return "";
+    return String(chapter.Name).replace(/^\s+|\s+$/g, "");
 }
-function seriesYearRangeParts(item, seasons, ended) {
-    var start = "", end = "";
-    if (item) {
-        start = seriesYearFromDateLike(item.ProductionYear) || seriesYearFromDateLike(item.PremiereDate || item.StartDate || item.DateCreated);
-        end = seriesYearFromDateLike(item.EndDate || item.DateEnded || item.EndYear);
+
+function chapterTimeLabel(chapter) {
+    var ticks = Number(chapter && chapter.StartPositionTicks || 0);
+    var sec = Math.max(0, Math.floor(ticks / 10000000));
+    var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    return h > 0 ? (h + ":" + pad2(m) + ":" + pad2(s)) : (m + ":" + pad2(s));
+}
+
+function chapterStartMs(chapter) {
+    return Math.max(0, Math.floor(Number(chapter && chapter.StartPositionTicks || 0) / 10000));
+}
+
+function chapterIndexForPosition(chapters, positionMs, toleranceMs) {
+    var list = chapters || [];
+    if (!list.length) return -1;
+    var pos = Math.max(0, Number(positionMs || 0));
+    var tolerance = Math.max(0, Number(toleranceMs || 0));
+    var idx = 0;
+    for (var i = 0; i < list.length; ++i) {
+        if (chapterStartMs(list[i]) <= pos + tolerance) idx = i;
+        else break;
     }
-    if (!end && ended && seasons && seasons.length) {
-        var best = 0;
-        for (var i = 0; i < seasons.length; i++) {
-            var season = seasons[i];
-            var y = seriesYearFromDateLike(season && (season.ProductionYear || season.PremiereDate));
-            var n = Number(y || 0);
-            if (n > best) best = n;
+    return Math.max(0, Math.min(list.length - 1, idx));
+}
+
+function chapterImageUrl(Jellyfin, serverUrl, itemId, chapters, index, width, height, quality) {
+    var idx = Number(index) | 0;
+    var list = chapters || [];
+    var chapter = (idx >= 0 && idx < list.length) ? list[idx] : null;
+    var imagePath = chapter ? String(chapter.ImagePath || chapter.imagePath || "") : "";
+    var imageTag = chapter ? String(chapter.ImageTag || chapter.imageTag || "") : "";
+    if (!itemId || idx < 0 || (!imagePath && !imageTag)) return "";
+    return Jellyfin.chapterImageUrl(serverUrl, itemId, idx, imageTag, {
+        maxWidth: Math.max(1, Number(width) | 0),
+        maxHeight: Math.max(1, Number(height) | 0),
+        quality: Math.max(1, Number(quality) | 0),
+        format: "jpg"
+    });
+}
+
+function formatRatingFr(n) {
+    if (n === undefined || n === null)
+        return "";
+    return Number(n).toLocaleString(Qt.locale(), "f", 1);
+}
+
+function _seasonBackdropBlur(v) {
+    var n = (v === undefined || v === null) ? 25 : (v | 0);
+    if (n < 1) n = 1;
+    if (n > 50) n = 50;
+    return n;
+}
+
+function _seasonBackdropImageUrl(Jellyfin, serverUrl, id, tag, w, h, q, blur) {
+    return Jellyfin.itemImageUrl(serverUrl, id, "Backdrop", tag, {
+        fillWidth: w, fillHeight: h, quality: q, blur: blur
+    });
+}
+
+function _seasonPrimaryImageUrl(Jellyfin, serverUrl, id, tag, w, h, q, blur) {
+    return Jellyfin.itemImageUrl(serverUrl, id, "Primary", tag, {
+        fillWidth: w, fillHeight: h, quality: q, blur: blur
+    });
+}
+
+function seasonBackdropUrl(Jellyfin, a, seasonItem, episodes, seriesId, seasonId, bgBlur, backdropQuality) {
+    var ctx = null; var serverUrl = ""; var blur = 13; var q = 70; var w = 1280, h = 720;
+    if (a && typeof a === "object") {
+        ctx = a;
+        serverUrl = ctx.serverUrl || "";
+        seasonItem = ctx.seasonItem || null;
+        episodes = ctx.episodes || null;
+        seriesId = ctx.seriesId || "";
+        seasonId = ctx.seasonId || "";
+        bgBlur = (ctx.bgBlur !== undefined) ? ctx.bgBlur : bgBlur;
+        backdropQuality = (ctx.backdropQuality !== undefined) ? ctx.backdropQuality : backdropQuality;
+    } else {
+        serverUrl = a || "";
+    }
+    var baseNoSlash = serverUrl;
+    if (!baseNoSlash)
+        return "";
+    blur = _seasonBackdropBlur(bgBlur);
+    q = (backdropQuality !== undefined && backdropQuality !== null) ? (backdropQuality | 0) : 70;
+    function firstTag(arr) { return (arr && arr.length) ? String(arr[0] || "") : ""; }
+    var parentId = ""; var parentTag = "";
+    if (seasonItem && seasonItem.ParentBackdropItemId
+        && seasonItem.ParentBackdropImageTags
+        && seasonItem.ParentBackdropImageTags.length > 0) {
+        parentId = seasonItem.ParentBackdropItemId;
+        parentTag = firstTag(seasonItem.ParentBackdropImageTags);
+    } else if (episodes && episodes.length > 0) {
+        var e0 = episodes[0];
+        if (e0 && e0.ParentBackdropItemId
+            && e0.ParentBackdropImageTags
+            && e0.ParentBackdropImageTags.length > 0) {
+            parentId = e0.ParentBackdropItemId;
+            parentTag = firstTag(e0.ParentBackdropImageTags);
         }
-        if (best > 0) end = _catalogString(best);
     }
-    return { start: start, end: end };
-}
-function _catalogNum(v, fallback) {
-    return (v === undefined || v === null) ? fallback : +v;
-}
-function sortSeasonsInPlace(items) {
-    if (!items || !items.sort) return items;
-    items.sort(function (a, b) {
-        var ia = _catalogNum(a && a.IndexNumber, 9999), ib = _catalogNum(b && b.IndexNumber, 9999);
-        if (ia === 0 && ib !== 0) return 1;
-        if (ib === 0 && ia !== 0) return -1;
-        return ia - ib;
-    });
-    return items;
-}
-function sortEpisodesInPlace(items) {
-    if (!items || !items.sort) return items;
-    items.sort(function (a, b) {
-        var sa = _catalogNum(a && a.ParentIndexNumber, 9999), sb = _catalogNum(b && b.ParentIndexNumber, 9999);
-        if (sa !== sb) return sa - sb;
-        var ea = _catalogNum(a && a.IndexNumber, 9999), eb = _catalogNum(b && b.IndexNumber, 9999);
-        return ea - eb;
-    });
-    return items;
-}
-function _catalogFlagTrue(v) {
-    if (v === true || v === 1) return true;
-    var s = String(v === undefined || v === null ? "" : v).toLowerCase();
-    return s === "true" || s === "1" || s === "yes" || s === "oui";
-}
-function episodeMissingReason(ep) {
-    if (!ep) return "null";
-    var loc = _catalogString(ep.LocationType || ep.locationType).toLowerCase();
-    if (loc === "virtual") return "LocationType=Virtual";
-    if (loc === "missing") return "LocationType=Missing";
-    if (loc === "placeholder") return "LocationType=Placeholder";
-    if (_catalogFlagTrue(ep.IsMissing) || _catalogFlagTrue(ep.Missing)) return "IsMissing/Missing=true";
-    if (_catalogFlagTrue(ep.IsVirtual) || _catalogFlagTrue(ep.Virtual) ||
-            _catalogFlagTrue(ep.IsVirtualItem) || _catalogFlagTrue(ep.VirtualItem)) return "IsVirtual=true";
-    if (_catalogFlagTrue(ep.IsVirtualUnaired) || _catalogFlagTrue(ep.VirtualUnaired)) return "IsVirtualUnaired=true";
-    if (_catalogFlagTrue(ep.IsPlaceholder) || _catalogFlagTrue(ep.IsPlaceHolder) || _catalogFlagTrue(ep.Placeholder)) return "IsPlaceholder=true";
-    if (_catalogFlagTrue(ep.IsUnaired)) return "IsUnaired=true";
+    if (parentId)
+        return _seasonBackdropImageUrl(Jellyfin, baseNoSlash, parentId, parentTag, w, h, q, blur);
+    if (seriesId)
+        return _seasonBackdropImageUrl(Jellyfin, baseNoSlash, seriesId, "", w, h, q, blur);
+    if (seasonItem && seasonItem.Id) {
+        if (seasonItem.BackdropImageTags && seasonItem.BackdropImageTags.length > 0)
+            return _seasonBackdropImageUrl(Jellyfin, baseNoSlash, seasonItem.Id, firstTag(seasonItem.BackdropImageTags), w, h, q, blur);
+        if (seasonItem.ImageTags && seasonItem.ImageTags.Primary)
+            return _seasonPrimaryImageUrl(Jellyfin, baseNoSlash, seasonItem.Id, seasonItem.ImageTags.Primary, w, h, q, blur);
+    }
+    if (seasonId)
+        return _seasonBackdropImageUrl(Jellyfin, baseNoSlash, seasonId, "", w, h, q, blur);
     return "";
 }
-function episodeHasPlayableHints(ep) {
-    if (!ep) return false;
-    var loc = _catalogString(ep.LocationType || ep.locationType).toLowerCase();
-    if (loc === "filesystem" || loc === "file system") return true;
-    try { if (ep.MediaSources && ep.MediaSources.length > 0) return true; } catch (e) {}
+
+function episodeCode(ep, seasonItem) {
+    if (!ep)
+        return "";
+    var s = (ep.ParentIndexNumber !== null && ep.ParentIndexNumber !== undefined)
+          ? ep.ParentIndexNumber
+          : ((seasonItem && seasonItem.IndexNumber !== null && seasonItem.IndexNumber !== undefined)
+                ? seasonItem.IndexNumber
+                : "");
+    var e = (ep.IndexNumber !== null && ep.IndexNumber !== undefined)
+          ? ep.IndexNumber
+          : "";
+    if (s === "" && e === "")
+        return "";
+    return "S" + (s === "" ? "?" : s) + ":" + "E" + (e === "" ? "?" : e);
+}
+
+function _episodeNameLooksLikeFilename(name) {
+    if (!name)
+        return false;
+    var n = String(name);
+    if (/\.(mkv|mp4|avi|mov|wmv|m4v|flv|ts|m2ts)$/i.test(n))
+        return true;
+    return (n.indexOf(".") >= 0 && n.split(".").length > 2) || /[_-]\d{3,}/.test(n);
+}
+
+function episodeDisplayTitle(ep) {
+    if (!ep)
+        return "";
+
+    var name = (ep.Name !== undefined && ep.Name !== null)
+             ? String(ep.Name).replace(/^\s+|\s+$/g, "")
+             : "";
+    var originalTitle = (ep.OriginalTitle !== undefined && ep.OriginalTitle !== null)
+                      ? String(ep.OriginalTitle).replace(/^\s+|\s+$/g, "")
+                      : "";
+
+    // Préférer les métadonnées propres sans jamais jeter un titre Jellyfin valide.
+    if (name.length && !_episodeNameLooksLikeFilename(name))
+        return name;
+    if (originalTitle.length && !_episodeNameLooksLikeFilename(originalTitle))
+        return originalTitle;
+
+    // Un Name imparfait reste plus informatif que le fallback générique "Épisode N".
+    if (name.length)
+        return name;
+    if (originalTitle.length)
+        return originalTitle;
+
+    if (ep.IndexNumber !== null && ep.IndexNumber !== undefined)
+        return "Épisode " + ep.IndexNumber;
+
+    return "Épisode";
+}
+
+function _seasonSeriesId(seriesId, selectedEpisode, seasonItem) {
+    var sid = String(seriesId || "");
+    if (!sid && selectedEpisode) {
+        try {
+            if (selectedEpisode.SeriesId) sid = String(selectedEpisode.SeriesId);
+        } catch (e0) {}
+    }
+    if (!sid && seasonItem) {
+        try {
+            if (seasonItem.SeriesId) sid = String(seasonItem.SeriesId);
+        } catch (e1) {}
+    }
+    if (!sid && seasonItem) {
+        try {
+            if (seasonItem.Id) sid = String(seasonItem.Id);
+        } catch (e2) {}
+    }
+    return sid;
+}
+
+function _seasonSeriesPrimaryTag(selectedEpisode, seasonItem, ctxSeriesItem) {
     try {
-        var ms = ep.MediaStreams || [];
-        for (var i = 0; i < ms.length; i++) {
-            var stream = ms[i] || {};
-            var typ = _catalogString(stream.Type || stream.type).toLowerCase();
-            if (typ === "video" || typ === "audio") return true;
-        }
+        if (ctxSeriesItem && ctxSeriesItem.ImageTags && ctxSeriesItem.ImageTags.Primary)
+            return String(ctxSeriesItem.ImageTags.Primary);
+    } catch (e0) {}
+    try {
+        if (seasonItem && seasonItem.SeriesPrimaryImageTag)
+            return String(seasonItem.SeriesPrimaryImageTag);
+    } catch (e1) {}
+    try {
+        if (selectedEpisode && selectedEpisode.SeriesPrimaryImageTag)
+            return String(selectedEpisode.SeriesPrimaryImageTag);
     } catch (e2) {}
-    return Number(ep.RunTimeTicks || ep.RuntimeTicks || 0) > 0;
+    try {
+        if (seasonItem && seasonItem.ImageTags && seasonItem.ImageTags.Primary && seasonItem.Type === "Series")
+            return String(seasonItem.ImageTags.Primary);
+    } catch (e3) {}
+    return "";
 }
-function episodeIsPlayableForPlaylist(ep) {
-    if (!ep || !ep.Id) return false;
-    var typ = String(ep.Type || "").toLowerCase();
-    if (typ && typ !== "episode") return false;
-    if (episodeMissingReason(ep)) return false;
-    var hasSources = false, hasPath = false;
-    try { hasSources = typeof ep.MediaSources !== "undefined"; } catch(e0) {}
-    try { hasPath = typeof ep.Path !== "undefined"; } catch(e1) {}
-    if (hasSources && hasPath && (!(ep.MediaSources || []).length && !String(ep.Path || ""))) return false;
-    return true;
+
+function _seasonSeriesPosterUrl(Jellyfin, serverUrl, seriesId, tag, w, h, q) {
+    return Jellyfin.itemImageUrl(serverUrl, seriesId, "Primary", tag, {
+        format: "jpg", quality: q, fillWidth: w, fillHeight: h
+    });
 }
-function shuffleEpisodeId(ep) {
-    return ep ? String(ep.Id || ep.ItemId || ep.id || "") : "";
-}
-function episodePlayableForShuffle(ep) {
-    return !!(shuffleEpisodeId(ep) && !episodeMissingReason(ep) && episodeHasPlayableHints(ep));
-}
-function ownedShuffleCandidates(items, preferUnplayed) {
-    var source = items || [], out = [];
-    for (var i = 0; i < source.length; ++i) {
-        var episode = source[i];
-        if (!episodePlayableForShuffle(episode)) continue;
-        if (preferUnplayed === true && episode.UserData && episode.UserData.Played === true) continue;
-        out.push(episode);
+
+function seasonPosterFallbackUrl(Jellyfin, a, seriesId, selectedEpisode, seasonItem,
+                                       cardW, cardH, posterRequestScale, posterRequestQuality) {
+    var ctx = null; var serverUrl = ""; var episodes = null;
+    if (a && typeof a === "object") {
+        ctx = a;
+        serverUrl = ctx.serverUrl || "";
+        seriesId = ctx.seriesId || seriesId || "";
+        selectedEpisode = ctx.selectedEpisode || selectedEpisode || null;
+        seasonItem = ctx.seasonItem || seasonItem || null;
+        cardW = ctx.episodeCardW || ctx.cardW || cardW || 360;
+        cardH = ctx.episodeCardH || ctx.cardH || cardH || 240;
+        posterRequestScale = (ctx.posterRequestScale !== undefined) ? ctx.posterRequestScale : posterRequestScale;
+        posterRequestQuality = (ctx.posterRequestQuality !== undefined) ? ctx.posterRequestQuality : posterRequestQuality;
+        episodes = ctx.episodes || null;
+    } else {
+        serverUrl = a || "";
     }
-    return out;
+    if (!serverUrl)
+        return "";
+    if (!selectedEpisode && episodes && episodes.length) selectedEpisode = episodes[0];
+    var sid = _seasonSeriesId(seriesId, selectedEpisode, seasonItem);
+    if (!sid)
+        return "";
+    var base = serverUrl;
+    if (!base)
+        return "";
+    var scale = (posterRequestScale !== undefined && posterRequestScale !== null) ? Number(posterRequestScale) : 1.0;
+    if (!(scale > 0)) scale = 1.0;
+    var reqW = Math.max(200, Math.round((cardW || 360) * scale)); var reqH = Math.max(140, Math.round((cardH || 240) * scale)); var q = (posterRequestQuality !== undefined && posterRequestQuality !== null) ? (posterRequestQuality | 0) : 72;
+    var ctxSeriesItem = null;
+    try { if (ctx && ctx.seriesItem) ctxSeriesItem = ctx.seriesItem; } catch (e0) { ctxSeriesItem = null; }
+    var tag = _seasonSeriesPrimaryTag(selectedEpisode, seasonItem, ctxSeriesItem);
+    return _seasonSeriesPosterUrl(Jellyfin, base, sid, tag, reqW, reqH, q);
 }
-function pickOwnedShuffleEpisode(items, preferUnplayed) {
-    var pool = ownedShuffleCandidates(items, preferUnplayed === true);
-    if (!pool.length && preferUnplayed === true) pool = ownedShuffleCandidates(items, false);
-    if (!pool.length) return null;
-    var index = Math.max(0, Math.min(pool.length - 1, Math.floor(Math.random() * pool.length)));
-    return pool[index];
-}
-function normalizeIdList(raw) {
-    var out = [], seen = {};
-    raw = raw || [];
-    for (var i = 0; i < raw.length; i++) {
-        var id = String(raw[i] || "");
-        if (!id || seen[id]) continue;
-        seen[id] = 1;
-        out.push(id);
+
+function _episodeStreamTags(it) {
+    if (!it)
+        return [];
+    var ms = (it.MediaStreams || []); var v = null; var aud = [];
+    var i;
+    for (i = 0; i < ms.length; i++) {
+        var s = ms[i];
+        if (s && s.Type === "Video" && !v)
+            v = s;
+        if (s && s.Type === "Audio")
+            aud.push(s);
     }
-    return out;
-}
-function episodeIdListFromItems(items, preferredOrderIds) {
-    items = items || [];
-    preferredOrderIds = preferredOrderIds || [];
-    var byId = {}, out = [], seen = {}, i;
-    for (i = 0; i < items.length; i++) {
-        if (items[i] && items[i].Id) byId[String(items[i].Id)] = items[i];
-    }
-    if (preferredOrderIds.length) {
-        for (i = 0; i < preferredOrderIds.length; i++) {
-            var wanted = String(preferredOrderIds[i] || ""), item = byId[wanted];
-            if (wanted && !seen[wanted] && item && episodeIsPlayableForPlaylist(item)) {
-                seen[wanted] = 1;
-                out.push(wanted);
-            }
+    var tags = []; var hasSub = false;
+    if (it.SubtitleFiles && it.SubtitleFiles.length)
+        hasSub = true;
+    else {
+        for (i = 0; i < ms.length; i++) {
+            if (ms[i] && ms[i].Type === "Subtitle") { hasSub = true; break; }
         }
-        return out;
     }
-    for (i = 0; i < items.length; i++) {
-        var ep = items[i], id = ep && ep.Id ? String(ep.Id) : "";
-        if (!id || seen[id] || !episodeIsPlayableForPlaylist(ep)) continue;
-        seen[id] = 1;
-        out.push(id);
+    if (hasSub)
+        tags.push("ST");
+    if (v) {
+        if (v.Width && v.Height) {
+            var hh = v.Height;
+            if (hh >= 2160)      tags.push("2160p");
+            else if (hh >= 1440) tags.push("1440p");
+            else if (hh >= 1080) tags.push("1080p");
+            else if (hh >= 720)  tags.push("720p");
+            else                 tags.push(hh + "p");
+        }
+        if (v.Codec)
+            tags.push(String(v.Codec).toUpperCase());
+        if (v.VideoRange)
+            tags.push(String(v.VideoRange).toUpperCase());
     }
+    if (aud.length > 0) {
+        var a = aud[0];
+        if (a.Codec)
+            tags.push(String(a.Codec).toUpperCase());
+        if (a.ChannelLayout)
+            tags.push(String(a.ChannelLayout).toUpperCase());
+        else if (a.Channels) {
+            if (a.Channels >= 6)       tags.push("5.1");
+            else if (a.Channels === 2) tags.push("STEREO");
+        }
+    }
+    if (it.Container) {
+        var c = String(it.Container).toUpperCase(); var found = false;
+        for (i = 0; i < tags.length; i++) {
+            if (tags[i] === c) { found = true; break; }
+        }
+        if (!found)
+            tags.push(c);
+    }
+    return tags;
+}
+
+function seasonLogoUrl(Jellyfin, serverUrl, seriesId, selectedEpisode, seasonItem,
+                              maxW, seriesLogoMaxW) {
+    var sid = seriesId ||
+              (selectedEpisode &&
+                (selectedEpisode.SeriesId ||
+                 (selectedEpisode.SeriesPrimaryImageTag && selectedEpisode.SeriesId))) ||
+              (seasonItem &&
+                (seasonItem.SeriesId || seasonItem.Id)) ||
+              "";
+    if (!serverUrl || !sid)
+        return "";
+    var baseW = seriesLogoMaxW || 320;
+    var w = Math.max(64, Math.round((maxW || baseW) * 2));
+    return Jellyfin.itemImageUrl(serverUrl, sid, "Logo", "", { quality: 85, maxWidth: w });
+}
+
+function episodeOverviewPayload(Jellyfin, ep, serverUrl) {
+    if (!ep || !ep.Overview)
+        return null;
+    var posterUrl = "";
+    if (serverUrl && ep.ImageTags && ep.ImageTags.Primary) {
+        posterUrl = Jellyfin.itemImageUrl(serverUrl, ep.Id, "Primary", ep.ImageTags.Primary,
+                                           { quality: 88 });
+    }
+    return {
+        posterUrl: posterUrl,
+        overview: ep.Overview
+    };
+}
+
+function _episodeTagFold(v) {
+    var s = String(v || "").toLowerCase();
+    s = s.replace(/[àáâãäåā]/g, "a");
+    s = s.replace(/[ç]/g, "c");
+    s = s.replace(/[èéêëēėę]/g, "e");
+    s = s.replace(/[îïíīįì]/g, "i");
+    s = s.replace(/[ôöòóõøō]/g, "o");
+    s = s.replace(/[ùúûüū]/g, "u");
+    s = s.replace(/[ÿ]/g, "y");
+    s = s.replace(/\s+/g, " ");
+    s = s.replace(/^\s+/, "").replace(/\s+$/, "");
+    return s;
+}
+
+function _episodeStreamType(st) {
+    if (!st) return "";
+    if (st.Type === 0) return "Audio";
+    if (st.Type === 1) return "Video";
+    if (st.Type === 2) return "Subtitle";
+    var t = String(st.Type || st.type || "").toLowerCase();
+    if (t === "audio") return "Audio";
+    if (t === "video") return "Video";
+    if (t === "subtitle") return "Subtitle";
+    return "";
+}
+
+function _episodeTagHasAny(s, arr) {
+    for (var i = 0; i < arr.length; i++) {
+        if (s.indexOf(arr[i]) >= 0) return true;
+    }
+    return false;
+}
+
+function _episodeStreamLangCode(st) {
+    var raw = _episodeTagFold((st && (st.Language || st.language)) || ""); var blob = _episodeTagFold((st && (st.DisplayTitle || st.Title || st.displayTitle || st.title)) || "");
+    if (raw === "fr" || raw === "fra" || raw === "fre" || raw === "french" || raw === "francais" || _episodeTagHasAny(blob, ["francais", "french"])) return "FR";
+    if (raw === "en" || raw === "eng" || raw === "english" || _episodeTagHasAny(blob, ["anglais", "english"])) return "EN";
+    if (raw === "ja" || raw === "jp" || raw === "jpn" || raw === "japanese" || _episodeTagHasAny(blob, ["japonais", "japanese"])) return "JP";
+    if (raw === "es" || raw === "spa" || raw === "esp" || raw === "spanish" || _episodeTagHasAny(blob, ["espagnol", "spanish"])) return "ES";
+    if (raw === "de" || raw === "ger" || raw === "deu" || raw === "german" || _episodeTagHasAny(blob, ["allemand", "german"])) return "DE";
+    if (raw === "it" || raw === "ita" || raw === "italian" || _episodeTagHasAny(blob, ["italien", "italian"])) return "IT";
+    if (raw === "pt" || raw === "por" || raw === "portuguese" || _episodeTagHasAny(blob, ["portugais", "portuguese"])) return "PT";
+    if (raw === "ko" || raw === "kor" || raw === "korean" || _episodeTagHasAny(blob, ["coreen", "korean"])) return "KO";
+    if (raw === "zh" || raw === "chi" || raw === "zho" || raw === "chinese" || _episodeTagHasAny(blob, ["chinois", "chinese"])) return "ZH";
+    if (raw === "ru" || raw === "rus" || raw === "russian" || _episodeTagHasAny(blob, ["russe", "russian"])) return "RU";
+    if (raw.length >= 2) return raw.substr(0, 2).toUpperCase();
+    return "";
+}
+
+function _episodeTagPushUnique(arr, value) {
+    value = String(value || "");
+    if (!value.length) return;
+    for (var i = 0; i < arr.length; i++) {
+        if (arr[i] === value) return;
+    }
+    arr.push(value);
+}
+
+function _episodeStreamLangListTag(src, streamType, prefix) {
+    if (!src || !src.MediaStreams) return "";
+    var langs = []; var count = 0;
+    for (var i = 0; i < src.MediaStreams.length; i++) {
+        var st = src.MediaStreams[i];
+        if (!st || _episodeStreamType(st) !== streamType) continue;
+        count++;
+        _episodeTagPushUnique(langs, _episodeStreamLangCode(st));
+    }
+    if (count <= 0) return "";
+    if (langs.length > 0) return prefix + " " + langs.join(" / ");
+    return prefix + " " + count + " piste" + (count > 1 ? "s" : "");
+}
+
+function _isGenericEpisodeTrackTag(tag) {
+    var s = _episodeTagFold(tag);
+    if (!s || /^\+[0-9]+$/.test(s)) return true;
+    if (s === "st" || s === "sub" || s === "subs" || s === "subtitle" || s === "subtitles" || s === "sous titres" || s === "sous-titres") return true;
+    if (s === "multi" || s === "multi audio" || s === "multiaudio" || s === "audio multi") return true;
+    return false;
+}
+
+function _episodeLanguageTags(src, baseTags) {
+    var out = [];
+    baseTags = baseTags || [];
+    for (var i = 0; i < baseTags.length; i++) {
+        var tag = String(baseTags[i] || "");
+        if (!_isGenericEpisodeTrackTag(tag)) _episodeTagPushUnique(out, tag);
+    }
+    var audioTag = _episodeStreamLangListTag(src, "Audio", "AUDIO"); var subTag = _episodeStreamLangListTag(src, "Subtitle", "ST");
+    if (audioTag.length > 0) _episodeTagPushUnique(out, audioTag);
+    if (subTag.length > 0) _episodeTagPushUnique(out, subTag);
     return out;
 }
-function compactEpisodeDetailsForCache(details) {
+
+function episodeTechChips(src) {
+    if (!src) return [];
+    var t = [];
+    try { t = _episodeStreamTags(src) || []; } catch (e0) { t = []; }
+    return _episodeLanguageTags(src, t);
+}
+
+function compactEpisodeDetails(details) {
     if (!details) return null;
     var streams = [], sourceStreams = details.MediaStreams || [];
     for (var i = 0; i < sourceStreams.length; ++i) {
@@ -2138,60 +1877,4 @@ function compactEpisodeDetailsForCache(details) {
         SubtitleFiles: (details.SubtitleFiles && details.SubtitleFiles.length) ? [true] : [],
         MediaStreams: streams
     };
-}
-function episodeSliceWindow(items, centerIndex, requestedCount) {
-    var arr = items || [], length = arr.length;
-    if (!length) return { start:0, items:[] };
-    var count = Math.max(4, Number(requestedCount) | 0);
-    if (length <= count) return { start:0, items:arr };
-    var center = Math.max(0, Math.min(Number(centerIndex) | 0, length - 1));
-    var start = Math.max(0, center - Math.floor(count / 2));
-    var end = start + count;
-    if (end > length) { end = length; start = Math.max(0, end - count); }
-    return { start:start, items:arr.slice(start, end) };
-}
-function isUnknownSeasonEpisode(e) {
-    if (!e)
-        return true;
-    var sNum = (e.ParentIndexNumber !== undefined && e.ParentIndexNumber !== null)
-             ? e.ParentIndexNumber
-             : null;
-    return ((!e.SeasonId || e.SeasonId === "") || (sNum === null)) && sNum !== 0;
-}
-function sortUnknownSeasonEpisodesInPlace(items) {
-    if (!items || !items.sort) return items;
-    items.sort(function(a, b) {
-        var sa = (a && a.ParentIndexNumber !== null && a.ParentIndexNumber !== undefined) ? a.ParentIndexNumber : -1;
-        var sb = (b && b.ParentIndexNumber !== null && b.ParentIndexNumber !== undefined) ? b.ParentIndexNumber : -1;
-        if (sa !== sb) return sa - sb;
-        var ea = (a && a.IndexNumber !== null && a.IndexNumber !== undefined) ? a.IndexNumber : 999999;
-        var eb = (b && b.IndexNumber !== null && b.IndexNumber !== undefined) ? b.IndexNumber : 999999;
-        if (ea !== eb) return ea - eb;
-        var ad = a && a.PremiereDate ? String(a.PremiereDate) : "";
-        var bd = b && b.PremiereDate ? String(b.PremiereDate) : "";
-        return ad < bd ? -1 : (ad > bd ? 1 : 0);
-    });
-    return items;
-}
-function seriesRuntimeTicksFallback(ticks) {
-    var t = Number(ticks || 0), maxEpisodeLike = 4 * 60 * 60 * 10000000;
-    return (t > 0 && t <= maxEpisodeLike) ? Math.round(t) : 0;
-}
-/* Traitements purs partagés par le bridge et PlayerOverlay. */
-function shuffledCopy(items) {
-    var out = (items || []).slice(0);
-    for (var i = out.length - 1; i > 0; i--) {
-        var j = Math.floor(Math.random() * (i + 1));
-        var tmp = out[i]; out[i] = out[j]; out[j] = tmp;
-    }
-    return out;
-}
-function averageEpisodeRuntimeTicks(items, fallbackTicks) {
-    var total = 0, count = 0;
-    items = items || [];
-    for (var i = 0; i < items.length; i++) {
-        var t = Number((items[i] && (items[i].RunTimeTicks || items[i].RuntimeTicks)) || 0);
-        if (isFinite(t) && t > 0) { total += t; count++; }
-    }
-    return count > 0 ? Math.round(total / count) : seriesRuntimeTicksFallback(fallbackTicks);
 }

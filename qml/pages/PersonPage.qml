@@ -1,11 +1,12 @@
 // qml/pages/PersonPage.qml Fiche personne Jellyfin dédiée — QtQuick 2.15, aucun QtQuick Controls. - Détails user-scoped pour récupérer UserData.IsFavorite - Favori via GlassCircleButton + Jellyfin.setFavorite() - Filmographie locale uniquement via /Items?PersonIds=... - Rails Films / Séries TV / Épisodes liés à la personne, légers et virtualisés.
 import QtQuick 2.15
+import "../js/NavigationContext.js" as NavContext
 import QtGraphicalEffects 1.15
 import "." as Pages
 import "../components" as Components
 import "../js/jellyfinBridge.js" as Jellyfin
-import "../js/SeasonUtils.js" as SeasonUtils
 import "../js/MediaCatalog.js" as MediaCatalog
+import "../js/MediaRailLayout.js" as MediaRailLayout
 FocusScope {
     id: personPage
     width: parent ? parent.width : 1280
@@ -155,33 +156,28 @@ FocusScope {
         return 1.0 - t
     }
 
-    function _sharedNavApi(){ try { return shared && shared.__redefinNavApi ? shared.__redefinNavApi : null } catch(e) { return null } }
-    function _hydrateSensitiveContextFromShared(){
-        var api = _sharedNavApi()
-        return api && api.hydrate ? api.hydrate(personPage, false, 0, false) : false
+    function _hydrateSensitiveContextFromShared() {
+        return NavContext.hydrate(shared, personPage, false, 0, false)
     }
-    function _storeSensitiveNavContext(){
-        var api = _sharedNavApi()
-        return api && api.storeTarget ? api.storeTarget(personPage) : false
+    function _storeSensitiveNavContext() {
+        return NavContext.storeTarget(shared, personPage)
     }
-
-    function _navRoute(page, params){
-        var api = _sharedNavApi()
-        return api && api.route ? api.route(personPage, page, params || ({})) : (page + "?ctx=1")
+    function _navRoute(page, params) {
+        return NavContext.route(shared, personPage, page, params)
     }
 
     function _detailReturnContext(){
         try {
-            if (!shared || !shared.__redefinPersonReturnContext)
+            if (!shared || !NavContext.personReturn(shared))
                 return null
-            var ctx = shared.__redefinPersonReturnContext
+            var ctx = NavContext.personReturn(shared)
             var personId = String(ctx.personId || "")
             var ts = Number(ctx.ts || 0)
             // Protection anti-contexte ancien ou provenant d'une autre PersonPage.
             if (!itemId || !personId || personId !== String(itemId))
                 return null
             if (ts > 0 && (Date.now() - ts) > 6 * 60 * 60 * 1000) {
-                shared.__redefinPersonReturnContext = null
+                NavContext.clearPersonReturn(shared)
                 return null
             }
             return ctx
@@ -198,7 +194,7 @@ FocusScope {
             if (!detailId.length)
                 return false
             // Marker frais, consommé par la fiche Movie/Serie au moment exact du retour. Pas de refresh forcé : si la fiche chaude est encore valide, elle est simplement révélée proprement après le passage du debounce.
-            shared.__redefinDetailReturnRefresh = ({
+            NavContext.setDetailReturnRefresh(shared, ({
                 itemId: detailId,
                 scope: "person",
                 detailKind: String(ctx.detailKind || ""),
@@ -208,8 +204,8 @@ FocusScope {
                 returnCastViewportY: (ctx.returnCastViewportY !== undefined && ctx.returnCastViewportY !== null) ? Number(ctx.returnCastViewportY) : null,
                 forceRefresh: false,
                 ts: Date.now()
-            })
-            shared.__redefinPersonReturnContext = null
+            }))
+            NavContext.clearPersonReturn(shared)
             return true
         } catch(e) {
             return false
@@ -962,8 +958,8 @@ FocusScope {
         if (seasonId.length && seriesId.length) {
             // Navigation volontaire vers un épisode depuis PersonPage : le snapshot de retour vers GuestPage ne doit pas reprendre le focus après que seasonpage a appliqué preselectEpisodeId.
             try {
-                if (shared && shared.__redefinSeasonGuestReturn)
-                    shared.__redefinSeasonGuestReturn = null
+                if (shared && NavContext.seasonGuestReturn(shared))
+                    NavContext.clearSeasonGuestReturn(shared)
             } catch(eGuestReturn) {}
             requestNavigation(_navRoute("seasonpage.qml", {
                 seasonId: seasonId,
@@ -999,16 +995,8 @@ FocusScope {
             requestNavigation("LoginPage.qml?ctx=1")
     }
     function ensureItemVisible(target, margin){
-        if (!target || !rootFlick) return
-        var m = margin === undefined ? 24 : margin
-        var p = target.mapToItem(rootFlick.contentItem, 0, 0)
-        var top = p.y - m
-        var bot = p.y + target.height + m
-        var viewTop = rootFlick.contentY
-        var viewBot = viewTop + rootFlick.height
-        var maxY = Math.max(0, rootFlick.contentHeight - rootFlick.height)
-        if (top < viewTop) rootFlick.scrollToY(Math.max(0, top), true)
-        else if (bot > viewBot) rootFlick.scrollToY(Math.max(0, Math.min(maxY, bot - rootFlick.height)), true)
+        var safeMargin = margin === undefined ? 24 : margin
+        MediaRailLayout.ensureItemVisible(rootFlick, target, safeMargin, true)
     }
 
     function _cancelHudFocusPending(){
@@ -1292,7 +1280,6 @@ FocusScope {
                         textFormat: Text.PlainText
                     }
                     Text {
-                        id: birthAgeText
                         width: parent.width
                         height: visible ? Math.max(26, implicitHeight) : 0
                         visible: text.length > 0
@@ -1456,7 +1443,6 @@ FocusScope {
                         }
                     }
                     Item {
-                        id: portraitFrame
                         anchors.fill: parent
                         clip: true
                         Rectangle { anchors.fill: parent; color: "#252936" }
@@ -1476,7 +1462,6 @@ FocusScope {
                             }
                         }
                         Image {
-                            id: personPortraitHq
                             anchors.fill: parent
                             source: (!personPage.modalOpen && portraitFocus.activeFocus && !(rootFlick && (rootFlick.moving || rootFlick.dragging || rootFlick.flicking))
                                      && personPortrait.status === Image.Ready
@@ -1529,7 +1514,6 @@ FocusScope {
                 }
             }
             Item {
-                id: creditsStatus
                 width: parent.width
                 height: creditsLoading ? 44 : 0
                 visible: creditsLoading
@@ -1922,7 +1906,6 @@ FocusScope {
                                 }
                             }
                             Image {
-                                id: episodeImageHq
                                 anchors.fill: parent
                                 source: (!personPage.modalOpen && episodeCard.selected && episodeCard.ownerView
                                          && !(episodeCard.ownerView.moving || episodeCard.ownerView.dragging || episodeCard.ownerView.flicking)
@@ -2023,7 +2006,7 @@ FocusScope {
                             Text {
                                 id: episodeTitleText
                                 textFormat: Text.PlainText
-                                text: SeasonUtils.displayEpisodeTitle(modelData)
+                                text: MediaCatalog.episodeDisplayTitle(modelData)
                                 x: 0
                                 y: Math.round((episodeTitleClip.height - height) / 2) - 1
                                 color: episodeTitleClip.focusHot ? "#FFFFFF" : "#E0E3EC"
@@ -2198,7 +2181,6 @@ FocusScope {
                                 wrapMode: ShaderEffectSource.ClampToEdge
                             }
                             Timer {
-                                id: episodeMetaTexturePulse
                                 interval: 140
                                 repeat: true
                                 running: episodeMetaClip.maskActive
@@ -2544,7 +2526,6 @@ FocusScope {
                     wrapMode: ShaderEffectSource.ClampToEdge
                 }
                 Timer {
-                    id: mediaTitleTexturePulse
                     interval: 140
                     repeat: true
                     running: mediaTitleClip.maskActive
@@ -2736,7 +2717,6 @@ FocusScope {
         focus: visible
         Rectangle { anchors.fill: parent; color: "#F20A0B10" }
         Rectangle {
-            id: bioDialog
             anchors.centerIn: parent
             width: Math.min(parent.width - 120, 1040)
             height: Math.min(parent.height - 80, 610)
@@ -2809,7 +2789,6 @@ FocusScope {
                 width: 8
                 visible: bioFlick.contentHeight > bioFlick.height + 2
                 Rectangle {
-                    id: bioScrollTrack
                     anchors.horizontalCenter: parent.horizontalCenter
                     width: 4
                     height: parent.height
@@ -2818,7 +2797,6 @@ FocusScope {
                     antialiasing: false
                 }
                 Rectangle {
-                    id: bioScrollThumb
                     anchors.horizontalCenter: parent.horizontalCenter
                     width: 6
                     radius: 3

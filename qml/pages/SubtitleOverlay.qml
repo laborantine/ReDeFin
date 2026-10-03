@@ -31,7 +31,6 @@ Item {
     // Marges quand le composant est utilisé en mode fullscreen.
     // Objectif : bas écran, proche rendu serveur/remux.
     property int   padNoControls: -100
-    property int   padWithControls: -100
 
     // + => plus bas, - => plus haut.
     // Valeur par défaut volontairement plus agressive pour descendre les sous-titres.
@@ -254,7 +253,6 @@ Item {
 
     // ===== Sous-titre : contour manuel multi-couches =====
     Item {
-        id: subtitleLayer
         visible: root._subtitleVisible
         width: root.width
         height: Math.max(1, mainText.paintedHeight + (root._outlinePad * 2))

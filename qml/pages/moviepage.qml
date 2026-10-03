@@ -4,12 +4,15 @@
 // Pagination/restauration, D-Pad, backdrop et mode MusicVideo 16:9 conservés.
 
 import QtQuick 2.15
+import "../js/NavigationContext.js" as NavContext
 import QtGraphicalEffects 1.15
 
 import "../components" as Components
 import "." as Pages
 import "../js/jellyfinBridge.js" as Jellyfin
 import "../js/MediaCatalog.js" as MediaCatalog
+import "../js/MediaBrowser.js" as MediaBrowser
+import "../js/MediaRailLayout.js" as MediaRailLayout
 import "../js/UserStore.js" as UserStore
 Item {
     id: moviepage
@@ -51,7 +54,7 @@ Item {
     /* ========= Données ========= */
     property var  folderItems: []
     property var  _rawFolderItems: []
-    property var  sortOptionLabels: MediaCatalog.folderSortOptionLabels()
+    property var  sortOptionLabels: MediaBrowser.folderSortOptionLabels()
     property int  sortMode: 0
     property bool ready: false
     property bool loadingItems: false
@@ -149,7 +152,7 @@ Item {
 
     readonly property real frameWidth: 2.0
     function topPadFor(h) {
-        return Math.ceil(h * (focusScale - 1)) + focusLiftPx + Math.ceil(frameWidth) + 2
+        return MediaRailLayout.focusTopPad(h, focusScale, focusLiftPx, frameWidth)
     }
 
     readonly property int  gridCellW: posterW + focusPad * 2
@@ -206,20 +209,14 @@ Item {
     signal requestBackToMenu()
     signal requestPersonalViewer(int index)
 
-    function _sharedNavApi(){ try { return shared && shared.__redefinNavApi ? shared.__redefinNavApi : null } catch(e) { return null } }
-    function _hydrateSensitiveContextFromShared(){
-        var api = _sharedNavApi()
-        return api && api.hydrate ? api.hydrate(moviepage, false, 0, false) : false
+    function _hydrateSensitiveContextFromShared() {
+        return NavContext.hydrate(shared, moviepage, false, 0, false)
     }
-
-    function _storeSensitiveNavContext(){
-        var api = _sharedNavApi()
-        return api && api.storeTarget ? api.storeTarget(moviepage) : false
+    function _storeSensitiveNavContext() {
+        return NavContext.storeTarget(shared, moviepage)
     }
-
-    function _navRoute(page, params){
-        var api = _sharedNavApi()
-        return api && api.route ? api.route(moviepage, page, params || ({})) : (page + "?ctx=1")
+    function _navRoute(page, params) {
+        return NavContext.route(shared, moviepage, page, params)
     }
 
 
@@ -563,17 +560,17 @@ Item {
     }
 
     function _restoreSortFromShared() {
-        sortMode = MediaCatalog.browserResolvedSortMode(_storedSortMode(), _readSharedState(), sortOptionLabels.length, sortMode)
+        sortMode = MediaBrowser.browserResolvedSortMode(_storedSortMode(), _readSharedState(), sortOptionLabels.length, sortMode)
     }
 
-    function _selectedItemId() { return MediaCatalog.browserSelectedItemId(folderItems, grid ? grid.currentIndex : -1) }
+    function _selectedItemId() { return MediaBrowser.browserSelectedItemId(folderItems, grid ? grid.currentIndex : -1) }
 
 
-    function _globalIndexForLocal(localIndex) { return MediaCatalog.browserGlobalIndex(folderItems, folderWindowStartIndex, localIndex) }
+    function _globalIndexForLocal(localIndex) { return MediaBrowser.browserGlobalIndex(folderItems, folderWindowStartIndex, localIndex) }
 
-    function _localIndexForGlobal(globalIndex) { return MediaCatalog.browserLocalIndex(folderItems, folderWindowStartIndex, globalIndex) }
+    function _localIndexForGlobal(globalIndex) { return MediaBrowser.browserLocalIndex(folderItems, folderWindowStartIndex, globalIndex) }
 
-    function _windowKnownEnd() { return MediaCatalog.browserWindowKnownEnd(_rawFolderItems, folderWindowStartIndex) }
+    function _windowKnownEnd() { return MediaBrowser.browserWindowKnownEnd(_rawFolderItems, folderWindowStartIndex) }
 
     // Contrat étroit pour PersonalMediaPage : la grille et sa pagination restent
     // ici, la visionneuse ne reçoit que les données et commandes nécessaires.
@@ -584,7 +581,7 @@ Item {
     readonly property bool catalogHasPrevious: folderPageHasPrevious
     readonly property bool catalogPageInFlight: folderPageInFlight
     readonly property real catalogContentY: grid ? grid.contentY : 0
-    function findCatalogItemIndex(id) { return MediaCatalog.browserFindItemIndexById(folderItems, id) }
+    function findCatalogItemIndex(id) { return MediaBrowser.browserFindItemIndexById(folderItems, id) }
     function catalogGlobalIndex(localIndex) { return _globalIndexForLocal(localIndex) }
     function catalogItemWithDetail(base) { return itemWithDetailForHeader(base) }
     function focusCatalogIndex(index) {
@@ -613,7 +610,7 @@ Item {
     function _applySort(keepSelection, forceFirst, serverSortedPage) {
         var resetFirst = forceFirst === true
         var keepId = (keepSelection && !resetFirst) ? _selectedItemId() : ""
-        var result = MediaCatalog.browserSortedWindow(
+        var result = MediaBrowser.browserSortedWindow(
                     _rawFolderItems || [], sortMode, serverSortedPage === true,
                     keepId, grid ? grid.currentIndex : -1, resetFirst)
         folderItems = result.items || []
@@ -724,7 +721,7 @@ Item {
         return shared.__focusState.movie
     }
 
-    function _readSharedState() { var b = _sharedBucket(); return MediaCatalog.browserReadSharedState(b, b ? _stateKey() : "") }
+    function _readSharedState() { var b = _sharedBucket(); return MediaBrowser.browserReadSharedState(b, b ? _stateKey() : "") }
 
     function _writeSharedStateNow() {
         var b = _sharedBucket()
@@ -754,13 +751,13 @@ Item {
     }
     function unreadCountFor(it) { return hierarchicalMode ? MediaCatalog.unreadCount(it) : 0 }
     function _pushBrowserReturnState(childId) {
-        return hierarchicalMode && MediaCatalog.pushBrowserReturn(shared, folderId, childId, browserTitle,
+        return hierarchicalMode && MediaBrowser.pushBrowserReturn(shared, folderId, childId, browserTitle,
                                                         _globalIndexForLocal(grid.currentIndex),
                                                         grid.contentY, normalizedLibraryMode)
     }
     function _navigateToBrowserParent() {
         if (!hierarchicalMode || typeof requestNavigation !== "function") return false
-        var e = MediaCatalog.popBrowserParent(shared, folderId); if (!e || !e.folderId) return false
+        var e = MediaBrowser.popBrowserParent(shared, folderId); if (!e || !e.folderId) return false
         _writeSharedStateNow()
         requestNavigation(_navRoute(personalMode ? "PersonalMediaPage.qml" : "moviepage.qml", {
             folderId: e.folderId,
@@ -852,7 +849,7 @@ Item {
 
 
     function _armFolderRestoreVisualLoading() {
-        var idx = MediaCatalog.browserRestoreIndex(restoreIndex, startIndex)
+        var idx = MediaBrowser.browserRestoreIndex(restoreIndex, startIndex)
         folderRestoreVisualTargetIndex = idx
         folderRestoreVisualLoading = (idx >= 0)
         folderRestoreRevealAttempts = 0
@@ -914,7 +911,7 @@ Item {
     }
 
     function _applyRestore() {
-        var idx = MediaCatalog.browserRestoreIndex(restoreIndex, startIndex)
+        var idx = MediaBrowser.browserRestoreIndex(restoreIndex, startIndex)
 
         if (!folderItems || folderItems.length <= 0) {
             if (folderPageHasMore) {
@@ -949,7 +946,7 @@ Item {
         }
 
         _restoring = true
-        var y = MediaCatalog.browserRestoreY(restoreY)
+        var y = MediaBrowser.browserRestoreY(restoreY)
 
         // contentY est local à la fenêtre. Une coordonnée mémorisée avant un
         // décalage de fenêtre n'est donc pas réutilisable ; l'index global reste
@@ -1001,7 +998,7 @@ Item {
 
     function _resetFolderPaging() {
         _cancelFolderPageRequest("paging_reset")
-        var state = MediaCatalog.browserInitialPagingState(folderRestoreVisualTargetIndex, folderPageSize)
+        var state = MediaBrowser.browserInitialPagingState(folderRestoreVisualTargetIndex, folderPageSize)
         folderWindowStartIndex = state.windowStartIndex
         folderPageNextStart = state.nextStart
         folderPageHasMore = state.hasMore
@@ -1035,7 +1032,7 @@ Item {
         items = _normalizePageItems(items || [])
         if (!items || items.length <= 0) return 0
         var keepId = _selectedItemId()
-        var result = MediaCatalog.browserAppendWindowItems(
+        var result = MediaBrowser.browserAppendWindowItems(
                     _rawFolderItems || [], items, start, prepend,
                     folderPageSize, folderWindowMaxItems, keepId, folderWindowStartIndex)
         if (!result || result.added <= 0) return 0
@@ -1093,7 +1090,7 @@ Item {
                 _appendWindowFolderItems(arr, start, prepend)
                 _refreshLibraryMediaMode()
 
-                var progress = MediaCatalog.browserPageProgress(page, start, folderPageSize, prepend)
+                var progress = MediaBrowser.browserPageProgress(page, start, folderPageSize, prepend)
                 if (progress.hasPrevious !== null) folderPageHasPrevious = progress.hasPrevious
                 if (progress.nextStart !== null) folderPageNextStart = progress.nextStart
                 if (progress.hasMore !== null) folderPageHasMore = progress.hasMore
@@ -1160,7 +1157,7 @@ Item {
         if (navigateUp === true)
             folderPrependNavSteps = Math.min(6, folderPrependNavSteps + 1)
         if (!folderPageHasPrevious || folderPageInFlight || loadingItems) return
-        var start = MediaCatalog.browserPreviousPageStart(folderWindowStartIndex, folderPageSize)
+        var start = MediaBrowser.browserPreviousPageStart(folderWindowStartIndex, folderPageSize)
         if (start < 0) {
             folderPageHasPrevious = false
             return
@@ -1184,7 +1181,7 @@ Item {
         if ((!folderPageHasMore && !folderPageHasPrevious) || folderPageInFlight || loadingItems) return
         if (!folderItems || folderItems.length <= 0) { _requestFolderPage(false); return }
         var idx = grid ? (grid.currentIndex | 0) : -1
-        var direction = MediaCatalog.browserViewportLoadDirection(
+        var direction = MediaBrowser.browserViewportLoadDirection(
                     idx, folderItems.length, folderPageHasPrevious, folderPageHasMore,
                     folderPagePrependThreshold, folderPageAppendThreshold)
         if (direction < 0) {
@@ -1199,27 +1196,14 @@ Item {
     // (shared puis accessToken/userId/serverUrl/folderId). On regroupe ces changements pour
 
     function _baseSelectedItem() {
-        return MediaCatalog.browserSelectedItem(folderItems, grid ? grid.currentIndex : -1)
-    }
-
-    function _mergeItemForHeader(base, detail) {
-        if (!base) return detail || null
-        if (!detail) return base
-        var out = {}
-        var k
-        for (k in base) out[k] = base[k]
-        for (k in detail) {
-            if (detail[k] !== undefined && detail[k] !== null)
-                out[k] = detail[k]
-        }
-        return out
+        return MediaBrowser.browserSelectedItem(folderItems, grid ? grid.currentIndex : -1)
     }
 
     function itemWithDetailForHeader(base) {
         if (!base || !base.Id) return base
         var cache = _detailCacheById || {}
         var detail = cache[String(base.Id)]
-        return detail ? _mergeItemForHeader(base, detail) : base
+        return detail ? MediaCatalog.mergeHeaderItemDetails(base, detail) : base
     }
 
     function _itemNeedsMediaDetail(it) {
@@ -1229,39 +1213,6 @@ Item {
         return true
     }
 
-    function _compactStreamsForTags(streams) {
-        var out = []
-        for (var i = 0; streams && i < streams.length; ++i) {
-            var st = streams[i]
-            if (!st) continue
-            out.push({
-                Type: st.Type || "", Codec: st.Codec || "", Width: Number(st.Width || 0),
-                Height: Number(st.Height || 0), ChannelLayout: st.ChannelLayout || "",
-                Channels: Number(st.Channels || 0), Language: st.Language || "",
-                DisplayTitle: st.DisplayTitle || "", Title: st.Title || "", Name: st.Name || "",
-                BitRate: Number(st.BitRate || 0), IsDefault: !!st.IsDefault
-            })
-        }
-        return out
-    }
-
-    function _compactItemDetailForTags(detail) {
-        if (!detail) return null
-        var out = ({
-            Id: detail.Id, Type: detail.Type, CollectionType: detail.CollectionType,
-            Name: detail.Name, RunTimeTicks: detail.RunTimeTicks,
-            RunTimeSeconds: detail.RunTimeSeconds, AverageRuntime: detail.AverageRuntime,
-            Runtime: detail.Runtime, OfficialRating: detail.OfficialRating,
-            CustomRating: detail.CustomRating, CommunityRating: detail.CommunityRating,
-            ProductionYear: detail.ProductionYear, PremiereDate: detail.PremiereDate,
-            Width: detail.Width, Height: detail.Height,
-            Bitrate: detail.Bitrate, Container: detail.Container
-        })
-        if (detail.MediaStreams !== undefined && detail.MediaStreams !== null)
-            out.MediaStreams = _compactStreamsForTags(detail.MediaStreams)
-        return out
-    }
-
     function _storeItemDetailForTags(id, detail) {
         if (!id || !detail) return
         id = String(id)
@@ -1269,7 +1220,7 @@ Item {
         var next = {}
         var k
         for (k in old) next[k] = old[k]
-        next[id] = _compactItemDetailForTags(detail)
+        next[id] = MediaCatalog.compactHeaderItemDetails(detail)
 
         var order = (_detailCacheOrder || []).slice(0)
         var idx = order.indexOf(id)
@@ -1657,7 +1608,6 @@ Item {
                 // Double repère de focus du tri : deux traits fins au-dessus et
                 // en dessous du bouton A-Z, sans QtQuick Controls ni effet GPU.
                 Rectangle {
-                    id: sortFocusLineTop
                     z: sortButton.z + 1
                     anchors.horizontalCenter: sortButton.horizontalCenter
                     anchors.bottom: sortButton.top
@@ -1673,7 +1623,6 @@ Item {
                 }
 
                 Rectangle {
-                    id: sortFocusLineBottom
                     z: sortButton.z + 1
                     anchors.horizontalCenter: sortButton.horizontalCenter
                     anchors.top: sortButton.bottom
@@ -1755,7 +1704,6 @@ Item {
     }
 
     Rectangle {
-        id: floatingCounter
         z: 11
         anchors.top: parent.top
         anchors.right: parent.right
@@ -1905,7 +1853,6 @@ Item {
                     }
                 }
                 OpacityMask {
-                    id: movieTitleMaskedLine
                     anchors.fill: parent
                     visible: movieTitleLineBox.maskActive
                     source: movieTitleLineSource
@@ -2006,7 +1953,6 @@ Item {
                 height: 28
 
                 Text { textFormat: Text.PlainText;
-                    id: collectionCountText
                     anchors.verticalCenter: parent.verticalCenter
                     color: "#e9ecff"
                     opacity: 0.95
@@ -2020,7 +1966,6 @@ Item {
                 }
 
                 Rectangle {
-                    id: collectionAgeBadge
                     anchors.verticalCenter: parent.verticalCenter
                     visible: headerInfos.ageTag.length > 0
                     height: 26
@@ -2119,7 +2064,6 @@ Item {
                         }
                     }
                     Item {
-                        id: movieDateOrSeriesRange
                         height: parent.height
                         width: headerInfos.selectedIsSeries
                                ? movieSeriesRangeRow.implicitWidth
@@ -2164,7 +2108,6 @@ Item {
                             // Même construction que detailSeriePage :
                             // la flèche ne participe plus aux métriques de la police.
                             Canvas {
-                                id: movieSeriesRangeArrow
                                 visible: headerInfos.seriesRangeHasArrow
                                 width: visible ? 36 : 0
                                 height: 28
@@ -2305,7 +2248,6 @@ Item {
                         }
                     }
                     OpacityMask {
-                        id: movieTagsMaskedLine
                         anchors.fill: parent
                         visible: movieTagsClip.maskActive
                         source: movieTagsSource
@@ -2734,7 +2676,6 @@ Item {
     // nécessiter 2, 3... pages. La grille ne devient visible qu'une fois le
     // focus replacé et les posters visibles stabilisés.
     FocusScope {
-        id: folderLoadingOverlay
         anchors.fill: parent
         z: 10000
         visible: folderBlockingLoading && !externalModalOpen
@@ -2777,14 +2718,13 @@ Item {
     }
     Text { textFormat: Text.PlainText;
         anchors.centerIn: parent
-        text: MediaCatalog.emptyText(moviepage.normalizedLibraryMode, moviepage.musicVideoMode)
+        text: MediaBrowser.emptyText(moviepage.normalizedLibraryMode, moviepage.musicVideoMode)
         color: "#fff"
         font.pixelSize: 28
         visible: folderLoadState === "empty"
         z: 8000
     }
     Text { textFormat: Text.PlainText;
-        id: folderMoreStatusText
         z: 9000
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottom: parent.bottom
@@ -2798,7 +2738,6 @@ Item {
         wrapMode: Text.WordWrap
     }
     Text { textFormat: Text.PlainText;
-        id: folderInitialErrorText
         anchors.centerIn: parent
         width: Math.min(parent.width - 80, 760)
         text: folderLoadErrorText

@@ -1,6 +1,8 @@
 import QtQuick 2.15
+import "../js/NavigationContext.js" as NavContext
 import QtGraphicalEffects 1.15
 import fbx.ui.base 1.0 as FbxBase
+import "../components" as Components
 import "../js/jellyfinBridge.js" as Jellyfin
 import "../js/clientId.js" as ClientId
 import "../js/UserStore.js" as Store
@@ -43,7 +45,6 @@ FocusScope {
     property int  logoLeftMargin: 8
     property int  logoTopMargin: -30
     Item {
-        id: logoLayer
         z: 10000
         width: page.logoWidth
         height: page.logoHeight
@@ -54,7 +55,6 @@ FocusScope {
         visible: !page.overlayOpen
         enabled: visible
         Image {
-            id: logoImg
             anchors.fill: parent
             source: page.redefinLogoUrl
             fillMode: Image.PreserveAspectFit
@@ -283,45 +283,19 @@ FocusScope {
         return true
     }
     function _rememberServerUrl(url, info) {
-        var u = _normalizeContextServerUrl(url)
-        if (!u) return false
+        var normalized = _normalizeContextServerUrl(url)
+        if (!normalized) return false
         try {
-            if (Store && Store.addOrUpdateServer) {
-                return Store.addOrUpdateServer({
-                    serverUrl: u,
-                    name: info && (info.name || info.ServerName || info.ProductName || info.serverName) ? (info.name || info.ServerName || info.ProductName || info.serverName) : "",
-                    version: info && (info.version || info.Version) ? (info.version || info.Version) : "",
-                    id: info && (info.id || info.Id || info.ServerId) ? (info.id || info.Id || info.ServerId) : ""
-                })
-            }
+            return !!(Store && Store.rememberServer && Store.rememberServer(normalized, info || ({})))
         } catch(e0) {}
         return false
     }
     function _savedServersForOverlay() {
-        var out = []
-        var seen = {}
-        function add(url, name, version, id) {
-            url = _normalizeContextServerUrl(url)
-            if (!url || seen[url]) return
-            seen[url] = true
-            out.push({
-                name: name || "Jellyfin",
-                url: url,
-                serverUrl: url,
-                version: version || "",
-                id: id || ""
-            })
-        }
         try {
-            if (Store && Store.listServers) {
-                var servers = Store.listServers() || []
-                for (var i = 0; i < servers.length; i++) {
-                    var s0 = servers[i] || {}
-                    add(s0.serverUrl || s0.url, s0.name, s0.version, s0.id)
-                }
-            }
-        } catch(e1) {}
-        return out
+            if (Store && Store.listServersForOverlay)
+                return Store.listServersForOverlay() || []
+        } catch(e0) {}
+        return []
     }
     function _refreshSavedServersOverlay() {
         try {
@@ -385,11 +359,9 @@ FocusScope {
         _refreshSavedServersOverlay()
         return true
     }
-    function _sharedNavApi(){ try { return shared && shared.__redefinNavApi ? shared.__redefinNavApi : null } catch(e) { return null } }
     function _hydrateSensitiveContextFromShared(){
         try {
-            var api = _sharedNavApi()
-            var ctx = api && api.peek ? api.peek() : null
+            var ctx = NavContext.peek(shared)
             if (!ctx) return false
             var changed = false
             var consumed = false
@@ -399,13 +371,12 @@ FocusScope {
                 consumed = true
             }
             if (!fbx && ctx.fbx) { fbx = ctx.fbx; changed = true; consumed = true }
-            if (consumed && api && api.clear) api.clear()
+            if (consumed) NavContext.clear(shared)
             return changed
         } catch(e) { return false }
     }
     function _clearSensitiveNavContext(){
-        var api = _sharedNavApi()
-        if (api && api.clear) api.clear()
+        NavContext.clear(shared)
     }
     function _resolvedSecuritySettings(){
         try {
@@ -525,8 +496,7 @@ FocusScope {
             var keepToken = (remember === undefined || remember === null)
                     ? _rememberTokenRequested()
                     : (remember === true)
-            var api = _sharedNavApi()
-            if (!(api && api.storeValues && api.storeValues({
+            if (!NavContext.storeValues(shared, {
                 accessToken: tok || "",
                 userId: uid || "",
                 serverUrl: serverUrl || "",
@@ -534,7 +504,7 @@ FocusScope {
                 userImageTag: tag || "",
                 fbx: fbx || null,
                 remember: keepToken
-            }))) return false
+            })) return false
 
             return true
         } catch(e) {
@@ -730,12 +700,7 @@ FocusScope {
     }
 
     /* ==== Helpers ==== */
-    function _join(base,path){ var b=String(base||"").replace(/\/+$/,""); var p=String(path||""); return b+(p.charAt(0)==='/'?p:("/"+p)); }
     function _hasToken(id){ return !!(id && tokenByUserId[id]); }
-    function _primaryImageTagOf(userObj){
-        if(!userObj) return "";
-        return String(userObj.PrimaryImageTag || (userObj.ImageTags && userObj.ImageTags.Primary) || "");
-    }
     function _persistVerifiedAvatarMeta(uid, name, tag){
         if(!uid) return;
         try {
@@ -762,78 +727,27 @@ FocusScope {
         usersModel = arr;
     }
     function _ensureLocalUser(userObj, rememberValue){
-        if(!userObj||!userObj.Id) return;
-        var i,found=false;
-        var modelDirty=false;
-        for(i=0;i<localUsers.length;i++) if(localUsers[i].Id===userObj.Id){ found=true; break; }
-        var tag=_primaryImageTagOf(userObj);
-        var hasRemember = (rememberValue !== undefined && rememberValue !== null);
-        var entry={
-            Id:userObj.Id,
-            Name:(userObj.Name||userObj.Username||"Profil"),
-            PrimaryImageTag:tag,
-            AvatarTagVerified:true,
-            Remember: hasRemember ? (rememberValue === true) : false
-        };
-        if(!found){
-            localUsers=[entry].concat(localUsers);
-            modelDirty=true;
-        } else {
-            var uu=localUsers[i], ch=false;
-            if(entry.Name!==uu.Name){ uu.Name=entry.Name; ch=true; }
-            // Une réponse /Users/{id} ou d'authentification est l'autorité :
-            // elle peut aussi confirmer qu'un ancien avatar a été supprimé.
-            if(entry.PrimaryImageTag!==String(uu.PrimaryImageTag||"")){ uu.PrimaryImageTag=entry.PrimaryImageTag; ch=true; }
-            if(uu.AvatarTagVerified!==true){ uu.AvatarTagVerified=true; ch=true; }
-            if(hasRemember && uu.Remember !== entry.Remember){ uu.Remember=entry.Remember; ch=true; }
-            if(ch){
-                localUsers=localUsers.slice(0);
-                modelDirty=true;
-            }
-        }
-        _persistVerifiedAvatarMeta(entry.Id, entry.Name, entry.PrimaryImageTag);
+        var merged = Store.mergeAuthenticatedProfile(localUsers, userObj, rememberValue)
+        if(!merged || !merged.entry) return
+        if(merged.changed) localUsers = merged.profiles
+        _persistVerifiedAvatarMeta(
+            merged.entry.Id,
+            merged.entry.Name,
+            merged.entry.PrimaryImageTag
+        )
         // Ne pas reconstruire usersModel si le GET /Users/{id} confirme
         // simplement les mêmes nom/tag que la réponse d'authentification.
-        if(modelDirty) _recomputeModel();
+        if(merged.changed) _recomputeModel()
     }
     function _reconcilePublicUsers(users){
-        users = users || [];
-        var byId = ({});
-        var normalized = [];
-        var i;
-        for(i=0;i<users.length;i++){
-            var pu=users[i];
-            if(!pu || !pu.Id) continue;
-            // /Users/Public est l'autorité pour les profils qu'il expose. Une
-            // absence de PrimaryImageTag signifie donc « pas d'avatar public ».
-            pu.PrimaryImageTag = _primaryImageTagOf(pu);
-            pu.AvatarTagVerified = true;
-            byId[pu.Id] = pu;
-            normalized.push(pu);
+        var reconciled = Store.reconcilePublicProfiles(localUsers, users || [])
+        localUsers = reconciled.localUsers || []
+        serverUsers = reconciled.serverUsers || []
+        var verified = reconciled.verified || []
+        for(var i=0;i<verified.length;i++){
+            var profile = verified[i] || ({})
+            _persistVerifiedAvatarMeta(profile.Id, profile.Name, profile.PrimaryImageTag)
         }
-
-        var next=[];
-        for(i=0;i<localUsers.length;i++){
-            var lu=localUsers[i];
-            if(!lu || !lu.Id) continue;
-            var pub=byId[lu.Id];
-            if(pub){
-                var verifiedTag=_primaryImageTagOf(pub);
-                var verifiedName=pub.Name || lu.Name || "Profil";
-                next.push({
-                    Id: lu.Id,
-                    Name: verifiedName,
-                    PrimaryImageTag: verifiedTag,
-                    AvatarTagVerified: true,
-                    Remember: lu.Remember === true
-                });
-                _persistVerifiedAvatarMeta(lu.Id, verifiedName, verifiedTag);
-            } else {
-                next.push(lu);
-            }
-        }
-        localUsers = next;
-        serverUsers = normalized;
     }
     function _validateNonPublicStoredAvatars(seq, srv){
         // Un profil masqué dans /Users/Public peut tout de même être mémorisé
@@ -954,15 +868,9 @@ FocusScope {
         // Si le serveur refuse cette ressource sans authentification, le delegate
         // retombera simplement sur son fallback local.
         if(!userId || !tag) return "";
-        try {
-            if(animated)
-                return Store.animatedAvatarUrl(page.serverUrl, userId, tag);
-            return Store.staticAvatarUrl(page.serverUrl, userId, tag);
-        } catch(e) {}
-        var base=_join(page.serverUrl,"/UserImage")+"?UserId="+encodeURIComponent(userId);
         if(animated)
-            return base+"&tag="+encodeURIComponent(tag);
-        return base+"&tag="+encodeURIComponent(tag)+"&format=jpg";
+            return Store.animatedAvatarUrl(page.serverUrl, userId, tag);
+        return Store.staticAvatarUrl(page.serverUrl, userId, tag);
     }
     // Login TV : une seule rangée de profils. Jusqu'à 6 comptes restent visibles
     // simultanément ; au-delà, la ListView défile horizontalement au D-Pad.
@@ -1003,32 +911,13 @@ FocusScope {
             }
             var list = (Store.listUsers ? Store.listUsers(su) : []) || [];
             if (list.length===0 && !su && Store.listUsers) list = Store.listUsers() || [];
-            var loc = [];
-            page.tokenByUserId = ({});
+            page.localUsers = Store.profilesFromStoredUsers(list) || []
+            page.tokenByUserId = ({})
             for (var i=0;i<list.length;i++){
-                var it=list[i];
-                if (!it || !it.userId) continue;
-
-                // Toujours restaurer les métadonnées non sensibles du profil.
-                // Pour un profil explicitement mémorisé, UserStore réinjecte ici
-                // le token depuis le coffre persistant après redémarrage. Sinon,
-                // seul un éventuel token du cache RAM de la session courante existe.
-                var storedTag = String(it.imageTag || "")
-                var tagOwnedByProfile = !!(storedTag && it.imageTagOwnerId === it.userId)
-                loc.push({
-                    Id: it.userId,
-                    Name: it.userName || "Profil",
-                    PrimaryImageTag: storedTag,
-                    // Les stores antérieurs à cette correction ne possèdent pas
-                    // imageTagOwnerId : leur tag ne déclenche aucune requête avant
-                    // validation par /Users/Public ou /Users/{id}.
-                    AvatarTagVerified: !storedTag || tagOwnedByProfile,
-                    Remember: it.remember === true
-                });
-                if (it.accessToken)
-                    page.tokenByUserId[it.userId] = it.accessToken;
+                var it=list[i]
+                if (it && it.userId && it.accessToken)
+                    page.tokenByUserId[it.userId] = it.accessToken
             }
-            page.localUsers = loc;
             _recomputeModel();
             if (!page.serverUrl && active.serverUrl) page.serverUrl = _normalizeContextServerUrl(active.serverUrl);
             if ((!page.serverInfo.name || !page.serverInfo.version) && active.serverName) {
@@ -1493,7 +1382,6 @@ FocusScope {
                 }
             }
             Rectangle {
-                id: quickConnectPanel
                 width: Math.round(parent.width * 0.56)
                 height: parent.height
                 color: page.uiMenuPanel
@@ -1518,11 +1406,9 @@ FocusScope {
                     }
                     Text { textFormat: Text.PlainText; text: "Appuyez sur Retour pour revenir à la connexion par mot de passe."; color: page.uiTextSecondary; font.pixelSize: 18 }
                     Row {
-                        id: codeRow
                         spacing: 24
                         anchors.horizontalCenter: parent.horizontalCenter
                         Text { textFormat: Text.PlainText;
-                            id: codeText
                             text: qc.code || "— — — —"
                             color: "white"; font.pixelSize: 64; font.bold: true
                             horizontalAlignment: Text.AlignHCenter
@@ -1740,9 +1626,9 @@ FocusScope {
                 id: hit
                 anchors.fill: parent
                 focus: true
-                onClicked: input.forceActiveFocus()
-                Keys.onReturnPressed: input.forceActiveFocus()
-                Keys.onEnterPressed:  input.forceActiveFocus()
+                onClicked: input.openVirtualKeyboard()
+                Keys.onReturnPressed: input.openVirtualKeyboard()
+                Keys.onEnterPressed:  input.openVirtualKeyboard()
                 KeyNavigation.up:   field.upTarget
                 KeyNavigation.down: field.downTarget
                 Keys.onUpPressed:   { if (field.upTarget)   field.upTarget.forceActiveFocus();   event.accepted=true; }
@@ -1765,6 +1651,16 @@ FocusScope {
                 horizontalAlignment: Text.AlignLeft
                 echoMode: field.password ? TextInput.Password : TextInput.Normal
                 inputMethodHints: Qt.ImhNoPredictiveText
+                function openVirtualKeyboard(){
+                    Qt.inputMethod.hide()
+                    redefinKeyboard.openFor(input)
+                }
+                function virtualKeyboardAccepted(){ submit() }
+                function virtualKeyboardCanceled(){
+                    Qt.inputMethod.hide()
+                    if (field.consumeBack) field.consumeBack()
+                    hit.forceActiveFocus()
+                }
                 onTextChanged: {
                     if (field.syncTarget && field.syncProp.length > 0 && field.syncTarget[field.syncProp] !== text)
                         field.syncTarget[field.syncProp] = text;
@@ -1774,7 +1670,7 @@ FocusScope {
                     if (field.downTarget) field.downTarget.forceActiveFocus();
                     else hit.forceActiveFocus();
                 }
-                onActiveFocusChanged: { if (activeFocus) Qt.inputMethod.show(); else Qt.inputMethod.hide(); }
+                onActiveFocusChanged: Qt.inputMethod.hide()
                 onAccepted: submit()
                 Keys.onReturnPressed: submit()
                 Keys.onEnterPressed:  submit()
@@ -1931,7 +1827,6 @@ FocusScope {
                 }
             }
             Rectangle {
-                id: loginShade
                 anchors.fill: parent
                 color: "#000000"
                 opacity: login.panelShown ? page.uiMenuShadeOpacity : 0.0
@@ -2059,7 +1954,6 @@ FocusScope {
                             Behavior on color { ColorAnimation { duration: 110 } }
 
                             Rectangle {
-                                id: rememberKnob
                                 width: 20
                                 height: 20
                                 radius: 10
@@ -2073,7 +1967,6 @@ FocusScope {
                     }
 
                     Row {
-                        id: btnRow
                         spacing: 16
 
                         Rectangle {
@@ -2423,7 +2316,6 @@ FocusScope {
     }
 
     Text {
-        id: serverWelcomeMessage
         anchors.top: forgetDeviceCard.bottom
         anchors.topMargin: 9
         anchors.horizontalCenter: parent.horizontalCenter
@@ -2464,7 +2356,7 @@ FocusScope {
         ListView {
             id: userCarousel
             width: page._profileCarouselWidth()
-            height: 244
+            height: 310
             anchors.horizontalCenter: parent.horizontalCenter
             model: usersModel
             orientation: ListView.Horizontal
@@ -2537,7 +2429,7 @@ FocusScope {
             delegate: FocusScope {
                 id: tile
                 Keys.priority: Keys.BeforeItem
-                width: page.profileCarouselCellWidth; height: 244
+                width: page.profileCarouselCellWidth; height: 310
                 z: ListView.isCurrentItem ? 100 : 0
                 focus: ListView.isCurrentItem
                 property var    u: modelData
@@ -2554,7 +2446,6 @@ FocusScope {
                 property real  _armedAtMs: 0
                 property real  _downAtMs: 0
                 property real  _holdProgress: 0
-                property int   _shortTapMs: 200
                 property int   _preArmMs: 1000
                 property int   _commitMs: 1000
                 property int   _fallbackLongMs: 2000
@@ -2588,43 +2479,26 @@ FocusScope {
                 }
                 function _isOkKey(k){ return page._isOkKey ? page._isOkKey(k) : (k===Qt.Key_Return || k===Qt.Key_Enter || k===Qt.Key_Select || k===Qt.Key_Okay); }
                 function _beginPress() {
-                    if (page._postLogoutLatch || page._okSwallowUntilRelease) { return; }
-                    if (!uid) { return; }
-                    tile._downAtMs = Date.now();
-                    tile._pressActive = true;
-                    tile._armed = false;
+                    if (tile._keyHeld || page._postLogoutLatch || page._okSwallowUntilRelease || !uid) return false;
+                    tile._keyHeld = true;
+                    tile._downAtMs = Date.now(); tile._pressActive = true; tile._armed = false;
                     preArm.restart();
+                    return true;
                 }
                 function _endPress() {
-                    if (!tile._pressActive) { return; }
-                    var now = Date.now();
-                    var dur = now - tile._downAtMs;
-                    var selectedUid = tile.uid
-                    if (tile._armed) {
-                        var armedDur = now - tile._armedAtMs;
-                        if (armedDur >= tile._commitMs || dur >= tile._fallbackLongMs) {
-                            page._swallowOkUntilRelease();
-                            tile._resetPress();
-                            if (selectedUid) page.logoutAndRemoveById(selectedUid);
-                            return;
-                        }
-                        tile._resetPress();
-                        return;
-                    }
+                    if (!tile._pressActive) return;
+                    var dur = Date.now() - tile._downAtMs;
+                    var selectedUid = tile.uid;
+                    // La durée est l'autorité : dès _preArmMs atteint, l'appui
+                    // appartient au geste de suppression, même si le Timer QML
+                    // n'a pas encore eu le temps de positionner _armed.
                     if (dur >= tile._fallbackLongMs) {
-                        page._swallowOkUntilRelease();
-                        tile._resetPress();
+                        page._swallowOkUntilRelease(); tile._resetPress();
                         if (selectedUid) page.logoutAndRemoveById(selectedUid);
                         return;
                     }
-                    if (dur <= tile._shortTapMs) {
-                        // selectThis() peut ouvrir un overlay ou déclencher une navigation.
-                        // Nettoyer le delegate avant toute action susceptible de le détruire.
-                        tile._resetPress();
-                        tile.selectThis();
-                        return;
-                    }
-                    tile._resetPress();
+                    if (dur >= tile._preArmMs) { tile._resetPress(); return; }
+                    tile._resetPress(); tile.selectThis();
                 }
                 function _resetPress() {
                     tile._pressActive = false;
@@ -2641,6 +2515,7 @@ FocusScope {
                     if(!uid) return;
 
                     var tok = page.tokenByUserId[uid] || "";
+                    page.errorText = "";
 
                     // Même serveur, autre profil : les résultats du profil précédent
                     // ne doivent jamais être réutilisés.
@@ -2670,12 +2545,20 @@ FocusScope {
                                     page.openLoginForUser(name || "")
                                 }
                             },
-                            function(){
+                            function(err){
                                 tile._selecting = false
                                 page.requestHomeLoading(false)
-                                try { if (Store.clearUserToken) Store.clearUserToken(page.serverUrl, uid) } catch(e1) {}
-                                try { delete page.tokenByUserId[uid] } catch(e2) { page.tokenByUserId[uid] = "" }
-                                page.openLoginForUser(name || "")
+                                var drop = true
+                                try { drop = Store.shouldDropStoredToken(err) } catch(eDrop) {}
+                                if (drop) {
+                                    try { if (Store.clearUserToken) Store.clearUserToken(page.serverUrl, uid) } catch(e1) {}
+                                    try { delete page.tokenByUserId[uid] } catch(e2) { page.tokenByUserId[uid] = "" }
+                                    page.openLoginForUser(name || "")
+                                    return
+                                }
+                                var code = ""
+                                try { code = SafeLog.safeErrorCode(err, "network_error") } catch(e4) { code = "network_error" }
+                                if (code !== "cancelled") page.errorText = "Serveur injoignable, réessayez."
                             }
                         )
                     } catch(e3) {
@@ -2687,7 +2570,9 @@ FocusScope {
                     }
                 }
                 Column {
-                    anchors.centerIn: parent
+                    id: profileMainColumn
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    y: Math.round((244 - implicitHeight) * 0.5)
                     spacing: 10
                     Item {
                         id: avatarBox
@@ -2863,24 +2748,40 @@ FocusScope {
                             }
                         }
                     }
-                    Text {
-                        textFormat: Text.PlainText
-                        text: name
-                        color: page.uiText
-                        font.pixelSize: 18
-                        width: avatarBox.width
-                        horizontalAlignment: Text.AlignHCenter
-                        elide: Text.ElideRight
+                        Text {
+                            id: profileName
+                            textFormat: Text.PlainText
+                            text: name
+                            color: page.uiText
+                            font.pixelSize: 18
+                            width: avatarBox.width
+                            horizontalAlignment: Text.AlignHCenter
+                            elide: Text.ElideRight
+                        }
+                }
+                Column {
+                    width: avatarBox.width; spacing: 2; visible: holdOverlay.visible; z: 120
+                    anchors.top: profileMainColumn.bottom; anchors.topMargin: 5
+                    anchors.horizontalCenter: profileMainColumn.horizontalCenter
+                    Item {
+                        width: 60; height: 36; anchors.horizontalCenter: parent.horizontalCenter
+                        Rectangle {
+                            x: 5; y: 3; width: 18; height: 30; radius: 2
+                            color: "transparent"; border.width: 3; border.color: "#FFFFFF"
+                            rotation: -8; transformOrigin: Item.Right
+                        }
+                        Rectangle { x: 17; y: 17; width: 3; height: 3; radius: 1.5; color: "#FFFFFF" }
+                        Rectangle { x: 28; y: 16; width: 21; height: 4; radius: 2; color: "#FFFFFF" }
+                        Rectangle { x: 44; y: 12; width: 11; height: 11; color: "#FFFFFF"; rotation: 45; antialiasing: true }
                     }
+                    Text { textFormat: Text.PlainText; text: Math.round(holdOverlay.displayedFrac * 100) + " %"; color: "#FFFFFF"; font.pixelSize: 14; font.bold: true; width: parent.width; horizontalAlignment: Text.AlignHCenter }
+                    Text { textFormat: Text.PlainText; text: "Déconnexion du profil..."; color: page.uiTextSecondary; font.pixelSize: 12; width: parent.width; horizontalAlignment: Text.AlignHCenter }
                 }
                 Keys.onPressed: {
                     if (tile._isOkKey(event.key)) {
                         event.accepted = true;
                         if (event.isAutoRepeat) { return; }
-                        if (!tile._keyHeld) {
-                            tile._keyHeld = true;
-                            tile._beginPress();
-                        }
+                        tile._beginPress();
                     } else if (event.key===Qt.Key_Left) {
                         if (userCarousel.currentIndex > 0)
                             userCarousel.currentIndex = userCarousel.currentIndex - 1;
@@ -2895,9 +2796,8 @@ FocusScope {
                     if (tile._isOkKey(event.key)) {
                         event.accepted = true;
                         if (event.isAutoRepeat) { return; }
-                        if (!tile._pressActive) { return; } // release fantôme
                         tile._keyHeld = false;
-                        tile._endPress();
+                        if (tile._pressActive) tile._endPress();
                     }
                 }
             }
@@ -2911,6 +2811,12 @@ FocusScope {
         font.pixelSize: 16
         text: loading ? "Connexion au serveur…" : (errorText || "")
         visible: !page.loginBackdropOnly && (loading || errorText!="")
+    }
+
+    Components.ReDeFinKeyboard {
+        id: redefinKeyboard
+        anchors.fill: parent
+        z: 20000
     }
 
     /* ==== Bouclier d'entrée global ==== */

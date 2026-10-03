@@ -23,6 +23,7 @@
 // 11) Loader dots stop net dès reveal (déjà gate via active)
 
 import QtQuick 2.15
+import "../js/NavigationContext.js" as NavContext
 
 import "../components" as Components
 import "../js/SafeLog.js" as SafeLog
@@ -194,20 +195,14 @@ FocusScope {
         }))
     }
 
-    function _sharedNavApi(){ try { return shared && shared.__redefinNavApi ? shared.__redefinNavApi : null } catch(e) { return null } }
-    function _hydrateSensitiveContextFromShared(){
-        var api = _sharedNavApi()
-        return api && api.hydrate ? api.hydrate(homePage, true, navContextMaxAgeMs, true) : false
+    function _hydrateSensitiveContextFromShared() {
+        return NavContext.hydrate(shared, homePage, true, navContextMaxAgeMs, true)
     }
-
-    function _storeServerNavContext(){
-        var api = _sharedNavApi()
-        return api && api.storeServerTarget ? api.storeServerTarget(homePage) : false
+    function _storeServerNavContext() {
+        return NavContext.storeServerTarget(shared, homePage)
     }
-
-    function _navRoute(page, params){
-        var api = _sharedNavApi()
-        return api && api.route ? api.route(homePage, page, params || ({})) : (page + "?ctx=1")
+    function _navRoute(page, params) {
+        return NavContext.route(shared, homePage, page, params)
     }
 
     function _applyContextToPosterGrid(){
@@ -250,8 +245,6 @@ FocusScope {
                 try { if (!alreadyWarm && !shouldAskFetch && pg._dataEmpty && pg._dataEmpty()) shouldAskFetch = true } catch(e0) {}
                 _lastPosterGridApplyKey = key
 
-                if (alreadyWarm && !shouldAskFetch)
-
                 if (shouldAskFetch) {
                     var now = _nowMs()
                     if (_posterFetchAskKey === key && (now - _posterFetchAskAtMs) < posterFetchAskCooldownMs) {
@@ -268,7 +261,6 @@ FocusScope {
                         pg.beginStaggeredFetch()
                     } else if (pg.fetchHomeData && typeof pg.fetchHomeData === "function") {
                         pg.fetchHomeData()
-                    } else {
                     }
                 }
             }
@@ -682,9 +674,8 @@ FocusScope {
             homePage._waitForHomePosters = false
             homePage._homeVisualReturnPrepared = false
 
-            // Ne plus retirer brutalement le curtain avec PosterGrid encore en
-            // état bootstrap. On transforme d'abord toutes les sections pendantes
-            // en état terminal, puis on laisse le reveal/focus se stabiliser.
+            // Le délai termine seulement l'attente visuelle : PosterGrid garde
+            // ses requêtes en cours pour remplir les rails après le reveal.
             var pg = posterGridLoader.item
             try {
                 if (pg && pg.forceHomeBootstrapCompletion)
@@ -740,13 +731,7 @@ FocusScope {
     }
     function _clearPosterGridFocusMemory(reason) {
         try { if (posterGridLoader.item && posterGridLoader.item.clearFocusSnapshot) posterGridLoader.item.clearFocusSnapshot(reason || "home-clear") } catch(e0) {}
-        try {
-            if (shared && shared.__redefinFocus) {
-                for (var k in shared.__redefinFocus) {
-                    if (String(k).indexOf("postergrid.home|") === 0) delete shared.__redefinFocus[k]
-                }
-            }
-        } catch(e1) {}
+        try { NavContext.clearFocusPrefix(shared, "postergrid.home|") } catch(e1) {}
         _homeInitialFocusDone = false
         _homeUserTookControl = false
         _homeApplyingInitialFocus = false
@@ -895,18 +880,6 @@ FocusScope {
         }
     }
 
-    /* ==== PERF HINTS (soft contract vers postergrid.qml) ==== */
-    readonly property var perfHints: ({
-        // Tweaks 5/6/7 (si postergrid les supporte)
-        staggerSections: false,
-        staggerMs: 0,
-        progressiveHydration: true,
-        initialSlice: 10,
-        hydrateAfterMs: 650,
-        enableVirtualization: true,
-        cacheBufferPx: Math.round(homePage.height * 1.15)
-    })
-
     /* ==== Contenu principal (postergrid) ==== */
     Loader {
         id: posterGridLoader
@@ -948,16 +921,8 @@ FocusScope {
             // bind flick pour scroll gate
             homePage._bindGridFlick();
 
-            // Tweak 5/6/7: perf hints (si supporté)
+            // Contrat runtime réellement exposé par postergrid.qml.
             try {
-                if (item.hasOwnProperty("perfHints")) item.perfHints = homePage.perfHints;
-                if (item.hasOwnProperty("staggerSections")) item.staggerSections = false;
-                if (item.hasOwnProperty("staggerMs")) item.staggerMs = 0;
-                if (item.hasOwnProperty("progressiveHydration")) item.progressiveHydration = true;
-                if (item.hasOwnProperty("initialSlice")) item.initialSlice = homePage.perfHints.initialSlice;
-                if (item.hasOwnProperty("enableVirtualization")) item.enableVirtualization = true;
-                if (item.hasOwnProperty("cacheBufferPx")) item.cacheBufferPx = homePage.perfHints.cacheBufferPx;
-                if (item.hasOwnProperty("debugLogs")) item.debugLogs = false;
                 if (item.hasOwnProperty("homeImageSettleMs")) item.homeImageSettleMs = homePage.posterImageSettleMs;
                 if (item.hasOwnProperty("homeImageReturnFreezeMs")) item.homeImageReturnFreezeMs = 240;
                 if (item.hasOwnProperty("homeCurtainVisible")) item.homeCurtainVisible = Qt.binding(function(){
@@ -1106,7 +1071,6 @@ FocusScope {
     }
 
     FocusScope {
-        id: searchLoadCurtain
         anchors.fill: parent
         z: 900
         visible: homePage.currentHomeTab === 1 && searchPageLoader.status === Loader.Loading
@@ -1177,7 +1141,6 @@ FocusScope {
 
         /* Logo */
         Image {
-            id: redefinLogo
             source: "../images/Redefin-logo2-512.png"
             anchors.left: parent.left
             anchors.leftMargin: -75
@@ -1213,7 +1176,6 @@ FocusScope {
             // le focus. État focalisé : capsule sensiblement plus claire afin que le
             // D-Pad indique immédiatement que l'utilisateur est revenu sur l'onglet.
             Rectangle {
-                id: activeHomeTabCapsule
                 x: homeTabsRow.x + homeTabsBar.selectedTab.x
                 y: Math.round((homeTabsBar.height - height) / 2)
                 width: homeTabsBar.selectedTab.width
@@ -1627,7 +1589,10 @@ FocusScope {
 
         onLatestByFolderChanged: {
             homePage._touchLatest = true
-            homePage.pokeLoadingGate()
+            // Les dossiers restants arrivent après le premier rail. Leur ajout
+            // ne doit pas prolonger le rideau de chargement à chaque réponse.
+            if (posterGridLoader.item && posterGridLoader.item.latestFetchCompleted !== true)
+                homePage.pokeLoadingGate()
         }
         onLatestFetchCompletedChanged: {
             if (posterGridLoader.item && posterGridLoader.item.latestFetchCompleted === true)

@@ -6,6 +6,7 @@ import QtQuick 2.15
 import QtGraphicalEffects 1.15
 import "../js/jellyfinBridge.js" as Jellyfin
 import "../js/SafeLog.js" as SafeLog
+import "../js/MediaRailLayout.js" as MediaRailLayout
 
 FocusScope {
     id: root
@@ -216,11 +217,7 @@ FocusScope {
     readonly property int firstEdgePad: Math.max(8, edgePad - firstPosterLeftShift)
 
     function topPadFor(h) {
-        return Math.max(18,
-            Math.ceil(h * (focusScale - 1))
-            + focusLiftPx
-            + Math.ceil(frameWidth)
-            + 2)
+        return Math.max(18, MediaRailLayout.focusTopPad(h, focusScale, focusLiftPx, frameWidth))
     }
 
     // titre seul sous la jaquette
@@ -233,7 +230,7 @@ FocusScope {
     property real frameInsetPx: 0.0
     property real frameInnerEpsilon: 0.2
     property real aaEps: 0.5
-    function frameMargin(){ return frameInsetPx + frameWidth/2 + frameInnerEpsilon; }
+    function frameMargin(){ return MediaRailLayout.frameMargin(frameInsetPx, frameWidth, frameInnerEpsilon) }
 
     // Même extension de cadre que CastPage. La propriété historique est
     // conservée pour compatibilité avec un éventuel override parent.
@@ -1152,7 +1149,6 @@ FocusScope {
                                 }
                             }
                             Image {
-                                id: epImgHq
                                 anchors.fill: parent
                                 fillMode: Image.PreserveAspectCrop
                                 source: (card.activeFocus && !root.isScrolling && epImg.status === Image.Ready && modelData && modelData.Id
@@ -1190,7 +1186,6 @@ FocusScope {
 
 
                     Item {
-                        id: bars
                         anchors.left: parent.left
                         anchors.right: parent.right
                         anchors.bottom: parent.bottom
@@ -1208,7 +1203,6 @@ FocusScope {
                             opacity: 0.85
                         }
                         Rectangle {
-                            id: seasonMarker
                             width: 2
                             height: seasonTrack.height
 
@@ -1236,7 +1230,6 @@ FocusScope {
                             opacity: 0.95
                         }
                         Rectangle {
-                            id: playbackFill
                             anchors.left: playbackTrack.left
                             anchors.bottom: playbackTrack.bottom
                             height: playbackTrack.height

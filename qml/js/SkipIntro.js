@@ -436,6 +436,258 @@ function shouldShow(enabled, armed, seg, nextLocked, audioVisible, subVisible, c
 }
 
 
+
+/* ===== État runtime PlayerOverlay =====
+ * Le domaine Skip Intro reste ici : détection + cache + règles temporelles +
+ * orchestration d'affichage. PlayerOverlay ne conserve que de minces wrappers
+ * liés à son MediaPlayer et à son Loader QML.
+ */
+function armSkipIntroResumeGate(root, targetMs, reason) {
+    var t = Math.max(0, Math.floor(Number(targetMs || 0)));
+    if (!t) return;
+
+    root.skipIntroResumeGateActive = true;
+    root.skipIntroResumeTargetMs = t;
+    root.skipIntroResumeGateReason = reason || "boot-seek";
+    root._skipIntroLastShow = false;
+    root.skipIntroFocusClaimed = false;
+    root.skipIntroAutoFocusClaimed = false;
+    root.skipIntroFocusReleasedByUser = false;
+}
+
+function consumeSkipIntroIfPastResume(root, targetMs) {
+    var t = Math.max(0, Math.floor(Number(targetMs || 0)));
+    var s = startMs(root.skipIntroSegment);
+    var e = endMs(root.skipIntroSegment);
+    var h = hideMs(root.skipIntroSegment);
+    if (!root.skipIntroSegment || e <= s || t < Math.max(e, h)) return false;
+
+    root.skipIntroConsumed = true;
+    root.skipIntroDismissed = true;
+    root.skipIntroFocusClaimed = false;
+    root.skipIntroAutoFocusClaimed = false;
+    root.skipIntroFocusReleasedByUser = true;
+    root._skipIntroWasInside = false;
+    root._skipIntroLastShow = false;
+    root._skipIntroLastPos = t;
+    return true;
+}
+
+function releaseSkipIntroResumeGate(root, item, actualUiMs) {
+    var t = Math.max(0, Math.floor(Number(actualUiMs || 0)));
+    if (root.skipIntroResumeTargetMs > t) t = root.skipIntroResumeTargetMs;
+
+    consumeSkipIntroIfPastResume(root, t);
+    root.skipIntroResumeGateActive = false;
+    root.skipIntroResumeTargetMs = -1;
+    root.skipIntroResumeGateReason = "";
+
+    if (!root.skipIntroConsumed && !root.skipIntroDismissed)
+        syncSkipIntroOverlay(root, item);
+}
+
+function armSkipIntroPlayback(root, item, positionMs) {
+    if (!root || root.serverPrerollBlocking === true || root.skipIntroEnabled !== true)
+        return false;
+
+    var pos = Math.max(0, Math.floor(Number(positionMs || 0)));
+    if (!root.skipIntroPlaybackArmed) {
+        root.skipIntroPlaybackArmed = true;
+        root.skipIntroPlaybackStartMs = pos;
+    }
+
+    syncSkipIntroOverlay(root, item);
+    return true;
+}
+
+function setSkipIntroItemActive(root, item, show) {
+    if (!item) return;
+
+    try {
+        item.uiMs = root.uiPositionMs();
+        item.endMs = endMs(root.skipIntroSegment);
+        if (item.safeMargin !== undefined) item.safeMargin = Math.max(60, root.tvSafeMargin);
+        if (item.safeMarginRight !== undefined) item.safeMarginRight = Math.max(60, root.tvSafeMargin);
+        if (item.safeMarginBottom !== undefined) item.safeMarginBottom = Math.max(60, root.tvSafeMargin);
+        if (item.avoidBottom !== undefined) item.avoidBottom = root.controlsVisible || root.scrubActive ? 190 : 0;
+        if (item.safeAreaAlreadyApplied !== undefined) item.safeAreaAlreadyApplied = false;
+        if (item.label !== undefined) item.label = "Passer le générique";
+
+        var autoFocus = false;
+        var suppressVisiblePriority = false;
+        try {
+            autoFocus = show &&
+                        typeof root._skipIntroAutoFocusAllowed === "function" &&
+                        root._skipIntroAutoFocusAllowed();
+            suppressVisiblePriority = show &&
+                                      root.skipIntroFocusReleasedByUser === true &&
+                                      root.uiChromeRenderVisible === true;
+        } catch(eFocusPolicy) {}
+
+        if (item.stealFocusOnShow !== undefined) item.stealFocusOnShow = autoFocus;
+        if (item.prioritizeOnShow !== undefined) item.prioritizeOnShow = !suppressVisiblePriority;
+        if (item.show !== undefined) item.show = show;
+
+        if (show && !autoFocus && !suppressVisiblePriority &&
+                !root.skipIntroFocusClaimed &&
+                typeof root._focusSkipIntroIfVisible === "function") {
+            try {
+                root._focusSkipIntroIfVisible("chrome-visible-priority", false);
+            } catch(ePriority) {}
+        }
+    } catch(e) {}
+}
+
+function syncSkipIntroOverlay(root, item) {
+    if (!root) return;
+
+    var pos = root.uiPositionMs();
+    var s = startMs(root.skipIntroSegment);
+    var e = endMs(root.skipIntroSegment);
+    var h = hideMs(root.skipIntroSegment);
+
+    if (root.skipIntroResumeGateActive) {
+        root._skipIntroLastShow = false;
+        root.skipIntroFocusClaimed = false;
+        root.skipIntroAutoFocusClaimed = false;
+        setSkipIntroItemActive(root, item, false);
+        root._skipIntroLastPos = pos;
+        return;
+    }
+
+    if (root.skipIntroSegment && e > s &&
+            root.skipIntroPlaybackStartMs >= Math.max(e, h) &&
+            pos >= Math.max(e, h)) {
+        consumeSkipIntroIfPastResume(root, Math.max(pos, root.skipIntroPlaybackStartMs));
+        setSkipIntroItemActive(root, item, false);
+        return;
+    }
+
+    if (root.skipIntroSegment && e > s) {
+        var rewound = root._skipIntroLastPos >= 0 &&
+                      pos < root._skipIntroLastPos - root.skipIntroRearmRewindDeltaMs;
+        if ((root.skipIntroConsumed || root.skipIntroDismissed) &&
+                rewound &&
+                pos < Math.max(0, e - root.skipIntroRearmBackMs)) {
+            root.skipIntroConsumed = false;
+            root.skipIntroDismissed = false;
+        }
+        root._skipIntroWasInside = pos >= Math.max(0, s - root.skipIntroLeadMs) && pos < e;
+    }
+
+    var show = shouldShow(
+        root.skipIntroEnabled,
+        root.skipIntroPlaybackArmed,
+        root.skipIntroSegment,
+        root.nextUiLocked,
+        root.audioMenuVisible,
+        root.subMenuVisible,
+        root.skipIntroConsumed,
+        root.skipIntroDismissed,
+        pos,
+        root.skipIntroLeadMs
+    );
+
+    var hasSkipFocus = false;
+    try {
+        hasSkipFocus = !!(item && item.priorityFocusActive === true);
+    } catch(eFocus) {}
+    root.skipIntroFocusClaimed = show && hasSkipFocus;
+
+    if (show && hasSkipFocus) {
+        try {
+            if (root.uiChromeRenderVisible === false)
+                root.skipIntroAutoFocusClaimed = true;
+        } catch(eAutoFocus) {}
+    } else if (!hasSkipFocus) {
+        root.skipIntroAutoFocusClaimed = false;
+    }
+
+    if (show !== root._skipIntroLastShow)
+        root._skipIntroLastShow = show;
+
+    setSkipIntroItemActive(root, item, show);
+    root._skipIntroLastPos = pos;
+}
+
+function resetSkipIntroState(root, item) {
+    root.skipIntroSegment = null;
+    root.skipIntroLoadedItemId = "";
+    root.skipIntroDismissed = false;
+    root.skipIntroConsumed = false;
+    root.skipIntroPlaybackArmed = false;
+    root.skipIntroPlaybackStartMs = 0;
+    if (root._skipIntroMainSourceSeen !== undefined)
+        root._skipIntroMainSourceSeen = false;
+    root.skipIntroFocusReleasedByUser = false;
+    root.skipIntroFocusClaimed = false;
+    root.skipIntroResumeGateActive = false;
+    root.skipIntroResumeTargetMs = -1;
+    root.skipIntroResumeGateReason = "";
+    root._skipIntroWasInside = false;
+    root._skipIntroLastShow = false;
+    root._skipIntroLastPos = -1;
+    setSkipIntroItemActive(root, item, false);
+}
+
+function loadSkipIntroForCurrentItem(root, item) {
+    if (!root.skipIntroEnabled || !root.serverUrl || !root.accessToken || !root.itemId) return;
+    if (root.skipIntroLoadedItemId === root.itemId && root.skipIntroSegment) return;
+
+    var expected = root.itemId;
+    root.skipIntroLoadedItemId = expected;
+    root.skipIntroDismissed = false;
+    root.skipIntroConsumed = false;
+    root.skipIntroFocusReleasedByUser = false;
+    root.skipIntroFocusClaimed = false;
+    root.skipIntroAutoFocusClaimed = false;
+    root._skipIntroLastPos = -1;
+    root.skipIntroSegment = null;
+
+    fetchIntroSegment(root.serverUrl, root.accessToken, expected, function(ok, seg) {
+        if (expected !== root.itemId) return;
+        if (!ok || !seg) {
+            root.skipIntroSegment = null;
+            setSkipIntroItemActive(root, item, false);
+            return;
+        }
+        root.skipIntroSegment = seg;
+        syncSkipIntroOverlay(root, item);
+    });
+}
+
+function skipIntroNow(root, item, isPlaying) {
+    var end = endMs(root.skipIntroSegment);
+    var start = startMs(root.skipIntroSegment);
+    if (end <= start) return false;
+
+    var pos = Math.max(0, Math.floor(Number(root.uiPositionMs ? root.uiPositionMs() : 0)));
+    var target = Math.max(0, end + root.skipIntroEndPadMs);
+
+    root.skipIntroConsumed = true;
+    root.skipIntroDismissed = false;
+    root.skipIntroFocusClaimed = false;
+    root.skipIntroAutoFocusClaimed = false;
+    root._skipIntroLastShow = false;
+    setSkipIntroItemActive(root, item, false);
+
+    if (pos >= Math.max(start, end - 1000)) {
+        root.resetControlsTimer();
+        return true;
+    }
+
+    if (root.shouldNetworkSeek()) {
+        root._wasPlayingBeforeSwitch = !!isPlaying;
+        root._resumeWantedAfterNegotiation = root._wasPlayingBeforeSwitch;
+        root._serverSeekFallback(target, "skipIntro");
+    } else {
+        root._localSeekTo(target, "skipIntro");
+    }
+
+    root.resetControlsTimer();
+    return true;
+}
+
 // Gestion clavier spécifique au PlayerOverlay. La décision d'afficher le bouton
 // reste dans shouldShow()/PlayerOverlay ; cette fonction ne fait que router les
 // trois actions lorsque Skip Intro possède réellement la priorité de focus.
