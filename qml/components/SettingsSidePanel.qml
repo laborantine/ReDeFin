@@ -27,7 +27,7 @@ FocusScope {
 
     /* === Personnalisation === */
     property real  panelWidthRatio: 0.18
-    property string versionText: "ReDeFin " + ClientId.applicationVersion()
+    property string versionText: "ReDeFin " + ((Qt.application.version && String(Qt.application.version).length > 0) ? String(Qt.application.version) : ClientId.applicationVersion())
     readonly property int panelWidth: Math.max(360, Math.round(width * panelWidthRatio))
 
     /* === Option: Afficher l’horloge === */
