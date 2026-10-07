@@ -1,8 +1,10 @@
 import QtQuick 2.15
+import "../js/NavigationContext.js" as NavContext
 import "../components" as Components
 import "../js/jellyfinBridge.js" as Jellyfin
 import "../js/SeasonUtils.js" as SeasonUtils
 import "../js/MediaCatalog.js" as MediaCatalog
+import "../js/MediaRailLayout.js" as MediaRailLayout
 FocusScope {
     id: detailSeriePage
     width: parent ? parent.width : 1280
@@ -21,19 +23,14 @@ FocusScope {
     property var    fbx
     property var    shared: null
 
-    function _sharedNavApi(){ try { return shared && shared.__redefinNavApi ? shared.__redefinNavApi : null } catch(e) { return null } }
-    function _hydrateSensitiveContextFromShared(){
-        var api = _sharedNavApi()
-        return api && api.hydrate ? api.hydrate(detailSeriePage, false, 0, false) : false
+    function _hydrateSensitiveContextFromShared() {
+        return NavContext.hydrate(shared, detailSeriePage, false, 0, false)
     }
-
-    function _storeSensitiveNavContext(){
-        var api = _sharedNavApi()
-        return api && api.storeTarget ? api.storeTarget(detailSeriePage) : false
+    function _storeSensitiveNavContext() {
+        return NavContext.storeTarget(shared, detailSeriePage)
     }
-    function _navRoute(page, params){
-        var api = _sharedNavApi()
-        return api && api.route ? api.route(detailSeriePage, page, params || ({})) : (page + "?ctx=1")
+    function _navRoute(page, params) {
+        return NavContext.route(shared, detailSeriePage, page, params)
     }
 
     readonly property color glassBase      : "#E6FFFFFF"
@@ -51,7 +48,7 @@ FocusScope {
     readonly property real frameWidth: 2.0
     readonly property real frameInsetPx: 0.0
     readonly property real frameInnerEpsilon: 0.2
-    function frameMargin() { return frameInsetPx + frameWidth/2 + frameInnerEpsilon; }
+    function frameMargin(){ return MediaRailLayout.frameMargin(frameInsetPx, frameWidth, frameInnerEpsilon) }
     property var  item: null
     property var  castPeople: []
     property var  seasons: []
@@ -71,7 +68,7 @@ FocusScope {
         castHydrated = true;
         if (castPageLoader.item) {
             try { castPageLoader.item.people = castPeople; } catch(e) {}
-            Qt.callLater(function(){ SeasonUtils.applyBlockPerf(castPageLoader.item); });
+            Qt.callLater(function(){ MediaRailLayout.applyBlockPerf(castPageLoader.item); });
         }
     }
     function _hydrateSeasonsNow(){
@@ -79,7 +76,7 @@ FocusScope {
         seasonsHydrated = true;
         if (seasonsLoader.item) {
             try { seasonsLoader.item.seasons = seasons; } catch(e) {}
-            Qt.callLater(function(){ SeasonUtils.applyBlockPerf(seasonsLoader.item); });
+            Qt.callLater(function(){ MediaRailLayout.applyBlockPerf(seasonsLoader.item); });
         }
     }
     property bool   hasItem: !!item
@@ -110,7 +107,7 @@ FocusScope {
     property var _avgDurationHandle: null
     function _applyAverageDurationTicks(ticks){
         var t = Number(ticks || 0);
-        averageEpisodeDurationText = t > 0 ? SeasonUtils.formatTicksToHhMm(t) : "";
+        averageEpisodeDurationText = t > 0 ? MediaCatalog.formatTicksToHhMm(t) : "";
     }
     function _resetAverageEpisodeDuration(){
         _avgDurationSeq++
@@ -124,7 +121,7 @@ FocusScope {
         _resetAverageEpisodeDuration();
         var sid = _seriesId(), fallbackTicks = item ? Number(item.RunTimeTicks || 0) : 0;
         if (!serverUrl || !accessToken || !userId || !sid || !Jellyfin.fetchSeriesAverageEpisodeRuntimeTicks) {
-            _applyAverageDurationTicks(MediaCatalog.seriesRuntimeTicksFallback(fallbackTicks));
+            _applyAverageDurationTicks(SeasonUtils.seriesRuntimeTicksFallback(fallbackTicks));
             return;
         }
         var seq = ++_avgDurationSeq;
@@ -139,22 +136,21 @@ FocusScope {
             if (seq !== _avgDurationSeq) return;
             if (_avgDurationHandle === requestHandle) _avgDurationHandle = null
             averageEpisodeDurationLoading = false;
-            _applyAverageDurationTicks(MediaCatalog.seriesRuntimeTicksFallback(fallbackTicks));
+            _applyAverageDurationTicks(SeasonUtils.seriesRuntimeTicksFallback(fallbackTicks));
         });
         _avgDurationHandle = requestHandle
     }
     property string nextUpDurationText: ""
     property string nextUpEndText: ""
     function _updateNextUpMeta(){
-        var ep = SeasonUtils.nextUpEpisodeFromBlock(nextUpLoader.item);
+        var ep = MediaRailLayout.nextUpEpisodeFromBlock(nextUpLoader.item);
         if (!ep) { nextUpDurationText=""; nextUpEndText=""; return; }
         var ticks = Number(ep.RunTimeTicks || ep.RuntimeTicks || 0);
         if (!ticks || ticks <= 0) { nextUpDurationText=""; nextUpEndText=""; return; }
-        nextUpDurationText = SeasonUtils.formatTicksToHhMm(ticks);
-        nextUpEndText = SeasonUtils.formatEndClockFromTicks(ticks);
+        nextUpDurationText = MediaCatalog.formatTicksToHhMm(ticks);
+        nextUpEndText = MediaCatalog.formatEndClockFromTicks(ticks);
     }
     Timer {
-        id: nextUpMetaTimer
         interval: 60000
         repeat: true
         // Timer minute utile uniquement si le bloc NextUp existe vraiment.
@@ -271,8 +267,7 @@ FocusScope {
     property bool memoSaveWindow: false
     function _seriesId(){ return itemId || (item && item.Id) || ""; }
     function _detailFocusApi(){
-        try { return shared && shared.__redefinDetailFocusApi ? shared.__redefinDetailFocusApi : null; }
-        catch(e) { return null; }
+        return NavContext.detailFocusApi(shared)
     }
     function armMemo(scope){
         var api = _detailFocusApi(), sid = _seriesId();
@@ -463,21 +458,21 @@ FocusScope {
             if (!shared || !itemId || !personObj || !personObj.Id) return false;
             var snap = _getFocusSnapshot(), savedY = (snap && typeof snap.scrollY === "number") ? Number(snap.scrollY) : Number(rootFlick ? rootFlick.contentY : 0);
             var savedViewportY = (snap && snap.castViewportY !== undefined && snap.castViewportY !== null) ? Number(snap.castViewportY) : _castViewportY();
-            shared.__redefinPersonReturnContext = ({
+            NavContext.setPersonReturn(shared, ({
                 detailItemId: String(itemId), personId: String(personObj.Id), castIndex: (castPageLoader.item && castPageLoader.item.currentActorIndex !== undefined) ? (castPageLoader.item.currentActorIndex|0) : 0,
                 returnScrollY: isFinite(savedY) ? Math.max(0, savedY) : 0, returnCastViewportY: (savedViewportY !== null && isFinite(savedViewportY)) ? Number(savedViewportY) : null,
                 detailKind: "series", ts: Date.now()
-            });
+            }));
             return true;
         } catch(e) { return false; }
     }
 
     function _consumePersonReturnRefreshMarker(){
         try {
-            if (!shared || !shared.__redefinDetailReturnRefresh)
+            if (!shared || !NavContext.detailReturnRefresh(shared))
                 return false;
 
-            var marker = shared.__redefinDetailReturnRefresh;
+            var marker = NavContext.detailReturnRefresh(shared);
             var markerId = String(marker.itemId || "");
             var scope = String(marker.scope || "").toLowerCase();
             var detailKind = String(marker.detailKind || "").toLowerCase();
@@ -490,7 +485,7 @@ FocusScope {
             if (!itemId || !markerId || markerId !== String(itemId))
                 return false;
             if (ts > 0 && (Date.now() - ts) > 120000) {
-                shared.__redefinDetailReturnRefresh = null;
+                NavContext.clearDetailReturnRefresh(shared);
                 return false;
             }
 
@@ -503,7 +498,7 @@ FocusScope {
                     a.put(_focusKey(),s);
                 }
             }
-            shared.__redefinDetailReturnRefresh = null;
+            NavContext.clearDetailReturnRefresh(shared);
             _personReturnGate = true;
             return true;
         } catch(e) {
@@ -594,7 +589,7 @@ FocusScope {
     }
 
     // Retour terminal DetailSeriePage -> MoviePage/SeriePage : le stockage
-    // reste la responsabilité exclusive de l'API DetailFocus de ShellPage.
+    // reste la responsabilité exclusive de l'API DetailFocus de NavigationContext.
     function _forgetFocusSnapshot(){
         if (_saveQueued) {
             try { saveFocusTimer.stop(); } catch(e0) {}
@@ -930,10 +925,11 @@ FocusScope {
     property bool gatePosterReady: false
     property bool gateBGReady: false
     property bool serverResponseSlow: false
-    readonly property bool hardLoading: (fetchInFlight && !warmSnapshotVisible) || !gateMinDelay || !gateItemReady || !gatePosterReady || !gateBGReady
+    readonly property bool hardLoading: (fetchInFlight && !warmSnapshotVisible) || !gateItemReady
     property bool uiReady: false
     property bool gateNextUpReady: false
     property bool gateSeasonsBlockReady: false
+    property bool gateCastBlockReady: false; property bool gateSimilarBlockReady: false
     property bool gateLayoutReady: false
     property bool extendedLoadingTimedOut: false
 
@@ -963,12 +959,10 @@ FocusScope {
             && (seasonsLoader.height | 0) > 0
     }
     readonly property bool seasonsStrictLoading: hasItem && !seasonsBlockFullyReady
-
-    readonly property bool extendedLoading: !hardLoading && (!gateNextUpReady || !gateSeasonsBlockReady || !gateLayoutReady)
+    readonly property bool extendedLoading: !hardLoading && (!gateNextUpReady || !gateSeasonsBlockReady || !gateCastBlockReady || !gateSimilarBlockReady || !gateLayoutReady)
     property bool _personReturnGate: false
-    readonly property bool visualLoading: hardLoading
-                                          || extendedLoading
-                                          || seasonsStrictLoading
+    readonly property bool visualLoading: hardLoading || !gatePosterReady || !gateBGReady
+                                          || seasonsStrictLoading || extendedLoading
                                           || _personReturnGate || _playerNextUpRestorePending
                                           || _castViewportRestorePending
     readonly property bool shellLoading: visualLoading
@@ -995,8 +989,9 @@ FocusScope {
         seasonsHydrated = false
         warmSnapshotVisible = true
         minLoadTimer.stop(); gateTimeoutTimer.stop()
-        gateMinDelay = gateItemReady = gatePosterReady = gateBGReady = true
-        _releaseExtendedGates()
+        gateMinDelay = gateItemReady = true
+        gatePosterReady = gateBGReady = false
+        _resetExtendedGates()
         _syncPosterSources()
         bgUpdateTimer.restart()
         if (!seasonsFetched && !seasonsFetchInFlight)
@@ -1011,8 +1006,8 @@ FocusScope {
         try { if (h && h.cancel) h.cancel(reason || "context_changed") } catch(e) {}
     }
     function _resetExtendedGates(){
-        gateNextUpReady = false;
-        gateSeasonsBlockReady = false;
+        gateNextUpReady = false; gateSeasonsBlockReady = false;
+        gateCastBlockReady = false; gateSimilarBlockReady = false;
         gateLayoutReady = false;
         extendedLoadingTimedOut = false;
         extendedLoadingTimeout.stop();
@@ -1021,8 +1016,8 @@ FocusScope {
     function _releaseExtendedGates(){
         extendedLoadingTimeout.stop();
         layoutReadyTimer.stop();
-        gateNextUpReady = true;
-        gateSeasonsBlockReady = true;
+        gateNextUpReady = true; gateSeasonsBlockReady = true;
+        gateCastBlockReady = true; gateSimilarBlockReady = true;
         gateLayoutReady = true;
         extendedLoadingTimedOut = true;
     }
@@ -1035,21 +1030,24 @@ FocusScope {
     function _updateExtendedSectionGates(){
         if (hardLoading) return;
         if (!hasItem) {
-            gateNextUpReady = true;
-            gateSeasonsBlockReady = true;
+            gateNextUpReady = gateSeasonsBlockReady = gateCastBlockReady = gateSimilarBlockReady = true;
             return;
         }
         try {
             if (nextUpLoader.status === Loader.Error) gateNextUpReady = true;
-            else if (heavyStageNextUp && nextUpLoader.status === Loader.Ready && nextUpLoader.item) {
-                if ((nextUpLoader.height|0) > 0) gateNextUpReady = true;
-            }
+            else if (heavyStageNextUp && nextUpLoader.status === Loader.Ready && nextUpLoader.item
+                     && nextUpLoader.item.ready === true) gateNextUpReady = true;
         } catch(e1) {}
+        try { gateSeasonsBlockReady = seasonsBlockFullyReady } catch(e2) { gateSeasonsBlockReady = false }
         try {
-            gateSeasonsBlockReady = seasonsBlockFullyReady
-        } catch(e2) {
-            gateSeasonsBlockReady = false
-        }
+            if (!castPeople || castPeople.length === 0 || castPageLoader.status === Loader.Error) gateCastBlockReady = true;
+            else if (heavyStageCast && castPageLoader.status === Loader.Ready && castPageLoader.item) gateCastBlockReady = true;
+        } catch(e3) {}
+        try {
+            if (similarLoader.status === Loader.Error) gateSimilarBlockReady = true;
+            else if (heavyStageSimilar && similarLoader.status === Loader.Ready && similarLoader.item
+                     && (similarLoader.item.loading === undefined || similarLoader.item.loading === false)) gateSimilarBlockReady = true;
+        } catch(e4) {}
     }
     function _resetGates(){
         gateMinDelay=false; gateItemReady=false; gatePosterReady=false; gateBGReady=false;
@@ -1064,7 +1062,7 @@ FocusScope {
         gateMinDelay=true; gateItemReady=true; gatePosterReady=true; gateBGReady=true;
         _releaseExtendedGates();
     }
-    Timer { id: minLoadTimer; interval: 220; repeat: false; onTriggered: gateMinDelay=true }
+    Timer { id: minLoadTimer; interval: 0; repeat: false; onTriggered: gateMinDelay=true }
     Timer {
         id: gateTimeoutTimer
         interval: 1800
@@ -1081,7 +1079,7 @@ FocusScope {
     }
     Timer {
         id: extendedLoadingTimeout
-        interval: 2600
+        interval: 10000
         repeat: false
         onTriggered: _releaseExtendedGates()
     }
@@ -1186,6 +1184,7 @@ FocusScope {
     readonly property int bgH: 720
     property int bgBlur: 8
     property real bgDarken: 0.40
+    readonly property real bgOpacity: 0.90 * (1.0 - Math.max(0.0, Math.min(1.0, bgDarken)))
     Timer { id: bgUpdateTimer; interval: 320; repeat: false; onTriggered: backdrop.updateBackdropNow() }
     function _updateBGGate(){
         if (gateBGReady) return;
@@ -1201,7 +1200,7 @@ FocusScope {
     signal requestNavigation(string page)
     signal requestBackToMenu()
     function ensureItemVisible(target, m){
-        SeasonUtils.ensureItemVisible(rootFlick, target, m)
+        MediaRailLayout.ensureItemVisible(rootFlick, target, m)
     }
     property int seasonsReturnTopMargin: 90
     property int seasonsReturnBottomMargin: 64
@@ -1246,7 +1245,7 @@ FocusScope {
 
         var slotP = seasonsSlot.mapToItem(rootFlick.contentItem, 0, 0)
         var loaderP = seasonsLoader.mapToItem(rootFlick.contentItem, 0, 0)
-        var target = SeasonUtils.seasonsReframeTarget({
+        var target = MediaRailLayout.seasonsReframeTarget({
             slotY: slotP.y,
             slotHeight: seasonsSlot.height,
             slotImplicitHeight: seasonsSlot.implicitHeight,
@@ -1324,11 +1323,11 @@ FocusScope {
     function focusSeasons(reframeMode){
         _hydrateSeasonsNow();
         ensureItemVisible(seasonsLoader, 40);
-        SeasonUtils.focusFirstSeason(seasonsLoader.item);
+        MediaRailLayout.focusFirstSeason(seasonsLoader.item);
         if (reframeMode === true)
             Qt.callLater(function(){ scheduleSeasonsBlockReframe("focusSeasons/restore", 6, true); });
     }
-    function focusCast(){ _hydrateCastNow(); ensureItemVisible(castPageLoader,40); SeasonUtils.restoreCastFocus(castPageLoader.item); }
+    function focusCast(){ _hydrateCastNow(); ensureItemVisible(castPageLoader,40); MediaRailLayout.restoreCastFocus(castPageLoader.item); }
     function goDownPref(){
         if (hasNextUpContent()) { currentFocus=6; _restoreNextUpFocusIfAny(); }
         else if (hasSeasons()) { currentFocus=5; focusSeasons(); }
@@ -1633,7 +1632,7 @@ FocusScope {
                     if (seasonsLoader.item.hasOwnProperty("fallbackPosterUrl"))
                         seasonsLoader.item.fallbackPosterUrl = fallbackPosterUrl
                     seasonsLoader.item.serverUrl = serverUrl
-                    SeasonUtils.applyBlockPerf(seasonsLoader.item)
+                    MediaRailLayout.applyBlockPerf(seasonsLoader.item)
                 }
 
                 Qt.callLater(function(){
@@ -1711,6 +1710,7 @@ FocusScope {
         nextUpDurationText=""; nextUpEndText="";
         _resetAverageEpisodeDuration();
         _useWarmDetailSnapshot();
+        if (!seasonsFetched && !seasonsFetchInFlight) fetchSeasons();
         _fetchHandle = Jellyfin.fetchItem(serverUrl, accessToken, itemId,
             function(res){
                 if (t!==_fetchToken) return;
@@ -1726,7 +1726,7 @@ FocusScope {
                 seasonsHydrated=false;
                 _syncPosterSources();
                 _updatePosterGate();
-                bgUpdateTimer.restart();
+                backdrop.updateBackdropNow();
                 if (!seasonsFetched && !seasonsFetchInFlight)
                     fetchSeasons()
                 serverResponseSlow=false;
@@ -1850,22 +1850,9 @@ FocusScope {
             property int loadToken: 0
             onStatusChanged: {
                 if (loadToken !== backdrop._token) return;
-                if (status===Image.Ready) { backdrop.lastFull=String(source || ""); backdrop.loadingFull=""; opacity=0.90; gateBGReady=true; }
+                if (status===Image.Ready) { backdrop.lastFull=String(source || ""); backdrop.loadingFull=""; opacity=bgOpacity; gateBGReady=true; }
                 else if (status===Image.Error) { backdrop.loadingFull=""; opacity=0.0; gateBGReady=true; }
             }
-        }
-        Rectangle {
-            anchors.fill: bgImg
-            z: bgImg.z + 1
-            color: "#000000"
-            opacity: bgDarken
-            visible: (bgImg.source && ("" + bgImg.source).length > 0) && bgDarken > 0.001
-        }
-        function computeFullUrl(){
-            return item ? Jellyfin.itemBackdropOrPrimaryUrl(serverUrl, item, {
-                fillWidth: Math.round(bgW), fillHeight: Math.round(bgH),
-                quality: 80, blur: MediaCatalog.clampBlur(bgBlur), format: "jpg"
-            }) : ""
         }
         function updateBackdropNow(){
             if (!item) {
@@ -1876,7 +1863,13 @@ FocusScope {
                 gateBGReady=true;
                 return;
             }
-            var ful = computeFullUrl();
+            var ful = MediaCatalog.backdropOrPrimaryUrl(Jellyfin, serverUrl, item, {
+                fillWidth: Math.round(bgW),
+                fillHeight: Math.round(bgH),
+                quality: 80,
+                blur: MediaCatalog.clampBlur(bgBlur),
+                format: "jpg"
+            });
             if (ful===lastFull || ful===loadingFull) { _updateBGGate(); return; }
             loadingFull = ful;
             _token += 1;
@@ -2049,7 +2042,6 @@ FocusScope {
                             visible: hasItem
                         }
                         Row {
-                            id: headerMetaRow
                             spacing: 12
                             visible: hasItem
                             width: headerBlock.width
@@ -2076,7 +2068,6 @@ FocusScope {
                                 }
                             }
                             Item {
-                                id: yearInlineBox
                                 visible: yearText.length > 0
                                 width: yearHasRange ? yearRangeRow.implicitWidth : yearSingleText.implicitWidth
                                 height: 28
@@ -2102,7 +2093,6 @@ FocusScope {
                                         verticalAlignment: Text.AlignVCenter
                                     }
                                     Canvas {
-                                        id: yearRangeArrow
                                         width: 36
                                         height: 28
                                         antialiasing: true
@@ -2179,7 +2169,6 @@ FocusScope {
                             }
                         }
                         Text { textFormat: Text.PlainText;
-                            id: genresText
                             visible: hasItem && genresLine.length > 0
                             text: genresLine
                             color: infoValueColor
@@ -2532,7 +2521,6 @@ FocusScope {
                     }
                 }
                 Item {
-                    id: nextUpSlot
                     width: parent.width
                     implicitHeight: nextUpLoader.height + Math.max(0, tuneNextUpShiftY)
                     height: implicitHeight
@@ -2544,7 +2532,7 @@ FocusScope {
                         active: hasItem && heavyStageNextUp
                         source: active ? Qt.resolvedUrl("NextUpBlock.qml") : ""
                         visible: status===Loader.Ready
-                        height: (status===Loader.Ready && nextUpLoader.item && nextUpLoader.item.hasContent===true) ? (nextUpLoader.item.implicitHeight||0) : 0
+                        height: (status===Loader.Ready && nextUpLoader.item && nextUpLoader.item.hasContent===true) ? (nextUpLoader.item.implicitHeight||0) : (hasItem && (!nextUpLoader.item || nextUpLoader.item.loading) ? 276 : 0)
                         onStatusChanged: {
                             _updateExtendedSectionGates();
                             if (_playerNextUpRestorePending) {
@@ -2582,7 +2570,7 @@ FocusScope {
                         active: (seasons && seasons.length>0) && heavyStageSeasons
                         source: active ? Qt.resolvedUrl("SeasonsBlock.qml") : ""
                         visible: status===Loader.Ready
-                        height: (status===Loader.Ready && seasonsLoader.item) ? Math.max((seasonsLoader.item.implicitHeight||0), 140) : 0
+                        height: (status===Loader.Ready && seasonsLoader.item) ? Math.max((seasonsLoader.item.implicitHeight||0), 140) : (hasItem && (!seasonsFetched || seasons.length > 0) ? 393 : 0)
                         onStatusChanged: { _updateExtendedSectionGates(); }
                         onHeightChanged: _updateExtendedSectionGates()
                         onLoaded: {
@@ -2592,9 +2580,8 @@ FocusScope {
                     }
                 }
                 Item {
-                    id: castTitleSlot
                     width: parent.width
-                    implicitHeight: (castPeople && castPeople.length > 0 && heavyStageCast)
+                    implicitHeight: (castPeople && castPeople.length > 0)
                         ? (24 + Math.max(0, tuneCastShiftY))
                         : 0
                     height: implicitHeight
@@ -2614,7 +2601,6 @@ FocusScope {
                     }
                 }
                 Item {
-                    id: castSlot
                     width: parent.width
                     implicitHeight: castPageLoader.height + Math.max(0, tuneCastShiftY)
                     height: implicitHeight
@@ -2626,8 +2612,9 @@ FocusScope {
                         active: (castPeople.length>0) && heavyStageCast
                         source: active ? Qt.resolvedUrl("CastPage.qml") : ""
                         visible: status===Loader.Ready
-                        height: (status===Loader.Ready && castPageLoader.item) ? (castPageLoader.item.implicitHeight||0) : 0
+                        height: (status===Loader.Ready && castPageLoader.item) ? (castPageLoader.item.implicitHeight||0) : (castPeople.length > 0 ? 351 : 0)
                         onStatusChanged: {
+                            _updateExtendedSectionGates()
                             if (_castViewportRestorePending && !castViewportRestoreTimer.running)
                                 castViewportRestoreTimer.restart()
                         }
@@ -2639,16 +2626,15 @@ FocusScope {
                             }
                         }
                         onLoaded: {
-                            wireCastLoader()
+                            wireCastLoader(); _updateExtendedSectionGates()
                             if (_castViewportRestorePending && !castViewportRestoreTimer.running)
                                 castViewportRestoreTimer.restart()
                         }
                     }
                 }
                 Item {
-                    id: similarTitleSlot
                     width: parent.width
-                    implicitHeight: (heavyStageSimilar && similarReadyNoContent()) ? (24 + Math.max(0, tuneSimilarShiftY)) : 0
+                    implicitHeight: (hasItem && !similarReadyNoContent()) ? (24 + Math.max(0, tuneSimilarShiftY)) : 0
                     height: implicitHeight
                     visible: implicitHeight > 0
                     Item {
@@ -2678,8 +2664,9 @@ FocusScope {
                         active: hasItem && heavyStageSimilar
                         source: active ? Qt.resolvedUrl("SimilarItems.qml") : ""
                         visible: status===Loader.Ready && similarLoader.item && similarLoader.item.hasContent===true
-                        height: (status===Loader.Ready && similarLoader.item && similarLoader.item.hasContent===true) ? Math.max((similarLoader.item.implicitHeight||0), 283) : 0
-                        onLoaded: wireSimilarLoader()
+                        height: (status===Loader.Ready && similarLoader.item && similarLoader.item.hasContent===true) ? Math.max((similarLoader.item.implicitHeight||0), 283) : (hasItem && (!similarLoader.item || similarLoader.item.loading) ? 415 : 0)
+                        onStatusChanged: _updateExtendedSectionGates()
+                        onLoaded: { wireSimilarLoader(); _updateExtendedSectionGates() }
                     }
                 }
                 Item { id: similarBottomProbe; width: 1; height: 40 }
@@ -2691,12 +2678,13 @@ FocusScope {
         target: nextUpLoader.item
         ignoreUnknownSignals: true
         onHasContentChanged: {
-            gateNextUpReady = true;
+            _updateExtendedSectionGates();
             requestSaveFocusSnapshot();
             _updateNextUpMeta();
             _schedulePokeRestore();
             if (_playerNextUpRestorePending) _schedulePlayerNextUpRestore(24);
         }
+        onReadyChanged: _updateExtendedSectionGates()
         onCurrentIndexChanged: { requestSaveFocusSnapshot(); _updateNextUpMeta(); }
         onActiveFocusChanged: {
             if (target && target.activeFocus) {
@@ -2750,7 +2738,8 @@ FocusScope {
         target: similarLoader.item
         ignoreUnknownSignals: true
         onLastFocusedIndexChanged: requestSaveFocusSnapshot()
-        onHasContentChanged: { requestSaveFocusSnapshot(); _schedulePokeRestore(); _scheduleViewportGate(); }
+        onHasContentChanged: { _updateExtendedSectionGates(); requestSaveFocusSnapshot(); _schedulePokeRestore(); _scheduleViewportGate(); }
+        onLoadingChanged: _updateExtendedSectionGates()
         onOpenItemRequested: function(newItemId, newItemType){
             if (!newItemId || !requestNavigation) return;
             flushSaveFocusSnapshotNow();
@@ -2762,12 +2751,21 @@ FocusScope {
             }));
         }
     }
+    function _castImagesNeeded(){
+        if (!visible || !castPageLoader || !rootFlick) return false;
+        if (currentFocus === 3) return true;
+        // Lire contentY/height rend le binding sensible au défilement et au layout.
+        var scrollY = rootFlick.contentY, viewHeight = rootFlick.height;
+        var top = castPageLoader.mapToItem(rootFlick.contentItem, 0, 0).y - scrollY;
+        return top < viewHeight && top + castPageLoader.height > 0;
+    }
     function wireCastLoader(){
         var it = castPageLoader.item; if(!it) return;
+        it.imageLoadEnabled = Qt.binding(function(){ return _castImagesNeeded() });
         it.people = castHydrated ? castPeople : castPeople.slice(0, castInitialLimit);
         it.serverUrl = serverUrl; it.accessToken=accessToken; it.userId=userId;
         it.userName=userName; it.userImageTag=userImageTag; it.fbx=fbx;
-        SeasonUtils.applyBlockPerf(it);
+        MediaRailLayout.applyBlockPerf(it);
         _schedulePokeRestore();
     }
     function wireSeasonsLoader(){
@@ -2775,13 +2773,13 @@ FocusScope {
         it.seasons = seasonsFetched ? seasons : []
         it.serverUrl = serverUrl;
         if (it.hasOwnProperty("fallbackPosterUrl")) it.fallbackPosterUrl = fallbackPosterUrl;
-        SeasonUtils.applyBlockPerf(it);
+        MediaRailLayout.applyBlockPerf(it);
         _schedulePokeRestore();
     }
     function wireSimilarLoader(){
         var it = similarLoader.item; if(!it) return;
         it.item=item; it.serverUrl=serverUrl; it.accessToken=accessToken; it.userId=userId; it.fbx=fbx;
-        SeasonUtils.applyBlockPerf(it);
+        MediaRailLayout.applyBlockPerf(it);
         if (it.fetchSimilarIfReady) Qt.callLater(it.fetchSimilarIfReady);
         _schedulePokeRestore();
         _scheduleViewportGate();
@@ -2795,6 +2793,8 @@ FocusScope {
         it.fbx=fbx;
         if (it.hasOwnProperty("fallbackPosterUrl")) it.fallbackPosterUrl = fallbackPosterUrl;
         if (it.hasOwnProperty("seriesScopedOnly")) it.seriesScopedOnly = true;
+        it.seasonsHintLoading = Qt.binding(function(){ return !detailSeriePage.seasonsFetched });
+        it.seasonsHint = Qt.binding(function(){ return detailSeriePage.seasonsFetched ? detailSeriePage.seasons : null });
         try {
             var restoreSnap = _getFocusSnapshot();
             var restoreId = preselectEpisodeId
@@ -2815,7 +2815,7 @@ FocusScope {
         it.requestFocusBelow = function(){
             goDownFromNextUp();
         };
-        SeasonUtils.applyBlockPerf(it);
+        MediaRailLayout.applyBlockPerf(it);
         if (it.refetch) Qt.callLater(it.refetch);
         else if (it.fetchNextUpIfReady) Qt.callLater(it.fetchNextUpIfReady);
         Qt.callLater(function(){
@@ -2911,7 +2911,7 @@ FocusScope {
         overlayData={ posterUrl: effectivePosterUrl, posterMaxW: posterMaxW, posterMaxH: posterMaxH };
     }
     function _overviewReaderImageUrl(){
-        return item ? Jellyfin.itemBackdropOrPrimaryUrl(serverUrl, item, {
+        return item ? MediaCatalog.backdropOrPrimaryUrl(Jellyfin, serverUrl, item, {
             fillWidth: 720, fillHeight: 405, quality: 88, format: "jpg"
         }) : "";
     }
@@ -2957,7 +2957,7 @@ FocusScope {
         case 2: currentFocus=2; ensureItemVisible(posterFocus,20); posterFocus.forceActiveFocus(); break;
         case 6: currentFocus=6; _restoreNextUpFocusIfAny(); break;
         case 5: currentFocus=5; focusSeasons(); break;
-        case 3: currentFocus=3; ensureItemVisible(castPageLoader,40); SeasonUtils.restoreCastFocus(castPageLoader.item); break;
+        case 3: currentFocus=3; ensureItemVisible(castPageLoader,40); MediaRailLayout.restoreCastFocus(castPageLoader.item); break;
         case 4:
             if (hasSimilarContent()) { currentFocus=4; _restoreSimilarFocusIfAny(); }
             else {

@@ -2,9 +2,11 @@
 // La grille, le tri, la pagination, le backdrop et le focus D-Pad sont fournis
 // par moviepage.qml en mode "personal" ; cette page ne conserve que le viewer.
 import QtQuick 2.15
+import "../js/NavigationContext.js" as NavContext
 import "../components" as Components
 import "../js/jellyfinBridge.js" as Jellyfin
 import "../js/MediaCatalog.js" as MediaCatalog
+import "../js/MediaBrowser.js" as MediaBrowser
 
 Item {
     id: personalMediaPage
@@ -95,13 +97,8 @@ Item {
         }
     }
 
-    function _sharedNavApi() {
-        try { return shared && shared.__redefinNavApi ? shared.__redefinNavApi : null }
-        catch(e) { return null }
-    }
     function _storeSensitiveNavContext() {
-        var api = _sharedNavApi()
-        return api && api.storeTarget ? api.storeTarget(personalMediaPage) : false
+        return NavContext.storeTarget(shared, personalMediaPage)
     }
     function _stateKey() { return "personalmedia|" + (folderId || "") }
     function _sharedBucket() {
@@ -112,7 +109,7 @@ Item {
     }
     function _readViewerState() {
         var b = _sharedBucket()
-        return MediaCatalog.browserReadSharedState(b, b ? _stateKey() : "")
+        return MediaBrowser.browserReadSharedState(b, b ? _stateKey() : "")
     }
     function _writeViewerState() {
         if (browser && browser.saveCatalogState) browser.saveCatalogState()
@@ -572,7 +569,6 @@ Item {
                     Behavior on opacity { NumberAnimation { duration: 110; easing.type: Easing.OutCubic } }
                 }
                 Image {
-                    id: viewerHighImage
                     anchors.fill: parent
                     source: (viewerCard.current
                              && !viewerCard.video
@@ -595,7 +591,6 @@ Item {
                     Behavior on opacity { NumberAnimation { duration: 110; easing.type: Easing.OutCubic } }
                 }
                 Rectangle {
-                    id: viewerPlayCircle
                     anchors.centerIn: parent
                     width: 118; height: 118; radius: 59
                     color: Qt.rgba(0.02, 0.025, 0.04, 0.82)
@@ -648,7 +643,6 @@ Item {
             color: "#FFFFFF"; font.pixelSize: 26; font.bold: true; elide: Text.ElideRight; textFormat: Text.PlainText
         }
         Item {
-            id: viewerTagsClip
             z: 21
             anchors.left: viewerTitle.left
             anchors.top: viewerTitle.bottom

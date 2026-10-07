@@ -6,6 +6,7 @@ import QtQuick 2.15
 import QtGraphicalEffects 1.15
 import "../js/jellyfinBridge.js" as Jellyfin
 import "../js/SafeLog.js" as SafeLog
+import "../js/MediaRailLayout.js" as MediaRailLayout
 
 FocusScope {
     id: root
@@ -28,6 +29,16 @@ FocusScope {
     property var    requestFocusAbove          // function() OR Item
     property var    requestFocusBelow          // function() OR Item
     property bool   seriesScopedOnly: true
+
+    // Liste /Shows/{seriesId}/Seasons déjà obtenue par la page hôte (ex.
+    // detailSeriePage.fetchSeasons()), pour la barre de position saison
+    // (_seasonRatio()/_ensureSeasons()). Évite un second GET /Seasons
+    // identique : voir _seasonsFromHint(). Absente ou vide (pas encore
+    // arrivée) : repli sur la requête habituelle, comme avant.
+    property var    seasonsHint: null
+    property bool seasonsHintLoading: false
+    onSeasonsHintChanged: _ensureSeasons(seriesId)
+    onSeasonsHintLoadingChanged: _ensureSeasons(seriesId)
 
     // Algo
     property int    stopGraceMs: 45000
@@ -216,11 +227,7 @@ FocusScope {
     readonly property int firstEdgePad: Math.max(8, edgePad - firstPosterLeftShift)
 
     function topPadFor(h) {
-        return Math.max(18,
-            Math.ceil(h * (focusScale - 1))
-            + focusLiftPx
-            + Math.ceil(frameWidth)
-            + 2)
+        return Math.max(18, MediaRailLayout.focusTopPad(h, focusScale, focusLiftPx, frameWidth))
     }
 
     // titre seul sous la jaquette
@@ -233,7 +240,7 @@ FocusScope {
     property real frameInsetPx: 0.0
     property real frameInnerEpsilon: 0.2
     property real aaEps: 0.5
-    function frameMargin(){ return frameInsetPx + frameWidth/2 + frameInnerEpsilon; }
+    function frameMargin(){ return MediaRailLayout.frameMargin(frameInsetPx, frameWidth, frameInnerEpsilon) }
 
     // Même extension de cadre que CastPage. La propriété historique est
     // conservée pour compatibilité avec un éventuel override parent.
@@ -450,8 +457,34 @@ FocusScope {
     property var _seasonCacheBySeries: ({})
     property int _seasonCacheVersion: 0
 
+    // Construit byIndex à partir de seasonsHint plutôt que du réseau, si la
+    // page hôte l'a déjà fournie pour cette série. seasonsHint est scopée à
+    // une seule série (celle de la page hôte) : un sId différent (rail non
+    // seriesScopedOnly, plusieurs séries mélangées) retombe sur le réseau.
+    function _seasonsFromHint(sId){
+        if (seasonsHint === null || seasonsHint === undefined) return null;
+        if (!sId || !seriesId || String(sId) !== String(seriesId)) return null;
+        var byIdx = {};
+        for (var i=0; i<seasonsHint.length; i++){
+            var it = seasonsHint[i] || {};
+            var idx = (it.IndexNumber!=null) ? it.IndexNumber : -1;
+            var tot = (it.EpisodeCount!=null) ? it.EpisodeCount : ((it.ChildCount!=null) ? it.ChildCount : 0);
+            if (idx>=0) byIdx[idx]=tot;
+        }
+        return byIdx;
+    }
+
     function _ensureSeasons(sId){
         if(!sId || disposed) return;
+        if (String(sId) === String(seriesId) && seasonsHintLoading) return;
+        var hinted = _seasonsFromHint(sId);
+        if (hinted !== null) {
+            var hintCache = _seasonCacheBySeries || {};
+            hintCache[sId] = { loaded: true, inFlight: false, byIndex: hinted };
+            _seasonCacheBySeries = hintCache;
+            _seasonCacheVersion++;
+            return;
+        }
 
         var c = _seasonCacheBySeries[sId];
         if (c && c.loaded) return;
@@ -1152,7 +1185,6 @@ FocusScope {
                                 }
                             }
                             Image {
-                                id: epImgHq
                                 anchors.fill: parent
                                 fillMode: Image.PreserveAspectCrop
                                 source: (card.activeFocus && !root.isScrolling && epImg.status === Image.Ready && modelData && modelData.Id
@@ -1190,7 +1222,6 @@ FocusScope {
 
 
                     Item {
-                        id: bars
                         anchors.left: parent.left
                         anchors.right: parent.right
                         anchors.bottom: parent.bottom
@@ -1208,7 +1239,6 @@ FocusScope {
                             opacity: 0.85
                         }
                         Rectangle {
-                            id: seasonMarker
                             width: 2
                             height: seasonTrack.height
 
@@ -1236,7 +1266,6 @@ FocusScope {
                             opacity: 0.95
                         }
                         Rectangle {
-                            id: playbackFill
                             anchors.left: playbackTrack.left
                             anchors.bottom: playbackTrack.bottom
                             height: playbackTrack.height

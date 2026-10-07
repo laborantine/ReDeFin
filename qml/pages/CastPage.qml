@@ -24,6 +24,7 @@
 // ✅ FIX logs Qt: ne tente plus les portraits sans PrimaryImageTag + mémo échec image
 
 import QtQuick 2.15
+import "../js/MediaRailLayout.js" as MediaRailLayout
 import QtGraphicalEffects 1.15
 import "../js/jellyfinBridge.js" as Jellyfin
 FocusScope {
@@ -79,11 +80,12 @@ FocusScope {
     // headroom pour que zoom+lifts ne se fassent pas couper (on garde safe)
     property int topPadTightenPx: 0
     function topPadFor(h) {
-        var base = Math.ceil(h * (focusScale - 1)) + focusLiftPx + Math.ceil(frameWidth) + 2
-        return Math.max(18, base - Math.max(0, topPadTightenPx|0))
+        var base = MediaRailLayout.focusTopPad(h, focusScale, focusLiftPx, frameWidth)
+        return Math.max(18, base - Math.max(0, topPadTightenPx | 0))
     }
 
     // Text cut fix
+    property bool imageLoadEnabled: true
     property int  nameH: 24
     property int  roleH: 21
     property int  vSpacing: 5
@@ -99,7 +101,7 @@ FocusScope {
     readonly property real frameInsetPx: 0.0
     readonly property real frameInnerEpsilon: 0.2
     readonly property real aaEps: 0.5
-    function frameMargin() { return frameInsetPx + frameWidth/2 + frameInnerEpsilon; }
+    function frameMargin(){ return MediaRailLayout.frameMargin(frameInsetPx, frameWidth, frameInnerEpsilon) }
 
     property real focusFrameExpandPx: 2.5
 
@@ -539,7 +541,7 @@ FocusScope {
                                     id: actorImg
                                     anchors.fill: parent
                                     fillMode: Image.PreserveAspectCrop
-                                    source: actorCard.posterSource
+                                    source: castPage.imageLoadEnabled ? actorCard.posterSource : ""
                                     cache: true
                                     asynchronous: true
                                     mipmap: false
@@ -563,10 +565,9 @@ FocusScope {
                                     }
                                 }
                                 Image {
-                                    id: actorImgHq
                                     anchors.fill: parent
                                     fillMode: Image.PreserveAspectCrop
-                                    source: (actorCard.activeFocus && !castPage.isScrolling && actorImg.status === Image.Ready
+                                    source: (castPage.imageLoadEnabled && actorCard.activeFocus && !castPage.isScrolling && actorImg.status === Image.Ready
                                              && actorCard.p && actorCard.p.Id
                                              && castPage.hqPosterTargetId === String(actorCard.p.Id))
                                             ? castPage.posterHqUrlForPerson(actorCard.p) : ""
@@ -722,7 +723,6 @@ FocusScope {
                     }
 
                     OpacityMask {
-                        id: nameMaskedLine
                         anchors.fill: parent
                         visible: nameClip.maskActive
                         enabled: nameClip.maskActive
@@ -919,7 +919,6 @@ FocusScope {
                     }
 
                     OpacityMask {
-                        id: roleMaskedLine
                         anchors.fill: parent
                         visible: roleClip.maskActive
                         enabled: roleClip.maskActive

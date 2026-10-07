@@ -9,6 +9,7 @@
 
 import QtQuick 2.15
 import "../js/jellyfinBridge.js" as Jellyfin
+import "../js/JellyfinServerDiscovery.js" as ServerDiscovery
 
 FocusScope {
     id: root
@@ -165,7 +166,7 @@ FocusScope {
         _lastDiscoveryAt = now
         discoveryInFlight = true
         try { if (fbx && Jellyfin.setFbx) Jellyfin.setFbx(fbx) } catch(e0) {}
-        _discoveryHandle = Jellyfin.discoverServers({
+        _discoveryHandle = ServerDiscovery.start({
             fbx: fbx || null,
             maxHosts: 96,
             maxParallel: _discoveryMaxParallel,
@@ -319,7 +320,6 @@ FocusScope {
     property real _savedHoldProgress: 0
     property real _savedDeleteSwallowUntilMs: 0
 
-    property int _shortTapMs: 220
     property int _preArmMs: 1000
     property int _commitMs: 1000
     property int _fallbackLongMs: 2000
@@ -344,18 +344,13 @@ FocusScope {
     }
 
     function _beginSavedHold(){
-        if (savedList.count<=0) return;
+        if (_savedKeyHeld || savedList.count<=0) return false;
         _savedHoldIndex = savedList.currentIndex|0;
         if (_savedHoldIndex < 0) _savedHoldIndex = 0;
-
-        var u = _savedHoldUrl();
-        if (!u) { _resetSavedHold(); return; }
-
-        _savedDownAtMs = Date.now();
-        _savedPressActive = true;
-        _savedArmed = false;
-
+        if (!_savedHoldUrl()) { _resetSavedHold(); return false; }
+        _savedKeyHeld = true; _savedDownAtMs = Date.now(); _savedPressActive = true; _savedArmed = false;
         savedPreArm.restart();
+        return true;
     }
 
     function _commitSavedDelete(){
@@ -385,26 +380,24 @@ FocusScope {
         var now = Date.now();
         var dur = now - _savedDownAtMs;
 
-        if (_savedArmed) {
-            var armedDur = now - _savedArmedAtMs;
-            if (armedDur >= _commitMs || dur >= _fallbackLongMs) {
-                _commitSavedDelete();
-                return;
+        // Comme pour les profils : dès que l'animation a commencé, le
+        // relâchement n'est plus un appui court et ne sélectionne rien.
+        if (dur >= _preArmMs) {
+            if (_savedArmed) {
+                var armedDur = now - _savedArmedAtMs;
+                if (armedDur >= _commitMs || dur >= _fallbackLongMs) {
+                    _commitSavedDelete();
+                    return;
+                }
             }
+            _savedDeleteSwallowUntilMs = Date.now() + 300;
             _resetSavedHold();
             return;
         }
 
-        if (dur >= _fallbackLongMs) {
-            _commitSavedDelete();
-            return;
-        }
-
-        if (dur <= _shortTapMs) {
-            var s = savedServers[savedList.currentIndex|0];
-            if (s) root.chooseServer(s);
-        }
+        var s = savedServers[savedList.currentIndex|0];
         _resetSavedHold();
+        if (s) root.chooseServer(s);
     }
 
     Timer {
@@ -567,38 +560,31 @@ FocusScope {
                     }
                 }
 
-                Item {
-                    anchors.centerIn: parent
-                    width: 76
-                    height: 76
+                Canvas {
+                    anchors.fill: parent
+                    anchors.margins: 2
                     visible: serverCell.isHoldTarget && root._savedArmed
-
-                    Rectangle {
-                        anchors.fill: parent
-                        radius: width / 2
-                        color: "#CC0A0A0A"
-                        border.width: 1
-                        border.color: "#55FFFFFF"
-                        antialiasing: true
-                    }
-
-                    Repeater {
-                        model: 16
-                        Item {
-                            anchors.fill: parent
-                            rotation: index * 360 / 16
-                            Rectangle {
-                                width: 4
-                                height: 12
-                                radius: 2
-                                anchors.horizontalCenter: parent.horizontalCenter
-                                y: 4
-                                color: "#ffffff"
-                                opacity: (index + 1) / 16 <= root._savedHoldProgress ? 1.0 : 0.20
-                                antialiasing: true
-                                Behavior on opacity { NumberAnimation { duration: 60 } }
-                            }
-                        }
+                    property real progress: root._savedHoldProgress
+                    antialiasing: true
+                    onProgressChanged: requestPaint()
+                    onVisibleChanged: requestPaint()
+                    onPaint: {
+                        var c = getContext("2d")
+                        c.clearRect(0, 0, width, height)
+                        var p = Math.max(0, Math.min(1, progress))
+                        if (p <= 0) return
+                        var x = 2, y = 2, w = width - 4, h = height - 4
+                        var remain = 2 * (w + h) * p
+                        c.strokeStyle = "#FFFFFF"
+                        c.lineWidth = 3
+                        c.lineCap = "round"
+                        c.beginPath()
+                        c.moveTo(x, y)
+                        var seg = Math.min(remain, w); c.lineTo(x + seg, y); remain -= seg
+                        if (remain > 0) { seg = Math.min(remain, h); c.lineTo(x + w, y + seg); remain -= seg }
+                        if (remain > 0) { seg = Math.min(remain, w); c.lineTo(x + w - seg, y + h); remain -= seg }
+                        if (remain > 0) { seg = Math.min(remain, h); c.lineTo(x, y + h - seg) }
+                        c.stroke()
                     }
                 }
             }
@@ -620,7 +606,6 @@ FocusScope {
                     list.currentIndex = index
                     if (serverCell.savedRow) {
                         list.forceActiveFocus()
-                        root._savedKeyHeld = true
                         root._beginSavedHold()
                     }
                 }
@@ -658,14 +643,16 @@ FocusScope {
             spacing: 40
 
             /* ================== Colonne gauche : sauvegardés ================== */
-            Column {
+            Item {
                 id: leftCol
                 width: Math.round(columns.width * 0.45)
-                spacing: 16
+                height: columns.height
 
                 Item {
+                    id: savedHeader
                     width: leftCol.width
                     height: 42
+                    anchors.top: parent.top
                     Text { textFormat: Text.PlainText;
                         id: savedTitle
                         text: "Serveurs sauvegardés"
@@ -687,11 +674,83 @@ FocusScope {
                     }
                 }
 
-                // ✅ viewport clipé + ListView non clipé + padding => plus de bord rogné au zoom
-                Item {
-                    id: savedViewport
+                Rectangle {
+                    id: enterBtn
                     width: leftCol.width
-                    height: 300
+                    height: 56
+                    anchors.left: parent.left
+                    anchors.bottom: parent.bottom
+                    radius: root.uiRadiusCard
+                    color: activeFocus ? root.uiFocus : root.uiSurface
+                    border.width: activeFocus ? 0 : 1
+                    border.color: root.uiBorder
+                    focus: true
+                    Behavior on color { ColorAnimation { duration: 100 } }
+
+                    Keys.onReturnPressed: { root.enterAddressRequested(); event.accepted = true }
+                    Keys.onEnterPressed:  { root.enterAddressRequested(); event.accepted = true }
+                    Keys.onPressed: {
+                        if (event.key === Qt.Key_Right) {
+                            if (!focusFirst(discoveredList)) focusFirst(savedList)
+                            event.accepted = true
+                        } else if (event.key === Qt.Key_Up) {
+                            if (root._lastListFocused === "discovered" && discoveredList.count>0) focusFirst(discoveredList)
+                            else if (savedList.count>0) focusFirst(savedList)
+                            else if (discoveredList.count>0) focusFirst(discoveredList)
+                            event.accepted = true
+                        } else if (event.key === Qt.Key_Left) {
+                            event.accepted = true
+                        }
+                    }
+                    MouseArea { anchors.fill: parent; onClicked: root.enterAddressRequested() }
+
+                    Text { textFormat: Text.PlainText;
+                        anchors.centerIn: parent
+                        text: "Entrer l'adresse du serveur"
+                        color: enterBtn.activeFocus ? "#000000" : root.uiText
+                        font.pixelSize: 18
+                        font.bold: enterBtn.activeFocus
+                        Behavior on color { ColorAnimation { duration: 100 } }
+                    }
+                }
+
+                Item {
+                    id: savedDeleteStatus
+                    width: leftCol.width
+                    height: 82
+                    anchors.left: parent.left
+                    anchors.bottom: enterBtn.top
+                    anchors.bottomMargin: 8
+
+                    Column {
+                        anchors.centerIn: parent
+                        width: parent.width
+                        spacing: 2
+                        visible: root._savedPressActive && root._savedArmed
+
+                        Item {
+                            width: 60; height: 36; anchors.horizontalCenter: parent.horizontalCenter
+                            Rectangle {
+                                x: 5; y: 3; width: 18; height: 30; radius: 2
+                                color: "transparent"; border.width: 3; border.color: "#FFFFFF"
+                                rotation: -8; transformOrigin: Item.Right
+                            }
+                            Rectangle { x: 17; y: 17; width: 3; height: 3; radius: 1.5; color: "#FFFFFF" }
+                            Rectangle { x: 28; y: 16; width: 21; height: 4; radius: 2; color: "#FFFFFF" }
+                            Rectangle { x: 44; y: 12; width: 11; height: 11; color: "#FFFFFF"; rotation: 45; antialiasing: true }
+                        }
+                        Text { textFormat: Text.PlainText; text: Math.round(root._savedHoldProgress * 100) + " %"; color: "#FFFFFF"; font.pixelSize: 14; font.bold: true; width: parent.width; horizontalAlignment: Text.AlignHCenter }
+                        Text { textFormat: Text.PlainText; text: "Suppression du serveur..."; color: root.uiTextSecondary; font.pixelSize: 12; width: parent.width; horizontalAlignment: Text.AlignHCenter }
+                    }
+                }
+
+                Item {
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: savedHeader.bottom
+                    anchors.topMargin: 10
+                    anchors.bottom: savedDeleteStatus.top
+                    anchors.bottomMargin: 8
                     clip: true
 
                     ListView {
@@ -709,129 +768,67 @@ FocusScope {
                         focus: true
 
                         onActiveFocusChanged: {
-                            if (activeFocus) root._lastListFocused = "saved";
-                            if (!activeFocus && root._savedPressActive) root._resetSavedHold();
+                            if (activeFocus) root._lastListFocused = "saved"
+                            if (!activeFocus && root._savedPressActive) root._resetSavedHold()
                         }
 
                         onCountChanged: {
-                            if (count > 0) currentIndex = root._clamp(currentIndex|0, 0, count-1);
-                            else currentIndex = -1;
+                            if (count > 0) currentIndex = root._clamp(currentIndex|0, 0, count-1)
+                            else currentIndex = -1
 
-                            if (root._postDeleteRefocusPending) Qt.callLater(root._applyPostDeleteRefocus);
-                            else {
-                                if (activeFocus && count === 0) Qt.callLater(function(){
-                                    if (discoveredList.count > 0) discoveredList.forceActiveFocus();
-                                    else enterBtn.forceActiveFocus();
-                                });
-                            }
+                            if (root._postDeleteRefocusPending) Qt.callLater(root._applyPostDeleteRefocus)
+                            else if (activeFocus && count === 0) Qt.callLater(function(){
+                                if (discoveredList.count > 0) discoveredList.forceActiveFocus()
+                                else enterBtn.forceActiveFocus()
+                            })
                         }
 
                         Keys.onPressed: {
-                            if (root._savedPressActive && !root._isOkKey(event.key)) { event.accepted = true; return; }
+                            if (root._savedPressActive && !root._isOkKey(event.key)) { event.accepted = true; return }
 
                             if (root._isOkKey(event.key)) {
-                                event.accepted = true;
-                                if (event.isAutoRepeat) return;
-                                if (!root._savedKeyHeld) {
-                                    root._savedKeyHeld = true;
-                                    root._beginSavedHold();
-                                }
-                                return;
+                                event.accepted = true
+                                if (event.isAutoRepeat) return
+                                root._beginSavedHold()
+                                return
                             }
 
                             if (event.key === Qt.Key_Up) {
-                                root._moveList(savedList, -1);
-                                event.accepted = true;
-                                return;
+                                root._moveList(savedList, -1)
+                                event.accepted = true
+                                return
                             }
                             if (event.key === Qt.Key_Down) {
-                                if (savedList.count === 0) { enterBtn.forceActiveFocus(); event.accepted = true; return; }
-                                if ((savedList.currentIndex|0) >= savedList.count - 1) { enterBtn.forceActiveFocus(); event.accepted = true; return; }
-                                root._moveList(savedList, +1);
-                                event.accepted = true;
-                                return;
+                                if (savedList.count === 0 || (savedList.currentIndex|0) >= savedList.count - 1) {
+                                    enterBtn.forceActiveFocus(); event.accepted = true; return
+                                }
+                                root._moveList(savedList, +1)
+                                event.accepted = true
+                                return
                             }
                             if (event.key === Qt.Key_Right) {
-                                if (!focusFirst(discoveredList)) enterBtn.forceActiveFocus();
-                                event.accepted = true;
-                                return;
+                                if (!focusFirst(discoveredList)) enterBtn.forceActiveFocus()
+                                event.accepted = true
+                                return
                             }
                             if (event.key === Qt.Key_Left) {
-                                enterBtn.forceActiveFocus();
-                                event.accepted = true;
-                                return;
+                                enterBtn.forceActiveFocus()
+                                event.accepted = true
+                                return
                             }
                         }
 
                         Keys.onReleased: {
                             if (root._isOkKey(event.key)) {
-                                event.accepted = true;
-                                if (event.isAutoRepeat) return;
-                                root._savedKeyHeld = false;
-                                root._endSavedHold();
+                                event.accepted = true
+                                if (event.isAutoRepeat) return
+                                root._savedKeyHeld = false
+                                root._endSavedHold()
                             }
                         }
 
                         delegate: serverRowDelegate
                     }
-                }
-
-                Rectangle {
-                    id: enterBtn
-                    width: leftCol.width
-                    height: 56
-                    radius: root.uiRadiusCard
-                    color: activeFocus ? root.uiFocus : root.uiSurface
-                    border.width: activeFocus ? 0 : 1
-                    border.color: root.uiBorder
-                    focus: true
-                    Behavior on color { ColorAnimation { duration: 100 } }
-
-                    Keys.onReturnPressed: { root.enterAddressRequested(); event.accepted = true }
-                    Keys.onEnterPressed:  { root.enterAddressRequested(); event.accepted = true }
-                    Keys.onPressed: {
-                        if (event.key === Qt.Key_Right) {
-                            if (!focusFirst(discoveredList)) focusFirst(savedList);
-                            event.accepted = true;
-                        } else if (event.key === Qt.Key_Up) {
-                            if (root._lastListFocused === "discovered" && discoveredList.count>0) focusFirst(discoveredList);
-                            else if (savedList.count>0) focusFirst(savedList);
-                            else if (discoveredList.count>0) focusFirst(discoveredList);
-                            event.accepted = true;
-                        } else if (event.key === Qt.Key_Left) {
-                            event.accepted = true;
-                        }
-                    }
-                    MouseArea { anchors.fill: parent; onClicked: root.enterAddressRequested() }
-
-                    Row {
-                        anchors.fill: parent
-                        anchors.margins: 14
-                        spacing: 10
-                        Rectangle {
-                            width: 24; height: 24; radius: 12
-                            color: "transparent"
-                            border.width: 2
-                            border.color: enterBtn.activeFocus ? "#000000" : root.uiTextSecondary
-                            Behavior on border.color { ColorAnimation { duration: 100 } }
-                        }
-                        Text { textFormat: Text.PlainText;
-                            text: "Entrer l'adresse du serveur"
-                            color: enterBtn.activeFocus ? "#000000" : root.uiText
-                            font.pixelSize: 18
-                            font.bold: enterBtn.activeFocus
-                            Behavior on color { ColorAnimation { duration: 100 } }
-                        }
-                    }
-                }
-
-                Text { textFormat: Text.PlainText;
-                    text: "Astuce : appui long sur OK = supprimer un serveur."
-                    color: root.uiTextMuted
-                    font.pixelSize: 14
-                    wrapMode: Text.WordWrap
-                    width: leftCol.width
-                    opacity: 0.9
                 }
             }
 
@@ -867,7 +864,6 @@ FocusScope {
 
                 // ✅ viewport clipé + ListView non clipé + padding => plus de bord rogné au zoom
                 Item {
-                    id: discoveredViewport
                     width: rightCol.width
                     height: 300
                     clip: true

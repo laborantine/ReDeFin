@@ -1,6 +1,7 @@
 import QtQuick 2.15
 import "../js/jellyfinBridge.js" as Jellyfin
 import "../js/MediaCatalog.js" as MediaCatalog
+import "../js/MediaRailLayout.js" as MediaRailLayout
 
 // Fond dynamique de l'accueil : sélection de l'image, double buffer et temporisation.
 Item {
@@ -9,7 +10,7 @@ Item {
     property var host: null
     property int fadeMs: 180
     property int debounceMs: 80
-    property real targetOpacity: 0.90
+    property real targetOpacity: 0.90 * (1.0 - (host ? Math.max(0.0, Math.min(1.0, host.bgDarken)) : 0.0))
     property string _pendingUrl: ""
     property string _visibleUrl: ""
     property string _loadingUrl: ""
@@ -28,7 +29,7 @@ Item {
         var memo = _failureMemo || ({})
         if (memo[url] === true) return
         memo[url] = true
-        _failureMemo = MediaCatalog.trimObjectMemo(memo, failureMemoLimit)
+        _failureMemo = MediaRailLayout.trimObjectMemo(memo, failureMemoLimit)
     }
 
     function _backdropUrlForItem(item) {
@@ -240,19 +241,6 @@ Item {
         onStatusChanged: {
             if (status === Image.Ready) backdropLayer._promoteB()
             else if (status === Image.Error) backdropLayer._failLoading(source)
-        }
-    }
-
-    Rectangle {
-        anchors.fill: parent
-        color: "#000"
-        readonly property real darken: backdropLayer.host
-                                       ? Math.max(0.0, Math.min(1.0, backdropLayer.host.bgDarken))
-                                       : 0.0
-        opacity: (backdropLayer._visibleUrl !== "") ? darken : 0.0
-        Behavior on opacity {
-            enabled: !!backdropLayer.host && backdropLayer.host.allowAnims
-            NumberAnimation { duration: backdropLayer.fadeMs; easing.type: Easing.OutCubic }
         }
     }
 

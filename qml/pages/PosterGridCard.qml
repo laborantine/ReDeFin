@@ -3,6 +3,7 @@
 // QtQuick 2.15, sans QtQuick Controls.
 import QtQuick 2.15
 import "../js/jellyfinBridge.js" as Jellyfin
+import "../js/MediaCatalog.js" as MediaCatalog
 
 FocusScope {
     id: cardRoot
@@ -194,104 +195,8 @@ FocusScope {
                 return selected && !suppressFocusTransform
             }
 
-            function marqueeTravelFor(paintedWidth, gap, enabled) {
-                return enabled ? Math.max(0, paintedWidth + gap) : 0
-            }
-            function marqueeScrollMsFor(travel) {
-                var speed = Math.max(1, Number(marqueeSpeedPxPerSec) || (1000.0 / 24.0))
-                return travel > 0
-                        ? Math.max(3200, Math.min(14000, Math.round((travel / speed) * 1000)))
-                        : 0
-            }
-            function fadeWidthFor(lineWidth, minW, maxW) {
-                return Math.min(maxW, Math.max(minW, Math.round(lineWidth * 0.18)))
-            }
-            function centeredTextY(lineHeight, textHeight) {
-                return Math.round((lineHeight - textHeight) / 2)
-            }
-
-            function _pad2(v) { var n = Number(v); if (!isFinite(n) || n < 0) return ""; n = Math.floor(n); return (n < 10 ? "0" : "") + n }
             function _typeOf(item) { return item ? String(item.Type || "").toLowerCase() : "" }
-            function isEpisodeItemSafe(item) { return _typeOf(item) === "episode" }
-            function isSeasonItemSafe(item) { return _typeOf(item) === "season" }
-            function isSeriesItemSafe(item) { return _typeOf(item) === "series" }
-            function isMovieItemSafe(item) { return _typeOf(item) === "movie" }
-            function classificationForSafe(item) { if (!isMovieItemSafe(item)) return ""; return String(item.OfficialRating || item.CustomRating || item.ParentalRating || item.AgeRating || "").replace(/^\s+|\s+$/g, "") }
-            function seriesNameForSafe(item) { if (!item) return ""; return String(item.SeriesName || item.SeriesTitle || item.Series || item.ShowName || "").replace(/^\s+|\s+$/g, "") }
-            function _yearFromDateSafe(v) {
-                var s = String(v || "")
-                var m = /^(\d{4})/.exec(s)
-                return m && m[1] ? m[1] : ""
-            }
-            function seriesBroadcastRangeSafe(item) {
-                if (!isSeriesItemSafe(item)) return ""
 
-                var start = ""
-                if (item.ProductionYear !== undefined
-                        && item.ProductionYear !== null
-                        && String(item.ProductionYear).length > 0) {
-                    var py = Number(item.ProductionYear)
-                    if (isFinite(py) && !isNaN(py) && py >= 1800 && py <= 3000)
-                        start = String(Math.floor(py))
-                }
-                if (!start)
-                    start = _yearFromDateSafe(item.PremiereDate)
-
-                var end = _yearFromDateSafe(item.EndDate)
-                       || _yearFromDateSafe(item.DateEnded)
-                       || _yearFromDateSafe(item.SeriesEndDate)
-
-                if (start && end)
-                    return start === end ? start : (start + " - " + end)
-
-                // Si Jellyfin ne fournit pas de date de fin, ne jamais inventer
-                // une plage. La seule année connue reste préférable.
-                return start || end
-            }
-            function seasonNameForSafe(item) {
-                if (!isSeasonItemSafe(item)) return ""
-                var label = String(item.Name || "").replace(/^\s+|\s+$/g, "")
-                if (label) return label
-                if (item.IndexNumber !== undefined && item.IndexNumber !== null) {
-                    var n = Number(item.IndexNumber)
-                    if (isFinite(n) && !isNaN(n) && n >= 0) return "Saison " + Math.floor(n)
-                }
-                return ""
-            }
-            function episodeCodeForSafe(item) { if (!item) return ""; var s = (item.ParentIndexNumber !== undefined && item.ParentIndexNumber !== null) ? _pad2(item.ParentIndexNumber) : "", e = (item.IndexNumber !== undefined && item.IndexNumber !== null) ? _pad2(item.IndexNumber) : ""; return s && e ? "S" + s + "E" + e : (s ? "S" + s : (e ? "E" + e : "")) }
-            function cardMainTitleFor(item) {
-                if (!item) return ""
-                if (isEpisodeItemSafe(item)) {
-                    var serie = seriesNameForSafe(item), code = episodeCodeForSafe(item)
-                    if (serie && code) return serie + " — " + code
-                    if (serie) return serie
-                    if (code) return code
-                }
-                if (isSeasonItemSafe(item)) {
-                    var seasonSerie = seriesNameForSafe(item)
-                    if (seasonSerie) return seasonSerie
-                    return seasonNameForSafe(item)
-                }
-                return item.Name || ""
-            }
-            function cardSubtitleTitleFor(item) {
-                if (!item) return ""
-                if (isEpisodeItemSafe(item))
-                    return item.Name ? item.Name : ""
-
-                if (isSeasonItemSafe(item)) {
-                    // Saison groupée : Nom de série / Saison X.
-                    return seriesNameForSafe(item) ? seasonNameForSafe(item) : ""
-                }
-
-                if (isSeriesItemSafe(item) && imagePolicy === "latest-series") {
-                    // Intégrale groupée par Jellyfin : ne pas afficher le mot
-                    // "Intégrale", mais la période de diffusion, ex. 2004 - 2010.
-                    return seriesBroadcastRangeSafe(item)
-                }
-
-                return isMovieItemSafe(item) ? classificationForSafe(item) : ""
-            }
             function isVideoLikeSafe(item) { var t = _typeOf(item); return t === "movie" || t === "video" || t === "episode" || t === "musicvideo" || t === "trailer" }
             function isFolderLikeSafe(item) { if (!item) return false; if (item.IsFolder) return true; var t = _typeOf(item); return t !== "series" && (t.indexOf("folder") >= 0 || String(item.CollectionType || "") !== "" || t === "boxset" || t === "collection") }
             function fallbackWantsVideo() { return fallbackKind === "video" || fallbackKind === "movie" || fallbackKind === "episode" }
@@ -513,8 +418,8 @@ FocusScope {
                      + String(preferBackdrop ? 1 : 0)
             }
             function resumeRatioSafe(item) { if (progressRatioOverride >= 0) return Math.max(0, Math.min(1, progressRatioOverride)); if (!item) return 0; var dur = item.RunTimeTicks || item.CumulativeRunTimeTicks || 0, pos = (item.UserData && item.UserData.PlaybackPositionTicks) ? item.UserData.PlaybackPositionTicks : 0; if (!dur || pos <= 0) return 0; var r = pos / dur; return r < 0 ? 0 : (r > 1 ? 1 : r) }
-            readonly property string effectiveTitleText: titleText !== "" ? titleText : cardMainTitleFor(modelData)
-            readonly property string effectiveSubtitleText: subtitleText !== "" ? subtitleText : cardSubtitleTitleFor(modelData)
+            readonly property string effectiveTitleText: titleText !== "" ? titleText : MediaCatalog.posterCardTitle(modelData)
+            readonly property string effectiveSubtitleText: subtitleText !== "" ? subtitleText : MediaCatalog.posterCardSubtitle(modelData, imagePolicy)
             // Garde de vie delegate : les Qt.callLater du marquee peuvent revenir
             // après recyclage/destruction du delegate sur Freebox.
             property bool _alive: true

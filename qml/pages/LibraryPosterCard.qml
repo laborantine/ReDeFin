@@ -169,13 +169,6 @@ FocusScope {
             property bool _alive: true
             Component.onDestruction: _alive = false
 
-            function _typeOf(item) { return item ? String(item.Type || "").toLowerCase() : "" }
-            function isEpisodeItemSafe(item) { return _typeOf(item) === "episode" }
-            function fadeWidthFor(lineWidth, minW, maxW) { return Math.min(maxW, Math.max(minW, Math.round(lineWidth * 0.18))) }
-            function marqueeTravelFor(paintedWidth, gap, enabled) { return enabled ? Math.max(0, paintedWidth + gap) : 0 }
-            function marqueeScrollMsFor(travel) { return _marqueeScrollMs(travel) }
-            function centeredTextY(lineHeight, textHeight) { return _centeredTextY(lineHeight, textHeight) }
-
             width: tileWidth + sidePad * 2
             height: tileHeight + titleHeight + topPad
 
@@ -192,27 +185,7 @@ FocusScope {
                 var k = String(fallbackKind || "").toLowerCase()
                 return k === "video" || k === "movie" || k === "episode" || k === ""
             }
-            function _centeredTextY(lineHeight, textHeight) { return Math.round((lineHeight - textHeight) / 2) }
-            function _marqueeScrollMs(travel) {
-                var speed = Math.max(1, Number(marqueeSpeedPxPerSec) || (1000.0 / 24.0))
-                return travel > 0 ? Math.max(3200, Math.min(14000, Math.round((travel / speed) * 1000))) : 0
-            }
 
-        Component {
-            id: musicNoteComp
-            Item {
-                anchors.fill: parent
-                Rectangle { anchors.fill: parent; color: "#2e3355" }
-                Text {
-                    anchors.centerIn: parent
-                    text: "♪"
-                    color: "#cfd6ff"
-                    font.pixelSize: Math.round(Math.min(parent.width, parent.height) * 0.42)
-                    font.bold: true
-                    opacity: 0.95
-                }
-            }
-        }
         Component {
             id: videoLogoComp
             Item {
@@ -379,7 +352,6 @@ FocusScope {
                 }
             }
         }
-
 
         Component {
             id: glyphFallbackComp
@@ -614,7 +586,6 @@ FocusScope {
                 }
 
                 Loader {
-                    id: fallbackLoader
                     anchors.fill: parent
                     active: cardRoot._needFallback
                     visible: active
@@ -654,51 +625,71 @@ FocusScope {
                     }
                 }
 
-                Rectangle {
+                // Ces deux badges sont invisibles sur la
+                // grande majorité des cartes (aucune vidéo « vue », aucun compteur
+                // d'épisodes non lus). Un Rectangle simplement visible: false est
+                // quand même créé pour chaque délégué ; le badge « vu » est le cas
+                // le plus coûteux (3 rectangles tournés en antialiasing). Un Loader
+                // actif seulement sur la même condition qu'avant (déplacée sur
+                // active) évite cette création pour tous les autres.
+                Loader {
+                    id: unplayedBadgeLoader
+                    objectName: "unplayedBadgeLoader"
                     z: 20
-                    height: 24
-                    radius: 12
                     anchors.top: parent.top
                     anchors.right: parent.right
                     anchors.topMargin: 6
                     anchors.rightMargin: 6
-                    color: "#3B82F6"
-                    border.color: "#1E3A8A"
-                    border.width: 1
-                    visible: cardRoot.showUnplayedBadge && cardRoot.unplayedCount > 0
-                    width: Math.max(height, unplayedBadgeText.paintedWidth + 12)
-                    Text {
-                        id: unplayedBadgeText
-                        anchors.centerIn: parent
-                        text: cardRoot.unplayedText
-                        color: "white"
-                        font.pixelSize: 13
-                        font.bold: true
+                    active: cardRoot.showUnplayedBadge && cardRoot.unplayedCount > 0
+                    sourceComponent: Component {
+                        Rectangle {
+                            height: 24
+                            radius: 12
+                            color: "#3B82F6"
+                            border.color: "#1E3A8A"
+                            border.width: 1
+                            width: Math.max(height, unplayedBadgeText.paintedWidth + 12)
+                            Text {
+                                id: unplayedBadgeText
+                                anchors.centerIn: parent
+                                text: cardRoot.unplayedText
+                                color: "white"
+                                font.pixelSize: 13
+                                font.bold: true
+                            }
+                        }
                     }
                 }
 
-                Rectangle {
+                Loader {
+                    id: watchedBadgeLoader
+                    objectName: "watchedBadgeLoader"
                     z: 20
                     width: cardRoot.watchedBadgeSize
                     height: cardRoot.watchedBadgeSize
-                    radius: width / 2
                     x: cardRoot.watchedBadgePosition === "topLeft"
                        ? cardRoot.watchedBadgeMargin
                        : parent.width - width - cardRoot.watchedBadgeMargin
                     y: cardRoot.watchedBadgeMargin
-                    color: "#3B82F6"
-                    border.color: "#1E3A8A"
-                    border.width: 1
-                    visible: cardRoot.showWatchedBadge && cardRoot.watched
-                             && (!cardRoot.suppressWatchedWhenUnplayed
-                                 || !(cardRoot.showUnplayedBadge && cardRoot.unplayedCount > 0))
-                    Item {
-                        anchors.centerIn: parent
-                        width: 15
-                        height: 12
-                        Rectangle { x: 2.1; y: 6.6; width: 5.4; height: 2.1; radius: 1.05; color: "#FFFFFF"; rotation: 42; transformOrigin: Item.Left; antialiasing: true }
-                        Rectangle { x: 5.8; y: 9.1; width: 8.6; height: 2.1; radius: 1.05; color: "#FFFFFF"; rotation: -42; transformOrigin: Item.Left; antialiasing: true }
-                        Rectangle { x: 5.1; y: 8.1; width: 2.0; height: 2.0; radius: 1.0; color: "#FFFFFF"; antialiasing: true }
+                    active: cardRoot.showWatchedBadge && cardRoot.watched
+                            && (!cardRoot.suppressWatchedWhenUnplayed
+                                || !(cardRoot.showUnplayedBadge && cardRoot.unplayedCount > 0))
+                    sourceComponent: Component {
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: width / 2
+                            color: "#3B82F6"
+                            border.color: "#1E3A8A"
+                            border.width: 1
+                            Item {
+                                anchors.centerIn: parent
+                                width: 15
+                                height: 12
+                                Rectangle { x: 2.1; y: 6.6; width: 5.4; height: 2.1; radius: 1.05; color: "#FFFFFF"; rotation: 42; transformOrigin: Item.Left; antialiasing: true }
+                                Rectangle { x: 5.8; y: 9.1; width: 8.6; height: 2.1; radius: 1.05; color: "#FFFFFF"; rotation: -42; transformOrigin: Item.Left; antialiasing: true }
+                                Rectangle { x: 5.1; y: 8.1; width: 2.0; height: 2.0; radius: 1.0; color: "#FFFFFF"; antialiasing: true }
+                            }
+                        }
                     }
                 }
 

@@ -57,8 +57,11 @@ FocusScope {
     property bool subtitleMenuOpen: false
     property var audioTracks: []
     property var audioStreamIndexMap: []
+    property var audioChannelMap: []
     property int audioCurrentIndex: 0
     property string audioSelectionNote: ""
+    property bool audioOutputStereo: false
+    property bool audioChannelFocus: false
     property var subtitleTracks: []
     property var subtitleStreamIndexMap: []
     property var subtitleIsTextMap: []
@@ -90,8 +93,12 @@ FocusScope {
         root.focus = false
     }
     onActivePanelChanged: {
-        if (activePanel === panelNone)
+        if (activePanel === panelNone) {
+            audioChannelFocus = false
             _releasePanelFocus()
+        } else if (activePanel !== panelAudio) {
+            audioChannelFocus = false
+        }
     }
 
     // Valeurs négatives réservées aux modes de lecture.
@@ -219,6 +226,7 @@ FocusScope {
     signal requestSpeed(real rate)
 
     signal requestAudioPick(int streamIdx, int uiIdx)
+    signal requestAudioOutput(bool stereo)
 
     signal requestSubtitleOff()
     signal requestSubtitleText(int streamIdx, int uiIdx)
@@ -516,6 +524,28 @@ FocusScope {
                 : ""
     }
 
+    function _audioSourceChannels() {
+        var idx = audioCurrentIndex | 0
+        if (!audioChannelMap || idx < 0 || idx >= audioChannelMap.length)
+            return 0
+        var channels = Number(audioChannelMap[idx])
+        return isFinite(channels) && channels > 0 ? Math.floor(channels) : 0
+    }
+
+    readonly property bool showAudioChannelSelector:
+        audioPanelOpen && _audioSourceChannels() >= 6
+
+    function _setAudioChannelFocus(on) {
+        audioChannelFocus = on === true && showAudioChannelSelector
+        if (audioChannelFocus) {
+            settingsList.focus = false
+            root.forceActiveFocus()
+        } else if (audioPanelOpen && settingsList.visible) {
+            settingsList.focus = true
+            settingsList.forceActiveFocus()
+        }
+    }
+
     function _modelCount() {
         if (activePanel === panelQuality)
             return qualityValues.length
@@ -527,9 +557,7 @@ FocusScope {
             return rateValues.length
 
         if (activePanel === panelAudio)
-            return audioTracks
-                    ? audioTracks.length
-                    : 0
+            return audioTracks ? audioTracks.length : 0
 
         // « Aucun » reste toujours disponible, même si le média ne possède
         // aucune vraie piste de sous-titres.
@@ -755,6 +783,8 @@ FocusScope {
         if (!root.activeTrackPanel ||
             !root.allowUi)
             return false
+
+        root.audioChannelFocus = false
 
         var idx =
             root.activePanel === root.panelAudio
@@ -1321,7 +1351,49 @@ FocusScope {
 
         var count = _modelCount()
 
+        if (audioPanelOpen && audioChannelFocus) {
+            if (!showAudioChannelSelector) {
+                _setAudioChannelFocus(false)
+            } else if (key === Qt.Key_Left) {
+                requestAudioOutput(false)
+                userActivity()
+                return true
+            } else if (key === Qt.Key_Right) {
+                requestAudioOutput(true)
+                userActivity()
+                return true
+            } else if (key === Qt.Key_Return ||
+                       key === Qt.Key_Enter ||
+                       key === Qt.Key_Select ||
+                       key === Qt.Key_Space) {
+                requestAudioOutput(!audioOutputStereo)
+                userActivity()
+                return true
+            } else if (key === Qt.Key_Down) {
+                _setAudioChannelFocus(false)
+                if (count > 0) {
+                    _setIndex(Math.max(0, Math.min(audioCurrentIndex | 0, count - 1)))
+                    settingsList.positionViewAtIndex(settingsList.currentIndex, ListView.Contain)
+                }
+                userActivity()
+                return true
+            } else if (key === Qt.Key_Back || key === Qt.Key_Escape) {
+                audioChannelFocus = false
+                return _closeTrackToButton()
+            }
+            userActivity()
+            return true
+        }
+
         if (key === Qt.Key_Up) {
+            if (audioPanelOpen &&
+                showAudioChannelSelector &&
+                count > 0 &&
+                settingsList.currentIndex <= 0) {
+                _setAudioChannelFocus(true)
+                userActivity()
+                return true
+            }
             if (count > 0 &&
                 settingsList.currentIndex > 0)
                 _setIndex(
@@ -1418,19 +1490,28 @@ FocusScope {
         }
     }
 
-    onAudioMenuOpenChanged:
+    onAudioMenuOpenChanged: {
         _syncExternalTrackPanel()
+    }
 
     onSubtitleMenuOpenChanged:
         _syncExternalTrackPanel()
 
-    onAudioCurrentIndexChanged:
+    onAudioCurrentIndexChanged: {
         if (audioPanelOpen) {
+            if (!showAudioChannelSelector)
+                audioChannelFocus = false
             _setIndex(
                 audioCurrentIndex)
 
             _focusListLater()
         }
+    }
+
+
+    onShowAudioChannelSelectorChanged:
+        if (!showAudioChannelSelector && audioChannelFocus)
+            _setAudioChannelFocus(false)
 
     onSubtitleCurrentIndexChanged:
         if (subtitlePanelOpen) {
@@ -1486,7 +1567,6 @@ FocusScope {
         }
 
         Rectangle {
-            id: qualityInfoCard
 
             width: 520
             height: 360
@@ -1549,7 +1629,6 @@ FocusScope {
             }
 
             Item {
-                id: qualityInfoInner
 
                 anchors.fill: parent
                 anchors.margins: 12
@@ -1674,7 +1753,6 @@ FocusScope {
                 }
 
                 Item {
-                    id: qualityInfoBody
 
                     anchors.left: parent.left
                     anchors.right: parent.right
@@ -1689,7 +1767,6 @@ FocusScope {
                     clip: true
 
                     Text {
-                        id: qualityInfoBodyText
 
                         anchors.left: parent.left
                         anchors.right: parent.right
@@ -1721,7 +1798,6 @@ FocusScope {
     }
 
     Rectangle {
-        id: settingsPanel
 
         width: 520
         height: 360
@@ -1795,7 +1871,6 @@ FocusScope {
         }
 
         Item {
-            id: panelInner
 
             anchors.fill: parent
 
@@ -1863,7 +1938,6 @@ FocusScope {
                 }
 
                 Item {
-                    id: headerTextBox
 
                     anchors.left:
                         root.activeTrackPanel
@@ -2065,10 +2139,152 @@ FocusScope {
                     }
                 }
 
+                Text {
+                    id: audioChannelSectionTitle
+                    visible: root.audioPanelOpen && root.showAudioChannelSelector
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
+                    height: visible ? 20 : 0
+                    text: "Choix des canaux"
+                    textFormat: Text.PlainText
+                    color: Qt.rgba(1, 1, 1, 0.70)
+                    font.pixelSize: 14
+                    font.bold: true
+                    verticalAlignment: Text.AlignVCenter
+                    elide: Text.ElideRight
+                }
+
+                Item {
+                    id: audioChannelSelectorRow
+                    visible: root.audioPanelOpen && root.showAudioChannelSelector
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: audioChannelSectionTitle.bottom
+                    anchors.topMargin: visible ? 2 : 0
+                    height: visible ? 48 : 0
+
+                    Rectangle {
+                        anchors.fill: parent
+                        radius: 10
+                        color: root.audioChannelFocus
+                               ? Qt.rgba(1, 1, 1, 0.16)
+                               : (audioChannelMouse.containsMouse
+                                  ? Qt.rgba(1, 1, 1, 0.08)
+                                  : "transparent")
+                    }
+
+                    Row {
+                        id: audioChannelChoiceRow
+                        anchors.left: parent.left
+                        // Le groupe 5.1 / toggle / 2.0 reste aligné sur la
+                        // section Audio mais est volontairement avancé vers
+                        // le bord gauche pour libérer l'espace visuel central.
+                        anchors.leftMargin: -18
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 174
+                        height: parent.height
+                        spacing: 9
+
+                        Text {
+                            text: "5.1"
+                            color: !root.audioOutputStereo ? "#FFFFFF" : "#8EB9FF"
+                            font.pixelSize: 12
+                            font.bold: !root.audioOutputStereo
+                            verticalAlignment: Text.AlignVCenter
+                            horizontalAlignment: Text.AlignRight
+                            width: 44
+                            height: parent.height
+                        }
+
+                        Item {
+                            id: audioChannelSelector
+                            width: 68
+                            height: 30
+                            y: Math.round((parent.height - height) / 2)
+
+                            Rectangle {
+                                anchors.fill: parent
+                                radius: height / 2
+                                border.width: 1
+                                border.color: "#E6EEFF"
+                                gradient: Gradient {
+                                    GradientStop { position: 0.0; color: "#2F7CFF" }
+                                    GradientStop { position: 1.0; color: "#7EC4FF" }
+                                }
+                            }
+
+                            Rectangle {
+                                width: 24
+                                height: 24
+                                radius: height / 2
+                                anchors.verticalCenter: parent.verticalCenter
+                                x: root.audioOutputStereo
+                                   ? (audioChannelSelector.width - width - 3) : 3
+                                color: "#FFFFFF"
+                                border.color: "#FFFFFF"
+                                border.width: 1
+                                Behavior on x {
+                                    NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
+                                }
+                            }
+                        }
+
+                        Text {
+                            text: "2.0"
+                            color: root.audioOutputStereo ? "#FFFFFF" : "#8EB9FF"
+                            font.pixelSize: 12
+                            font.bold: root.audioOutputStereo
+                            verticalAlignment: Text.AlignVCenter
+                            horizontalAlignment: Text.AlignLeft
+                            width: 44
+                            height: parent.height
+                        }
+                    }
+
+                    MouseArea {
+                        id: audioChannelMouse
+                        anchors.fill: audioChannelChoiceRow
+                        hoverEnabled: true
+                        onEntered: root._setAudioChannelFocus(true)
+                        onClicked: {
+                            root._setAudioChannelFocus(true)
+                            var stereo = mouse.x >= width / 2
+                            root.requestAudioOutput(stereo)
+                            mouse.accepted = true
+                        }
+                    }
+                }
+
+                Text {
+                    id: audioTracksSectionTitle
+                    visible: root.audioPanelOpen
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: root.showAudioChannelSelector
+                                 ? audioChannelSelectorRow.bottom
+                                 : parent.top
+                    anchors.topMargin: root.showAudioChannelSelector ? 6 : 0
+                    height: visible ? 20 : 0
+                    text: "Pistes audio"
+                    textFormat: Text.PlainText
+                    color: Qt.rgba(1, 1, 1, 0.70)
+                    font.pixelSize: 14
+                    font.bold: true
+                    verticalAlignment: Text.AlignVCenter
+                    elide: Text.ElideRight
+                }
+
                 ListView {
                     id: settingsList
 
-                    anchors.fill: parent
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.bottom: parent.bottom
+                    anchors.top: root.audioPanelOpen
+                                 ? audioTracksSectionTitle.bottom
+                                 : parent.top
+                    anchors.topMargin: root.audioPanelOpen ? 4 : 0
 
                     anchors.rightMargin:
                         panelScrollBg.visible
@@ -2141,6 +2357,13 @@ FocusScope {
                     // Une seule couche blanche translucide, sans cadre blanc
                     // supplémentaire.
                     highlight: Rectangle {
+                        // Quand le sélecteur 5.1/2.0 possède le focus, le
+                        // ListView conserve son currentIndex pour pouvoir
+                        // redescendre exactement sur la même piste. Son
+                        // highlight doit toutefois disparaître visuellement
+                        // afin de ne pas afficher deux focus simultanément.
+                        visible: !(root.audioPanelOpen && root.audioChannelFocus)
+
                         width:
                             settingsList.width
 
@@ -2220,11 +2443,9 @@ FocusScope {
                                 anchors.fill:
                                     parent
 
-                                radius:
-                                    height / 2
-
-                                color:
-                                    "transparent"
+                                radius: height / 2
+                                visible: true
+                                color: "transparent"
 
                                 border.width: 2
 
@@ -2242,7 +2463,7 @@ FocusScope {
 
                                 width: 10
                                 height: 10
-
+                                visible: true
                                 radius: 5
 
                                 color:
@@ -2383,7 +2604,6 @@ FocusScope {
 
                             // Charge serveur estimée.
                             Item {
-                                id: qualityCpuGauge
                                 width: 44
                                 height: parent.height
                                 anchors.left: parent.left
@@ -2441,7 +2661,6 @@ FocusScope {
 
                             // Fidélité visuelle estimée.
                             Item {
-                                id: qualityVisualGauge
                                 width: 46
                                 height: parent.height
                                 anchors.right: parent.right
@@ -2665,7 +2884,6 @@ FocusScope {
                         hasOverflow
 
                     Rectangle {
-                        id: panelScrollThumb
 
                         width: 4
 

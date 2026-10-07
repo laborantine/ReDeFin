@@ -1,8 +1,11 @@
 import QtQuick 2.15
+import "../js/SeasonLoader.js" as SeasonLoader
+import "../js/NavigationContext.js" as NavContext
 import QtGraphicalEffects 1.15
 import "../components" as Components
 import "../js/jellyfinBridge.js" as Jellyfin
 import "../js/SeasonUtils.js" as SeasonUtils
+import "../js/GuestCredits.js" as GuestCredits
 import "../js/MediaCatalog.js" as MediaCatalog
 FocusScope {
     id: seasonpage
@@ -29,20 +32,14 @@ FocusScope {
     property var fbx
     property var shared: null
     property bool showClock: true
-    function _sharedNavApi(){ try { return shared && shared.__redefinNavApi ? shared.__redefinNavApi : null } catch(e) { return null } }
-    function _hydrateSensitiveContextFromShared(){
-        var api = _sharedNavApi()
-        return api && api.hydrate ? api.hydrate(seasonpage, false, 0, false) : false
+    function _hydrateSensitiveContextFromShared() {
+        return NavContext.hydrate(shared, seasonpage, false, 0, false)
     }
-
-    function _storeSensitiveNavContext(){
-        var api = _sharedNavApi()
-        return api && api.storeTarget ? api.storeTarget(seasonpage) : false
+    function _storeSensitiveNavContext() {
+        return NavContext.storeTarget(shared, seasonpage)
     }
-
-    function _navRoute(page, params){
-        var api = _sharedNavApi()
-        return api && api.route ? api.route(seasonpage, page, params || ({})) : (page + "?ctx=1")
+    function _navRoute(page, params) {
+        return NavContext.route(shared, seasonpage, page, params)
     }
 
     function _guestFocusSnapshot(){
@@ -62,7 +59,7 @@ FocusScope {
         try {
             if (!shared) return false
             var fs = _guestFocusSnapshot()
-            shared.__redefinSeasonGuestReturn = ({
+            NavContext.setSeasonGuestReturn(shared, ({
                 seasonId: String(seasonId || ""),
                 seriesId: String(seriesId || ""),
                 episodeId: String(selectedEpisodeId || ""),
@@ -71,7 +68,7 @@ FocusScope {
                 guestIndex: fs && fs.index !== undefined ? (Number(fs.index) | 0) : 0,
                 guestKey: fs && fs.key !== undefined ? String(fs.key || "") : "",
                 ts: Date.now()
-            })
+            }))
             return true
         } catch(e) {
             return false
@@ -90,18 +87,18 @@ FocusScope {
     function _hydrateGuestPersonReturnState(){
         if (_guestPersonReturnPending) return true
         try {
-            if (!shared || !shared.__redefinSeasonGuestReturn) return false
+            if (!shared || !NavContext.seasonGuestReturn(shared)) return false
             if (!seasonId && !seriesId) return false
 
-            var st = shared.__redefinSeasonGuestReturn
+            var st = NavContext.seasonGuestReturn(shared)
             var age = Date.now() - Number(st.ts || 0)
             if (age < 0 || age > 21600000) {
-                shared.__redefinSeasonGuestReturn = null
+                NavContext.clearSeasonGuestReturn(shared)
                 return false
             }
             if (!_guestReturnStateMatches(st)) return false
 
-            shared.__redefinSeasonGuestReturn = null
+            NavContext.clearSeasonGuestReturn(shared)
 
             restoreEpisodeId = String(st.episodeId || "")
             restoreIndex = (st.episodeIndex !== undefined && st.episodeIndex !== null)
@@ -238,7 +235,7 @@ FocusScope {
     readonly property bool canInteract: !!(!disposed && !isLoading && !visualRevealPending && !overlayOpen)
     readonly property bool uiReady: !!(canInteract && postFirstFrame)
     readonly property bool _scrolling: !!(rootFlick && (rootFlick.dragging || rootFlick.moving))
-    readonly property bool hasGuests: !!SeasonUtils.hasGuestStars(guestStars)
+    readonly property bool hasGuests: !!GuestCredits.hasGuestStars(guestStars)
     readonly property bool canPin: !!(!disposed && !isLoading && !overlayOpen
                                      && !!rootFlick && !_scrolling && currentFocus === 1
                                      && !!episodes && (episodes.length > 0) && !layoutSettle && !_deferPinAfterNav)
@@ -265,39 +262,30 @@ FocusScope {
             || key === Qt.Key_Ok;
     }
     function _it(){ return (selectedDetails && selectedDetails.Id) ? selectedDetails : selectedEpisode; }
-    function _epId(ep){ return MediaCatalog.shuffleEpisodeId(ep); }
-    function _episodePlayableForShuffle(ep){ return MediaCatalog.episodePlayableForShuffle(ep); }
-    function _ownedShuffleCandidates(preferUnplayed){
-        return MediaCatalog.ownedShuffleCandidates(episodes || [], preferUnplayed === true);
-    }
     function pickOwnedShuffleEpisode(preferUnplayed){
-        return MediaCatalog.pickOwnedShuffleEpisode(episodes || [], preferUnplayed === true);
+        return SeasonUtils.pickOwnedShuffleEpisode(episodes || [], preferUnplayed === true);
     }
     property bool _ownedPlaylistSyncBusy: false
     function _applyOwnedPlaylist(pl, ids){
-        if (!pl || !ids || !ids.length) return;
-        try { if (pl.list !== undefined) pl.list = ids; } catch(e0) {}
-        try { if (pl.items !== undefined) pl.items = ids; } catch(e1) {}
-        try { if (pl.playlist !== undefined) pl.playlist = ids; } catch(e2) {}
-        try { if (pl.itemIds !== undefined) pl.itemIds = ids; } catch(e3) {}
-        try { if (pl.allowedIds !== undefined) pl.allowedIds = ids; } catch(e4) {}
-        try { if (pl.title !== undefined) pl.title = (seasonItem && seasonItem.Name) ? seasonItem.Name : "Saison"; } catch(e5) {}
-        try { if (pl.autoplayNext !== undefined) pl.autoplayNext = true; } catch(e6) {}
-        try { if (pl.controller !== undefined) pl.controller = "seasonpage"; } catch(e7) {}
-        try { if (pl.scope !== undefined) pl.scope = seasonId ? ("season:" + seasonId) : "season"; } catch(e8) {}
-        try { if (pl.setAllowedFromList) pl.setAllowedFromList(ids); } catch(e9) {}
-        try {
-            var cur = String(selectedEpisodeId || "");
-            if (!cur || ids.indexOf(cur) < 0) cur = ids[0];
-            if (pl.syncTo) pl.syncTo(cur);
-            else if (pl.currentItemId !== undefined) pl.currentItemId = cur;
-        } catch(e10) {}
+        if (!pl || !ids || !ids.length) return
+
+        pl.replaceScopedList(
+            ids,
+            (seasonItem && seasonItem.Name) ? seasonItem.Name : "Saison",
+            "seasonpage",
+            seasonId ? ("season:" + seasonId) : "season"
+        )
+        pl.setAutoplayNext(true)
+
+        var cur = String(selectedEpisodeId || "")
+        if (!cur || ids.indexOf(cur) < 0) cur = ids[0]
+        pl.syncTo(cur)
     }
     function updatePlaylistFromOwnedEpisodes(){
         if (_ownedPlaylistSyncBusy) return;
-        var pl = playlist || playlistRef, owned = _ownedShuffleCandidates(false);
+        var pl = playlist || playlistRef, owned = SeasonUtils.ownedShuffleCandidates(episodes || [], false);
         if (!pl || !owned.length) return;
-        var ids = []; for (var i = 0; i < owned.length; i++) ids.push(_epId(owned[i]));
+        var ids = []; for (var i = 0; i < owned.length; i++) ids.push(SeasonUtils.shuffleEpisodeId(owned[i]));
         _ownedPlaylistSyncBusy = true;
         try { SeasonUtils.updatePlaylistFromEpisodes(seasonpage); _applyOwnedPlaylist(pl, ids); }
         finally { _ownedPlaylistSyncBusy = false; }
@@ -321,7 +309,7 @@ FocusScope {
     property bool layoutSettle: true
     Timer {
         id: settleTimer
-        interval: 380
+        interval: 0
         repeat: false
         onTriggered: {
             layoutSettle = false;
@@ -425,7 +413,7 @@ FocusScope {
     }
     Timer {
         id: actionsArmTimer
-        interval: Math.max(220, extrasArmDelayMs - 120)
+        interval: 0
         repeat: false
         onTriggered: {
             if (!_guardRun()) return;
@@ -544,7 +532,7 @@ FocusScope {
     function _rememberEpisodeDetails(details){
         if (!details || !details.Id) return;
         var id = String(details.Id), order = _detailsCacheOrder || [], idx = order.indexOf(id);
-        detailsCache[id] = MediaCatalog.compactEpisodeDetailsForCache(details);
+        detailsCache[id] = MediaCatalog.compactEpisodeDetails(details);
         if (idx >= 0) order.splice(idx, 1);
         order.push(id);
         while (order.length > Math.max(1, _detailsCacheMax | 0)) {
@@ -579,7 +567,7 @@ FocusScope {
         return idx;
     }
     function _computeEpisodesSlice(centerIndex){
-        var slice = MediaCatalog.episodeSliceWindow(episodes || [], centerIndex, episodesHydrateCount);
+        var slice = SeasonUtils.episodeSliceWindow(episodes || [], centerIndex, episodesHydrateCount);
         _episodesSliceStart = slice.start;
         _episodesSlice = slice.items;
     }
@@ -910,10 +898,10 @@ FocusScope {
     property bool _externalFocusWasLost: false
     property double _visualRevealStartedMs: 0
     property double _visualRevealSuppressReturnUntilMs: 0
-    property int visualRevealInitialMinMs: 680
-    property int visualRevealReturnMinMs: 220
-    property int visualRevealPollMs: 80
-    property int visualRevealSettleMs: 160
+    property int visualRevealInitialMinMs: 0
+    property int visualRevealReturnMinMs: 0
+    property int visualRevealPollMs: 40
+    property int visualRevealSettleMs: 120
     property int visualRevealHardTimeoutMs: 3200
     readonly property bool loadingGateActive: !!(isLoading || visualRevealPending)
     readonly property bool shellLoading: loadingGateActive
@@ -922,11 +910,10 @@ FocusScope {
     property bool _episodesFetchedOnce: false
     property bool _seasonFetchedOnce: false
     property bool _episodesRowAlive: true
-    property int minLoadingMs: 350
+    property int minLoadingMs: 0
     property int emptyEpisodesGraceMs: 2600
     property int _loadingStartedMs: 0
     property string loadingError: ""
-    function _loadingTitle(){ return ctxOk ? "Chargement" : "Initialisation"; }
     Timer {
         id: emptyEpisodesGraceTimer
         interval: emptyEpisodesGraceMs
@@ -957,21 +944,24 @@ FocusScope {
     function _visualEpisodesRowSettled(){
         if (!episodes || !episodes.length) return true;
         var it = (episodesRowLoader.status === Loader.Ready) ? episodesRowLoader.item : null;
-        if (!it || it._booting === true) return false;
-        try { if (it.posterGateMax !== undefined && Number(it.posterGateMax) < 0) return false; } catch(e0) {}
-        return true;
+        if (!it || it._booting === true || it.currentDelegateReady !== true) return false;
+        return it.currentDelegateVisualReady === true;
     }
     function _visualDetailsSettled(){
         if (!episodes || !episodes.length || !selectedEpisodeId) return true;
         return !!(selectedDetails && String(selectedDetails.Id || "") === selectedEpisodeId);
     }
     function _visualAssetsSettled(){
-        if (disposed || isLoading || !postFirstFrame || layoutSettle || initialWarmup || !_visualEpisodesRowSettled()) return false;
-        if (_bgWantedUrl && bgDebounceTimer.running) return false;
-        if (_bgActiveUrl && !_visualImageSettled(blurredBG)) return false;
-        if (showSeriesLogo && seriesLogoBox.width >= seriesLogoMinW && (!_logoArmed || !_visualImageSettled(seriesLogoImage))) return false;
+        if (disposed || isLoading || !postFirstFrame || layoutSettle || !_visualEpisodesRowSettled() || !_visualDetailsSettled()) return false;
+        if (_focusRestoreGate || _playlistRestoreInFlight) return false;
+        var row = episodesRowLoader.item;
+        if (row && (row.isScrolling || row._syncing)) return false;
+        if (_bgWantedUrl && _bgWantedUrl.length && _bgActiveUrl !== _bgWantedUrl) return false;
+        if (!_visualImageSettled(blurredBG)) return false;
+        if (showSeriesLogo && seriesLogoBox.visible && !_logoArmed) return false;
+        if (!_visualImageSettled(seriesLogoImage)) return false;
         if (showActionPanel && actionCircles.visible && (!_actionsArmed || (actionButtonsLoader.active && actionButtonsLoader.status !== Loader.Ready))) return false;
-        return _visualDetailsSettled();
+        return true;
     }
     function _armVisualReveal(reason, returnMode){
         if (disposed) return;
@@ -996,7 +986,7 @@ FocusScope {
         var minHold = _visualRevealReturnMode ? visualRevealReturnMinMs : visualRevealInitialMinMs;
         if (elapsed >= minHold && _visualAssetsSettled()) {
             if (!visualRevealSettleTimer.running) visualRevealSettleTimer.restart();
-        } else visualRevealPollTimer.restart();
+        } else { visualRevealSettleTimer.stop(); visualRevealPollTimer.restart(); }
     }
     Timer {
         id: visualRevealPollTimer
@@ -1028,7 +1018,7 @@ FocusScope {
 
     Timer {
         id: loadingOffTimer
-        interval: 140
+        interval: 0
         repeat: false
         onTriggered: {
             if (disposed) return;
@@ -1051,7 +1041,7 @@ FocusScope {
         if (disposed || !(_episodesFetchedOnce && _seasonFetchedOnce)) return;
         if (episodes && episodes.length) loadingError = "";
         emptyEpisodesGraceTimer.stop();
-        loadingOffTimer.interval = Math.max(140, minLoadingMs - (Date.now() - _loadingStartedMs));
+        loadingOffTimer.interval = Math.max(0, minLoadingMs - (Date.now() - _loadingStartedMs));
         loadingOffTimer.restart();
     }
     function beginLoading(){
@@ -1115,7 +1105,7 @@ FocusScope {
             logoArmTimer.interval = extrasArmDelayMs;
             logoArmTimer.restart();
             _actionsArmed = false;
-            actionsArmTimer.interval = Math.max(220, extrasArmDelayMs - 120);
+            actionsArmTimer.interval = 0;
             actionsArmTimer.restart();
             withEpisodesRow(function(it){ if (it.onLoadingGateChanged) it.onLoadingGateChanged(); });
             if (_hasExplicitEpisodeRestoreTarget()) later(function(){ restoreFocusFromPlaylist("isLoading:false"); });
@@ -1175,7 +1165,7 @@ FocusScope {
             return;
         }
         beginLoading();
-        SeasonUtils.fetchSeasonAndEpisodes(seasonpage, Jellyfin);
+        SeasonLoader.load(seasonpage, Jellyfin);
     }
     property int detailsDebounceMs: 240
     property bool _detailsPending: false
@@ -1192,7 +1182,7 @@ FocusScope {
             }
             _detailsPending = false;
             detailsReqSeq++;
-            SeasonUtils.fetchSelectedDetails(seasonpage, Jellyfin);
+            GuestCredits.fetchSelectedDetails(seasonpage, Jellyfin, SeasonUtils.updatePlaylistFromEpisodes);
         }
     }
     function requestDetailsFetchDebounced(){
@@ -1217,7 +1207,7 @@ FocusScope {
     }
     function requestBgUpdate(){
         if (disposed || !serverUrl) return;
-        _bgWantedUrl = SeasonUtils.computeBgUrl(seasonpage);
+        _bgWantedUrl = MediaCatalog.seasonBackdropUrl(Jellyfin, seasonpage);
         bgDebounceTimer.restart();
     }
     onBgBlurChanged: requestBgUpdate()
@@ -1228,7 +1218,7 @@ FocusScope {
     property bool _tagsSrcIsDetails: false
     property string _tagsSignature: ""
     function recomputeTagsFromDetails(force){
-        SeasonUtils.recomputeTagsFromDetails(seasonpage, force);
+        SeasonLoader.refreshSelectedTags(seasonpage, force);
     }
     onSelectedDetailsChanged: {
         if (selectedDetails && selectedDetails.Id) _rememberEpisodeDetails(selectedDetails);
@@ -1252,7 +1242,7 @@ FocusScope {
         rootFlick.scrollToEpisodes(true);
         later(function(){
             currentFocus = 1; _applyFocusNow(); _restoringFocus = false;
-            detailsReqSeq++; SeasonUtils.fetchSelectedDetails(seasonpage, Jellyfin);
+            detailsReqSeq++; GuestCredits.fetchSelectedDetails(seasonpage, Jellyfin, SeasonUtils.updatePlaylistFromEpisodes);
             requestPinEpisodes("restoreFocusFromPlaylist");
             maybeHydrateEpisodesRow();
             _maybeReleaseFocusRestoreGate();
@@ -1458,7 +1448,6 @@ FocusScope {
                         width: Math.min(Math.round(_rightAvail * rightColRatio), _effTitleMaxW)
                         spacing: 8
                         Item {
-                            id: headerTitleBox
                             readonly property int profileGuardW: 160
                             readonly property int minTitleW: 420
                             readonly property int _safeW: Math.max(minTitleW, headerRow.width - headerMain.x - profileGuardW)
@@ -1468,7 +1457,7 @@ FocusScope {
 
                             Text { textFormat: Text.PlainText;
                                 id: headerTitle
-                                text: selectedEpisode ? SeasonUtils.displayEpisodeTitle(selectedEpisode)
+                                text: selectedEpisode ? MediaCatalog.episodeDisplayTitle(selectedEpisode)
                                                       : ((seasonItem && seasonItem.Name) ? seasonItem.Name : "")
                                 width: parent.width
                                 color: "#ffffff"
@@ -1606,7 +1595,6 @@ FocusScope {
                                         anchors.verticalCenter: parent.verticalCenter
                                         spacing: 6
                                         Item {
-                                            id: ratingStar
                                             width: 20
                                             height: 20
                                             anchors.verticalCenter: parent.verticalCenter
@@ -1637,7 +1625,7 @@ FocusScope {
                                             }
                                         }
                                         Text { textFormat: Text.PlainText;
-                                            text: SeasonUtils.fmtRatingFr(ratingWrap.it ? (ratingWrap.it.CommunityRating || 0) : 0)
+                                            text: MediaCatalog.formatRatingFr(ratingWrap.it ? (ratingWrap.it.CommunityRating || 0) : 0)
                                             color: "#ffffff"
                                             font.pixelSize: 20
                                             font.bold: true
@@ -1645,8 +1633,8 @@ FocusScope {
                                         }
                                     }
                                 }
-                                Text { textFormat: Text.PlainText; text: SeasonUtils.sxeCode(selectedEpisode, seasonItem); color: "#ffffff"; font.pixelSize: 20; font.bold: true; visible: text.length > 0; anchors.verticalCenter: parent.verticalCenter }
-                                Text { textFormat: Text.PlainText; text: (selectedEpisode && selectedEpisode.PremiereDate) ? SeasonUtils.fmtDateLong(selectedEpisode.PremiereDate) : ""; color: "#ffffff"; font.pixelSize: 20; font.bold: true; visible: !!(selectedEpisode && selectedEpisode.PremiereDate); anchors.verticalCenter: parent.verticalCenter }
+                                Text { textFormat: Text.PlainText; text: MediaCatalog.episodeCode(selectedEpisode, seasonItem); color: "#ffffff"; font.pixelSize: 20; font.bold: true; visible: text.length > 0; anchors.verticalCenter: parent.verticalCenter }
+                                Text { textFormat: Text.PlainText; text: (selectedEpisode && selectedEpisode.PremiereDate) ? MediaCatalog.formatDateLongFr(selectedEpisode.PremiereDate) : ""; color: "#ffffff"; font.pixelSize: 20; font.bold: true; visible: !!(selectedEpisode && selectedEpisode.PremiereDate); anchors.verticalCenter: parent.verticalCenter }
                                 Repeater {
                                     model: _tagsAll
                                     onModelChanged: { metaMarqueeBox._scheduleMarqueeRestart(metaMarqueeBootDelayMs, true, "repeaterModelChanged"); }
@@ -1703,7 +1691,6 @@ FocusScope {
                             }
 
                             OpacityMask {
-                                id: metaMaskedLine
                                 anchors.fill: metaRowViewport
                                 source: metaRowTexture
                                 maskSource: metaRowFadeMask
@@ -1742,7 +1729,7 @@ FocusScope {
                                 readonly property int maxVisibleChars: 10
                                 readonly property int directorFontPx: 18
                                 readonly property string dirStr: {
-                                    var s = SeasonUtils.directorNames(_it());
+                                    var s = GuestCredits.directorNames(_it());
                                     return s.length > 0 ? s : "Inconnu";
                                 }
 
@@ -1886,7 +1873,7 @@ FocusScope {
                             visible: true
                             Text { textFormat: Text.PlainText; text: "DURÉE"; color: "#ffffff"; font.pixelSize: 14; font.bold: true }
                             Text { textFormat: Text.PlainText;
-                                text: (selectedEpisode && selectedEpisode.RunTimeTicks) ? SeasonUtils.fmtMinutesFromTicks(selectedEpisode.RunTimeTicks) : "Inconnu"
+                                text: (selectedEpisode && selectedEpisode.RunTimeTicks) ? MediaCatalog.formatRuntimeMinutesFromTicks(selectedEpisode.RunTimeTicks) : "Inconnu"
                                 color: seasonpage.metadataValueColor
                                 font.pixelSize: 18
                             }
@@ -1897,18 +1884,17 @@ FocusScope {
                             Text { textFormat: Text.PlainText; text: "FIN"; color: "#ffffff"; font.pixelSize: 14; font.bold: true }
                             Text { textFormat: Text.PlainText;
                                 id: endTxt
-                                text: (selectedEpisode && selectedEpisode.RunTimeTicks) ? SeasonUtils.endTimeFor(selectedEpisode.RunTimeTicks) : "Inconnu"
+                                text: (selectedEpisode && selectedEpisode.RunTimeTicks) ? MediaCatalog.formatEndTimeFromTicks(selectedEpisode.RunTimeTicks) : "Inconnu"
                                 color: seasonpage.metadataValueColor
                                 font.pixelSize: 18
                             }
                             Timer {
-                                id: endTimeTimer
                                 interval: endTimeTickMs
                                 repeat: true
                                 running: !!(canRunTimers && !!(selectedEpisode && selectedEpisode.RunTimeTicks) && isInViewport(metaOverviewRow, 80) && (viewportGen >= 0))
                                 onTriggered: {
                                     if (selectedEpisode && selectedEpisode.RunTimeTicks){
-                                        var t = SeasonUtils.endTimeFor(selectedEpisode.RunTimeTicks);
+                                        var t = MediaCatalog.formatEndTimeFromTicks(selectedEpisode.RunTimeTicks);
                                         if (endTxt.text !== t) endTxt.text = t;
                                     }
                                 }
@@ -1918,13 +1904,13 @@ FocusScope {
                                 ignoreUnknownSignals: true
                                 function onSelectedEpisodeChanged(){
                                     if (selectedEpisode && selectedEpisode.RunTimeTicks){
-                                        var t = SeasonUtils.endTimeFor(selectedEpisode.RunTimeTicks);
+                                        var t = MediaCatalog.formatEndTimeFromTicks(selectedEpisode.RunTimeTicks);
                                         if (endTxt.text !== t) endTxt.text = t;
                                     } else endTxt.text = "Inconnu";
                                 }
                                 function onOverlayModeChanged(){
                                     if (!overlayOpen && selectedEpisode && selectedEpisode.RunTimeTicks){
-                                        var t2 = SeasonUtils.endTimeFor(selectedEpisode.RunTimeTicks);
+                                        var t2 = MediaCatalog.formatEndTimeFromTicks(selectedEpisode.RunTimeTicks);
                                         if (endTxt.text !== t2) endTxt.text = t2;
                                     }
                                 }
@@ -2067,7 +2053,7 @@ FocusScope {
                             smooth: false
                             mipmap: false
                             source: (_logoArmed && postFirstFrame)
-                                ? SeasonUtils.computeSeriesLogoUrl(serverUrl, seriesId, selectedEpisode, seasonItem, seriesLogoBox.width, seriesLogoMaxW)
+                                ? MediaCatalog.seasonLogoUrl(Jellyfin, serverUrl, seriesId, selectedEpisode, seasonItem, seriesLogoBox.width, seriesLogoMaxW)
                                 : ""
                             opacity: _logoArmed ? 0.95 : 0.0
                             onStatusChanged: if (visualRevealPending) visualRevealPollTimer.restart()
@@ -2197,13 +2183,13 @@ FocusScope {
                                                 serverUrl: h.serverUrl
                                                 userId: h.userId
                                                 itemId: selectedEpisode ? selectedEpisode.Id : ""
-                                                itemTitle: selectedEpisode ? SeasonUtils.displayEpisodeTitle(selectedEpisode) : ""
+                                                itemTitle: selectedEpisode ? MediaCatalog.episodeDisplayTitle(selectedEpisode) : ""
                                                 userData: selectedDetails ? selectedDetails.UserData : (selectedEpisode ? selectedEpisode.UserData : null)
                                                 runTimeTicks: selectedEpisode ? (Number(selectedEpisode.RunTimeTicks) || 0) : 0
                                                 seasonId: h.seasonId
                                                 seriesId: h.seriesId
                                                 itemData: selectedEpisode || null
-                                                isMissingOverride: selectedEpisode ? !h._episodePlayableForShuffle(selectedEpisode) : false
+                                                isMissingOverride: selectedEpisode ? !SeasonUtils.episodePlayableForShuffle(selectedEpisode) : false
                                                 shuffleEpisodeProvider: (modelData === "shuffle") ? function(preferUnplayed){ return h.pickOwnedShuffleEpisode(preferUnplayed); } : null
                                                 shuffleFallbackToJellyfinWhenProviderEmpty: (modelData === "shuffle") ? false : true
                                                 explicitHintTarget: glassHintBar
@@ -2234,7 +2220,6 @@ FocusScope {
                     }
                 }
                 Item {
-                    id: beforeEpisodesSpacer
                     width: 1
                     height: _episodesSpacerH
                 }
@@ -2253,7 +2238,7 @@ FocusScope {
                         model: h.episodesForRow
                         hydrated: h._episodesHydrated
                         focusRestoreGate: h._focusRestoreGate || h._playlistRestoreInFlight || h._restoringFocus
-                        fallbackPosterUrl: SeasonUtils.computeSeriesPosterFallbackUrl(h)
+                        fallbackPosterUrl: MediaCatalog.seasonPosterFallbackUrl(Jellyfin, h)
                         currentIndex: h.episodesRowIndex
                         active: !h.isLoading && !h.overlayOpen
                         showFocus: (h.currentFocus === 1)
@@ -2308,7 +2293,7 @@ FocusScope {
                             h.restoreY = rootFlick.contentY;
                             if (typeof h.requestPlay === "function") {
                                 _storeSensitiveNavContext()
-                                h.requestPlay(ep2.Id, h.accessToken, h.userId, h.serverUrl, SeasonUtils.displayEpisodeTitle(ep2));
+                                h.requestPlay(ep2.Id, h.accessToken, h.userId, h.serverUrl, MediaCatalog.episodeDisplayTitle(ep2));
                             }
                         }
                         onRequestUp: {
@@ -2338,7 +2323,6 @@ FocusScope {
                     }
                 }
                 Item {
-                    id: guestsSection
                     width: pageColumn.width
                     height: guestsCol.implicitHeight
                     transform: Translate { y: -Number(seasonpage.guestsLiftPx) }
@@ -2348,7 +2332,6 @@ FocusScope {
                         spacing: 0
                         Item { id: guestAnchor; width: 1; height: 1; visible: true }
                         Item {
-                            id: guestTitleRow
                             height: hasGuests ? 28 : 0
                             width: parent.width
                             visible: hasGuests
@@ -2462,8 +2445,8 @@ FocusScope {
         function onChapterActivated(index, chapter){
             if (!selectedEpisodeId) return; restoreEpisodeId = selectedEpisodeId; restoreIndex = currentIndex; restoreY = rootFlick.contentY
             var startMs = Math.max(0, Math.floor(Number(chapter && chapter.StartPositionTicks || 0) / 10000))
-            try { if (shared) shared.__redefinExplicitPlaybackStart = ({ source:"chapter", itemId:String(selectedEpisodeId), serverUrl:String(serverUrl||""), userId:String(userId||""), startMs:startMs, ts:Date.now() }) } catch(e) {}
-            _storeSensitiveNavContext(); requestPlay(selectedEpisodeId, accessToken, userId, serverUrl, SeasonUtils.displayEpisodeTitle(selectedEpisode))
+            try { if (shared) NavContext.setExplicitPlaybackStart(shared, ({ source:"chapter", itemId:String(selectedEpisodeId), serverUrl:String(serverUrl||""), userId:String(userId||""), startMs:startMs, ts:Date.now() })) } catch(e) {}
+            _storeSensitiveNavContext(); requestPlay(selectedEpisodeId, accessToken, userId, serverUrl, MediaCatalog.episodeDisplayTitle(selectedEpisode))
         }
     }
     Loader {
@@ -2487,13 +2470,13 @@ FocusScope {
     }
     function openOverviewOverlay(){
         if (!_guardRun() || isLoading) return;
-        var ep = _it(), payload = SeasonUtils.buildOverviewOverlayPayload(ep, serverUrl);
+        var ep = _it(), payload = MediaCatalog.episodeOverviewPayload(Jellyfin, ep, serverUrl);
         if (!payload) return;
-        var meta = [], code = SeasonUtils.sxeCode(ep, seasonItem);
+        var meta = [], code = MediaCatalog.episodeCode(ep, seasonItem);
         if (code && String(code).length) meta.push(String(code));
-        if (ep && ep.RunTimeTicks) meta.push(String(SeasonUtils.fmtMinutesFromTicks(ep.RunTimeTicks)));
-        if (ep && ep.PremiereDate) meta.push(String(SeasonUtils.fmtDateLong(ep.PremiereDate)));
-        payload.readerStyle = "episode"; payload.title = ep ? SeasonUtils.displayEpisodeTitle(ep) : "Résumé"; payload.meta = meta.join("  •  ");
+        if (ep && ep.RunTimeTicks) meta.push(String(MediaCatalog.formatRuntimeMinutesFromTicks(ep.RunTimeTicks)));
+        if (ep && ep.PremiereDate) meta.push(String(MediaCatalog.formatDateLongFr(ep.PremiereDate)));
+        payload.readerStyle = "episode"; payload.title = ep ? MediaCatalog.episodeDisplayTitle(ep) : "Résumé"; payload.meta = meta.join("  •  ");
         lastFocusBeforeOverlay = currentFocus; overlayMode = "overview"; overlayData = payload;
         later(function(){ if (overlayLoader.item) overlayLoader.item.forceActiveFocus(); });
     }
@@ -2514,12 +2497,7 @@ FocusScope {
 
         // personSource n'est volontairement pas un paramètre ShellPage.
         // On le transporte dans le contexte mémoire déjà utilisé pour les secrets.
-        try {
-            if (shared && shared.__redefinNavContext) {
-                shared.__redefinNavContext.personSource = "guest"
-                shared.__redefinNavContext.personId = personId
-            }
-        } catch(eCtx) {}
+        NavContext.patch(shared, { personSource: "guest", personId: personId })
 
         requestNavigation(q)
     }
@@ -2583,14 +2561,14 @@ FocusScope {
         var explicitStart = Math.max(0, Math.floor(Number(startMs) || 0))
         try {
             if (shared) {
-                shared.__redefinExplicitPlaybackStart = ({
+                NavContext.setExplicitPlaybackStart(shared, ({
                     source: sourceArg && String(sourceArg).length ? String(sourceArg) : "chapter",
                     itemId: String(itemIdArg || ""),
                     serverUrl: String(serverUrlArg || ""),
                     userId: String(userIdArg || ""),
                     startMs: explicitStart,
                     ts: Date.now()
-                })
+                }))
             }
         } catch(e) {}
         _storeSensitiveNavContext()
@@ -2609,8 +2587,7 @@ FocusScope {
         });
         if (preselectEpisodeId && playlist){
             safeCall(function(){
-                if (playlist.setCurrentItemId) playlist.setCurrentItemId("");
-                else if (playlist.currentItemId !== undefined) playlist.currentItemId = "";
+                playlist.setCurrentItemId("")
             });
         }
         if (ctxOk) requestFetch("onCompleted");
@@ -2621,14 +2598,14 @@ FocusScope {
     Component.onDestruction: {
         disposed = true
         reqSeq++
-        SeasonUtils.cancelSeasonLoadRequests(seasonpage, "destroyed")
+        SeasonLoader.cancel(seasonpage, "destroyed")
         guestPersonReturnTimer.stop()
         visualRevealPollTimer.stop()
         visualRevealSettleTimer.stop()
         visualRevealHardTimer.stop()
     }
     function _ctxChanged(reason){
-        SeasonUtils.cancelSeasonLoadRequests(seasonpage, "context_changed")
+        SeasonLoader.cancel(seasonpage, "context_changed")
         if (ready) requestFetch(reason)
     }
     onSharedChanged: {

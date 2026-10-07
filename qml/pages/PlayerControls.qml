@@ -214,7 +214,6 @@ Item {
     readonly property int progressKnobR: 9
 
     Item {
-        id: progressArea
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.leftMargin: root.transportSideInset
@@ -236,7 +235,6 @@ Item {
         }
 
         Rectangle {
-            id: progressFillRect
             anchors.verticalCenter: progressTrack.verticalCenter
             x: 0
             height: root.progressLineH
@@ -249,7 +247,6 @@ Item {
         }
 
         Rectangle {
-            id: progressKnobRect
             width: root.progressKnobR * 2
             height: root.progressKnobR * 2
             radius: root.progressKnobR
@@ -263,7 +260,6 @@ Item {
         }
 
         Text {
-            id: endText
             text: root._endLabel()
             textFormat: Text.PlainText
             visible: text.length > 0
@@ -276,7 +272,6 @@ Item {
         }
 
         Row {
-            id: timesRow
             spacing: 10
             anchors.right: parent.right
             anchors.top: progressTrack.bottom
@@ -315,7 +310,6 @@ Item {
     // Zone historique PlayerControls (96 px), placée exactement 32 px sous
     // l'ancienne ProgressBar.
     Item {
-        id: controlsArea
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.leftMargin: root.transportSideInset
@@ -520,7 +514,6 @@ Item {
     }
 
     Rectangle {
-        id: qualityButton
 
         width: 56
         height: 56
@@ -684,7 +677,6 @@ Item {
     }
 
     Rectangle {
-        id: zoomButton
 
         width: 56
         height: 56
@@ -846,7 +838,6 @@ Item {
     }
 
     Rectangle {
-        id: speedButton
 
         width: 56
         height: 56

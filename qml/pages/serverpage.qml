@@ -3,8 +3,11 @@
 // ReDeFin — découverte Jellyfin + saisie manuelle avec timeout HTTPS renforcé
 
 import QtQuick 2.15
+import "../js/NavigationContext.js" as NavContext
 import fbx.ui.base 1.0 as FbxBase
+import "../components" as Components
 import "../js/jellyfinBridge.js" as Jellyfin
+import "../js/JellyfinServerDiscovery.js" as ServerDiscovery
 import "../js/clientId.js" as ClientId
 
 FocusScope {
@@ -196,13 +199,12 @@ FocusScope {
         try {
             var u = normalizeUrl(url)
             if (!u) return false
-            var api = shared && shared.__redefinNavApi ? shared.__redefinNavApi : null
-            return api && api.storeValues ? api.storeValues({
+            return NavContext.storeValues(shared, {
                 serverUrl: u,
                 fbx: fbx || null,
                 forceServerUrl: true,
                 sourcePage: "serverpage"
-            }) : false
+            })
         } catch(e0) { return false }
     }
 
@@ -304,7 +306,7 @@ FocusScope {
         infoText = "Recherche de serveurs Jellyfin sur le réseau…"
         try { if (fbx && Jellyfin.setFbx) Jellyfin.setFbx(fbx) } catch(e0) {}
 
-        _discoveryHandle = Jellyfin.discoverServers({
+        _discoveryHandle = ServerDiscovery.start({
             fbx: fbx || null,
             maxHosts: scanMaxHosts,
             maxParallel: maxParallel,
@@ -771,9 +773,9 @@ FocusScope {
                 id: hit
                 anchors.fill: parent
                 focus: true
-                onClicked: input.forceActiveFocus()
-                Keys.onReturnPressed: input.forceActiveFocus()
-                Keys.onEnterPressed:  input.forceActiveFocus()
+                onClicked: input.openVirtualKeyboard()
+                Keys.onReturnPressed: input.openVirtualKeyboard()
+                Keys.onEnterPressed:  input.openVirtualKeyboard()
 
                 KeyNavigation.up:   field.upTarget
                 KeyNavigation.down: field.downTarget
@@ -804,16 +806,24 @@ FocusScope {
                 echoMode: field.password ? TextInput.Password : TextInput.Normal
                 inputMethodHints: Qt.ImhNoPredictiveText
 
+                function openVirtualKeyboard(){
+                    Qt.inputMethod.hide()
+                    redefinKeyboard.openFor(input)
+                }
+                function virtualKeyboardAccepted(){ submit() }
+                function virtualKeyboardCanceled(){
+                    Qt.inputMethod.hide()
+                    if (field.consumeBack) field.consumeBack()
+                    hit.forceActiveFocus()
+                }
+
                 function submit(){
                     Qt.inputMethod.hide();
                     if (field.downTarget) field.downTarget.forceActiveFocus();
                     else hit.forceActiveFocus();
                 }
 
-                onActiveFocusChanged: {
-                    if (activeFocus) Qt.inputMethod.show();
-                    else Qt.inputMethod.hide();
-                }
+                onActiveFocusChanged: Qt.inputMethod.hide()
 
                 onTextChanged: field.textEdited(text)
                 onAccepted: submit()
@@ -1115,6 +1125,12 @@ FocusScope {
         }
     }
     function openUrlEntry() {  overlay.active = true; }
+
+    Components.ReDeFinKeyboard {
+        id: redefinKeyboard
+        anchors.fill: parent
+        z: 20000
+    }
 
     /* ===== Swallow Back/Escape quand aucun overlay n’est ouvert ===== */
     Keys.onPressed: {

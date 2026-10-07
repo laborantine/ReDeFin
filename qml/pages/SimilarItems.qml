@@ -6,6 +6,7 @@ import "../js/SafeLog.js" as SafeLog
 import QtQuick 2.15
 import QtGraphicalEffects 1.15
 import "../js/jellyfinBridge.js" as Jellyfin
+import "../js/MediaRailLayout.js" as MediaRailLayout
 
 FocusScope {
     id: similar
@@ -54,7 +55,7 @@ FocusScope {
 
     function topPadFor(h) {
         // headroom pour ne pas couper le zoom + lift (ListView clip)
-        return Math.ceil(h * (focusScale - 1)) + focusLiftPx + Math.ceil(frameWidth) + 2
+        return MediaRailLayout.focusTopPad(h, focusScale, focusLiftPx, frameWidth)
     }
 
     // Texte + classification : bloc compact, aligné à gauche
@@ -74,7 +75,7 @@ FocusScope {
     readonly property real frameInnerEpsilon: 0.2
     readonly property real aaEps: -2.0
     property real frameBorderOutset: 0.8
-    function frameMargin() { return frameInsetPx + frameWidth/2 + frameInnerEpsilon; }
+    function frameMargin(){ return MediaRailLayout.frameMargin(frameInsetPx, frameWidth, frameInnerEpsilon) }
 
     /* ==== Oversample (via URL) ==== */
     readonly property int reqPosterW: Math.round(posterW * posterOversample)
@@ -775,7 +776,6 @@ FocusScope {
 
                         // Bulle séries : nombre d'épisodes non regardés
                         Rectangle {
-                            id: seriesUnplayedBadge
                             visible: cardRoot.showSeriesUnplayedBadge
                             enabled: false
                             z: 6
@@ -904,7 +904,6 @@ FocusScope {
                     }
 
                     Timer {
-                        id: titleTexturePulse
                         interval: 140
                         repeat: true
                         running: titleClip.maskActive
@@ -1058,7 +1057,6 @@ FocusScope {
                     visible: ratingLabel.length > 0
 
                     Text { textFormat: Text.PlainText;
-                        id: ageRatingText
                         anchors.left: parent.left
                         anchors.right: parent.right
                         anchors.top: parent.top

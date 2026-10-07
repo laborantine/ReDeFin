@@ -9,6 +9,7 @@
 
 import QtQuick 2.15
 import "../js/jellyfinBridge.js" as Jellyfin
+import "../js/JellyfinHttpTransport.js" as HttpTransport
 import "../components" as Components
 import "../js/SafeLog.js" as SafeLog
 
@@ -78,7 +79,7 @@ Item {
 
     function _urlWithoutAuth(u){
         if(!u || !u.length) return "";
-        var a = Jellyfin.stripAuthQueryFromUrl(absolutize(u));
+        var a = HttpTransport.stripAuthQueryFromUrl(absolutize(u));
         var q = a.indexOf("?");
         if(q < 0) return a;
         var base = a.substring(0, q);
@@ -143,6 +144,8 @@ Item {
     property var    _logoReadyMemo: ({})
     property var    _logoFailureMemo: ({})
     readonly property int _logoMemoLimit: 128
+    readonly property bool logoReady: logo.status === Image.Ready && _currentUrl.length > 0
+    readonly property string readyLogoUrl: logoReady ? _lastGoodUrl : ""
 
     function _trimLogoMemo(m){
         var keys = Object.keys(m || {});
@@ -362,7 +365,6 @@ Item {
         // Wrapper: respecte la visibilité interne de ClockHUD ET permet
         // au TopBar de masquer l’ensemble sans écraser son binding interne.
         Item {
-            id: clockWrap
             anchors.verticalCenter: parent.verticalCenter
             visible: root.clockVisible
 
@@ -442,7 +444,6 @@ Item {
 
     /* ====== CENTRE : titre centré ====== */
     Item {
-        id: centerArea
         anchors.left: leftSlot.right
         anchors.leftMargin: 16
         anchors.right: rightRow.left

@@ -29,6 +29,7 @@
 
 import QtQuick 2.15
 import "../js/jellyfinBridge.js" as Jellyfin
+import "../js/JellyfinHttpTransport.js" as HttpTransport
 import "../js/MediaCatalog.js" as MediaCatalog
 import "../js/SafeLog.js" as SafeLog
 
@@ -221,7 +222,7 @@ FocusScope {
         var u = _safeStr(url);
         if (!u) return "";
         if (publicBuildNoImageTokenInUrl || !allowImageTokenInUrl)
-            u = Jellyfin.stripAuthQueryFromUrl(u);
+            u = HttpTransport.stripAuthQueryFromUrl(u);
         return u;
     }
 
@@ -250,12 +251,12 @@ FocusScope {
     function _imageMemoKey(url) {
         // SÉCURITÉ : la clé mémoire ne doit pas garder serverUrl/itemId en clair.
         // L'URL est d'abord nettoyée des paramètres auth, puis remplacée par un hash court.
-        var clean = _stripSizingForOverlay(Jellyfin.stripAuthQueryFromUrl(_normalizeQueryDedupe(url)));
+        var clean = _stripSizingForOverlay(HttpTransport.stripAuthQueryFromUrl(_normalizeQueryDedupe(url)));
         return clean ? ("img#" + SafeLog.shortHash(clean)) : "";
     }
 
     function _imageProbeUrl(url) {
-        var u = _stripSizingForOverlay(Jellyfin.stripAuthQueryFromUrl(_normalizeQueryDedupe(url)));
+        var u = _stripSizingForOverlay(HttpTransport.stripAuthQueryFromUrl(_normalizeQueryDedupe(url)));
         u = _appendQueryOnce(u, "format", "jpg");
         u = _appendQueryOnce(u, "maxWidth", 16);
         u = _appendQueryOnce(u, "maxHeight", 24);
@@ -484,7 +485,6 @@ FocusScope {
 
             // ✅ FIX: spinner + texte dans le MÊME bloc centré (plus de spinner qui “reste en haut”)
             Column {
-                id: loadingCol
                 anchors.centerIn: parent
                 width: Math.min(parent.width * 0.82, 620)
                 spacing: 16
@@ -586,7 +586,6 @@ FocusScope {
             // (4) arm 2 ticks: stage 1 (layout), stage 2 (images)
             property int armStage: 0
             Timer {
-                id: armPoster
                 interval: 0
                 running: true
                 repeat: false
@@ -637,7 +636,6 @@ FocusScope {
         id: overviewComponent
 
         Item {
-            id: overviewOverlay
             anchors.fill: parent
             focus: true
             property Item focusTarget: overviewStyleLoader.item && overviewStyleLoader.item.focusTarget
@@ -693,7 +691,6 @@ FocusScope {
                     }
 
                     Rectangle {
-                        id: episodeReaderCard
                         width: Math.min(parent.width - 112, 1088)
                         height: Math.min(parent.height - 92, 572)
                         anchors.centerIn: parent
@@ -822,7 +819,6 @@ FocusScope {
                             }
 
                             Item {
-                                id: episodeReaderTextColumn
                                 anchors.left: episodeReaderDivider.right
                                 anchors.leftMargin: 28
                                 anchors.right: parent.right
@@ -956,7 +952,6 @@ FocusScope {
             // (4) arm 2 ticks: stage 1 (texte/layout), stage 2 (images)
             property int armStage: 0
             Timer {
-                id: armPerson
                 interval: 0
                 running: true
                 repeat: false
@@ -1046,7 +1041,6 @@ FocusScope {
             Rectangle { anchors.fill: parent; color: "#0e1330"; opacity: 0.92 }
 
             Rectangle {
-                id: personCard
                 anchors.centerIn: parent
                 width: Math.min(parent.width * 0.86, 1000)
                 height: Math.min(parent.height * 0.86, 640)

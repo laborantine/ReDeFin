@@ -4,7 +4,8 @@
 
 import QtQuick 2.15
 import "../js/jellyfinBridge.js" as Jellyfin
-import "../js/SeasonUtils.js" as SeasonUtils
+import "../js/GuestCredits.js" as GuestCredits
+import "../js/MediaRailLayout.js" as MediaRailLayout
 import QtGraphicalEffects 1.15
 
 FocusScope {
@@ -120,7 +121,7 @@ FocusScope {
     readonly property int  edgePad: Math.max(18, edgeNudgePx + 10)
 
     function topPadFor(h) {
-        return Math.ceil(h * (focusScale - 1)) + focusLiftPx + Math.ceil(frameWidth) + 2
+        return MediaRailLayout.focusTopPad(h, focusScale, focusLiftPx, frameWidth)
     }
 
     readonly property int effectiveTopPad: Math.max(0, topPadFor(posterH) - postersTopPullPx)
@@ -132,7 +133,7 @@ FocusScope {
     readonly property real frameWidth: 2.0
     readonly property real frameInsetPx: 0.0
     readonly property real frameInnerEpsilon: 0.2
-    function frameMargin() { return frameInsetPx + frameWidth / 2 + frameInnerEpsilon }
+    function frameMargin(){ return MediaRailLayout.frameMargin(frameInsetPx, frameWidth, frameInnerEpsilon) }
 
     // Images
     readonly property real posterOversample: 1.30
@@ -241,7 +242,7 @@ FocusScope {
         var id  = (p.Id || "")
         if (pid && pid.length) return "pid:" + pid
         if (id && id.length)   return "id:" + id
-        return "nm:" + SeasonUtils.normName(p.Name || "")
+        return "nm:" + GuestCredits.normName(p.Name || "")
     }
 
     function _indexFromKey(k){
@@ -253,7 +254,7 @@ FocusScope {
     }
 
     function normalizeGuests(src){
-        return SeasonUtils.normalizeGuestUiList(src || [])
+        return GuestCredits.normalizeGuestUiList(src || [])
     }
 
     function _sliceGuests(list){
@@ -1160,7 +1161,6 @@ FocusScope {
                                 visible: !card.showFallback
 
                                 Item {
-                                    id: imgContent
                                     anchors.fill: parent
                                     transformOrigin: Item.Center
 
@@ -1189,7 +1189,6 @@ FocusScope {
                                     }
 
                                     Image {
-                                        id: imgHq
                                         anchors.fill: parent
                                         fillMode: Image.PreserveAspectCrop
                                         cache: false
@@ -1224,7 +1223,6 @@ FocusScope {
                                 }
 
                                 Item {
-                                    id: avatarContent
                                     anchors.fill: parent
                                     transformOrigin: Item.Center
 
@@ -1342,7 +1340,6 @@ FocusScope {
                     }
 
                     OpacityMask {
-                        id: actorNameMasked
                         anchors.fill: actorNameSourceViewport
                         source: actorNameTexture
                         maskSource: actorNameFadeMask
@@ -1448,7 +1445,6 @@ FocusScope {
                     }
 
                     OpacityMask {
-                        id: characterNameMasked
                         anchors.fill: characterNameSourceViewport
                         source: characterNameTexture
                         maskSource: characterNameFadeMask

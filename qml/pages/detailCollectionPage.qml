@@ -1,4 +1,5 @@
 import QtQuick 2.15
+import "../js/NavigationContext.js" as NavContext
 import QtGraphicalEffects 1.15
 import "." as Pages
 import "../components" as Components
@@ -24,7 +25,7 @@ FocusScope {
     /* Présentation collection : calculs purs centralisés dans MediaCatalog. */
     function _collectionBgUrlFor(it, fillW, fillH, blur, quality) {
         if (!it) return ""
-        return Jellyfin.itemBackdropOrPrimaryUrl(serverUrl, it, {
+        return MediaCatalog.backdropOrPrimaryUrl(Jellyfin, serverUrl, it, {
             fillWidth: MediaCatalog.positiveIntOr(fillW, 1280),
             fillHeight: MediaCatalog.positiveIntOr(fillH, 720),
             quality: MediaCatalog.positiveIntOr(quality, 85),
@@ -382,18 +383,14 @@ FocusScope {
 
     signal requestNavigation(string page)
     signal requestBackToMenu()
-    function _sharedNavApi(){ try { return shared && shared.__redefinNavApi ? shared.__redefinNavApi : null } catch(e) { return null } }
-    function _hydrateSensitiveContextFromShared(){
-        var api = _sharedNavApi()
-        return api && api.hydrate ? api.hydrate(detailCollectionPage, false, 0, false) : false
+    function _hydrateSensitiveContextFromShared() {
+        return NavContext.hydrate(shared, detailCollectionPage, false, 0, false)
     }
-    function _storeSensitiveNavContext(){
-        var api = _sharedNavApi()
-        return api && api.storeTarget ? api.storeTarget(detailCollectionPage) : false
+    function _storeSensitiveNavContext() {
+        return NavContext.storeTarget(shared, detailCollectionPage)
     }
-    function _navRoute(page, params){
-        var api = _sharedNavApi()
-        return api && api.route ? api.route(detailCollectionPage, page, params || ({})) : (page + "?ctx=1")
+    function _navRoute(page, params) {
+        return NavContext.route(shared, detailCollectionPage, page, params)
     }
     function _goBack(){
         if (returnFolderId && returnFolderId.length && typeof requestNavigation === "function") {
@@ -1334,7 +1331,7 @@ FocusScope {
     }
     function scheduleEndLoading(){ if (disposed || !_itemFetchedOnce) return; _endRequested = true; _updateHeroGate() }
     Timer { id: layoutReadyTimer; interval: 320; repeat: false; onTriggered: gateLayoutReady = true }
-    Timer { id: extendedLoadingTimeout; interval: 1900; repeat: false; onTriggered: _releaseExtendedGates() }
+    Timer { id: extendedLoadingTimeout; interval: 10000; repeat: false; onTriggered: _releaseExtendedGates() }
     function _resetExtendedGates(){
         gateCollectionItemsReady = false
         gateCarouselsReady = false
@@ -1638,7 +1635,6 @@ FocusScope {
             height: sec ? sec.cellH : 0
 
             Pages.LibraryPosterCard {
-                id: railPosterCard
                 anchors.left: parent.left
                 anchors.top: parent.top
 
@@ -2173,7 +2169,6 @@ FocusScope {
                                                 techChipTexture.scheduleUpdate()
                                         }
                                         Repeater {
-                                            id: techChipRepeater
                                             model: activeTechChips ? activeTechChips.length : 0
                                             onCountChanged: Qt.callLater(techChipsClip.updateMarquee)
                                             delegate: Rectangle {
@@ -2211,7 +2206,6 @@ FocusScope {
                                 }
 
                                 Timer {
-                                    id: techChipTexturePulse
                                     interval: 140
                                     repeat: true
                                     running: techChipsClip.maskActive
@@ -2453,7 +2447,6 @@ FocusScope {
                                 // PERF Freebox: plus de layer OpacityMask sur l'art principal.
                                 // Le visuel conserve un cadre arrondi premium, mais l'image reste un clip rectangulaire simple.
                                 Item {
-                                    id: artImageLayer
                                     anchors.fill: parent
                                     anchors.margins: frameMargin()
                                     clip: true
@@ -2510,7 +2503,6 @@ FocusScope {
                                         }
                                     }
                                     Image {
-                                        id: artImageHq
                                         anchors.fill: parent
                                         asynchronous: true
                                         cache: false
@@ -2562,14 +2554,12 @@ FocusScope {
                         // PERF Freebox: remplace le layer OpacityMask de section complète par un clip QML simple.
                         // Même découpe verticale sous le hero pinné, sans shader sur toute la rangée.
                         Item {
-                            id: seriesClipViewport
                             x: 0
                             y: seriesSection._clipTop
                             width: parent.width
                             height: Math.max(0, parent.height - seriesSection._clipTop)
                             clip: seriesSection._clipTop > 0.5
                             Item {
-                                id: seriesClipContent
                                 x: 0
                                 y: -seriesSection._clipTop
                                 width: seriesSection.width
@@ -2677,14 +2667,12 @@ FocusScope {
                         readonly property int  reqH: Math.round(cardH * oversample)
                         // PERF Freebox: clip vertical simple au lieu d'un OpacityMask de section complète.
                         Item {
-                            id: filmsClipViewport
                             x: 0
                             y: filmsSection._clipTop
                             width: parent.width
                             height: Math.max(0, parent.height - filmsSection._clipTop)
                             clip: filmsSection._clipTop > 0.5
                             Item {
-                                id: filmsClipContent
                                 x: 0
                                 y: -filmsSection._clipTop
                                 width: filmsSection.width
@@ -2846,7 +2834,7 @@ FocusScope {
         openOverlay("poster", { posterUrl: u })
     }
     function _overviewReaderImageUrl(){
-        return item ? Jellyfin.itemBackdropOrPrimaryUrl(serverUrl, item, {
+        return item ? MediaCatalog.backdropOrPrimaryUrl(Jellyfin, serverUrl, item, {
             fillWidth: 720, fillHeight: 405, quality: 88, format: "jpg"
         }) : ""
     }

@@ -1,11 +1,12 @@
 // qml/pages/detailMoviePage.qml — QtQuick 2.15 / sans Controls
 // Version compactée en gardant les optimisations déjà effectives.
 import QtQuick 2.15
+import "../js/NavigationContext.js" as NavContext
 import QtGraphicalEffects 1.15
 import "../components" as Components
 import "../js/jellyfinBridge.js" as Jellyfin
-import "../js/SeasonUtils.js" as SeasonUtils
 import "../js/MediaCatalog.js" as MediaCatalog
+import "../js/MediaRailLayout.js" as MediaRailLayout
 import "../js/SafeLog.js" as SafeLog
 FocusScope {
     id: detailMoviePage
@@ -19,18 +20,14 @@ FocusScope {
     property string userImageTag: ""
     property var fbx
     property var shared: null
-    function _sharedNavApi(){ try { return shared && shared.__redefinNavApi ? shared.__redefinNavApi : null } catch(e) { return null } }
-    function _hydrateSensitiveContextFromShared(){
-        var api = _sharedNavApi()
-        return api && api.hydrate ? api.hydrate(detailMoviePage, false, 0, false) : false
+    function _hydrateSensitiveContextFromShared() {
+        return NavContext.hydrate(shared, detailMoviePage, false, 0, false)
     }
-    function _storeSensitiveNavContext(){
-        var api = _sharedNavApi()
-        return api && api.storeTarget ? api.storeTarget(detailMoviePage) : false
+    function _storeSensitiveNavContext() {
+        return NavContext.storeTarget(shared, detailMoviePage)
     }
-    function _navRoute(page, params){
-        var api = _sharedNavApi()
-        return api && api.route ? api.route(detailMoviePage, page, params || ({})) : (page + "?ctx=1")
+    function _navRoute(page, params) {
+        return NavContext.route(shared, detailMoviePage, page, params)
     }
     property var settings: null
     readonly property bool showClockHud: {
@@ -62,7 +59,7 @@ FocusScope {
     readonly property real frameWidth: 2.0
     readonly property real frameInsetPx: 0.0
     readonly property real frameInnerEpsilon: 0.2
-    function frameMargin(){ return frameInsetPx + frameWidth / 2 + frameInnerEpsilon }
+    function frameMargin(){ return MediaRailLayout.frameMargin(frameInsetPx, frameWidth, frameInnerEpsilon) }
     /* ===== Guard nav ===== */
     property var _navGuard: ({ busy:false, lastId:"", t:0 })
     function _openOnce(id, url){
@@ -94,22 +91,6 @@ FocusScope {
     property var castPeople: []
     property int  castInitialLimit: 12
     property bool castExpanded: false
-    // Préchargement direct des portraits Cast depuis DetailMoviePage.
-    // Objectif: lancer les URLs portraits dès que fetchItem() donne People,
-    // donc bien avant que l'utilisateur descende jusqu'au bloc Distribution.
-    property bool castPortraitPrewarmEnabled: true
-    property int  castPortraitPrewarmCount: 6
-    property int  castPortraitPrewarmImmediateCount: 3
-    property int  castPortraitPrewarmDeferredCount: 3
-    property bool _castPortraitPrewarmSecondPhase: false
-    readonly property int castPortraitPrewarmW: 322
-    readonly property int castPortraitPrewarmH: 483
-    property var  castPortraitPrewarmPeople: []
-    property int  _castPortraitPrewarmEpoch: 0
-    function _clearCastPortraitPrewarm(){
-        castPortraitPrewarmPeople = []; _castPortraitPrewarmSecondPhase = false; _castPortraitPrewarmEpoch++
-        if (castPortraitPrewarmDeferredTimer.running) castPortraitPrewarmDeferredTimer.stop()
-    }
     property int  similarWarmCount: 14
     property bool similarExpanded: false
     property var  chipModel: []
@@ -118,7 +99,6 @@ FocusScope {
     function _resetData(clearError){
         item = null
         castPeopleAll = []; castPeople = []; castExpanded = false
-        _clearCastPortraitPrewarm()
         similarExpanded = false
         chipModel = []; genresLine = ""
         posterLogoFailed = false
@@ -132,44 +112,6 @@ FocusScope {
         castExpanded = castPeopleAll.length <= castInitialLimit
         castPeople = castExpanded ? castPeopleAll : castPeopleAll.slice(0, castInitialLimit)
     }
-    function _personPrimaryTagForPrewarm(p) {
-        if (!p) return ""
-        if (p.PrimaryImageTag) return String(p.PrimaryImageTag)
-        if (p.ImageTags && p.ImageTags.Primary) return String(p.ImageTags.Primary)
-        return ""
-    }
-
-    function castPortraitUrlForPrewarm(p) {
-        if (!castPortraitPrewarmEnabled || !p || !p.Id || !serverUrl) return ""
-        var tag = _personPrimaryTagForPrewarm(p)
-        if (!tag) return ""
-        // Même URL et mêmes dimensions que CastPage pour maximiser le partage du cache QML.
-        return Jellyfin.itemImageUrl(serverUrl, p.Id, "Primary", tag, {
-            format: "jpg",
-            quality: 82,
-            fillWidth: castPortraitPrewarmW,
-            fillHeight: castPortraitPrewarmH
-        })
-    }
-    function _refreshCastPortraitPrewarm() {
-        if (!castPortraitPrewarmEnabled || disposed || !visible || !serverUrl || !castPeopleAll || castPeopleAll.length <= 0) {
-            _clearCastPortraitPrewarm()
-            return
-        }
-        var cap = Math.min(Math.max(0, castPortraitPrewarmCount | 0), castPeopleAll.length)
-        var first = Math.min(Math.max(0, castPortraitPrewarmImmediateCount | 0), cap)
-        var deferred = Math.max(0, castPortraitPrewarmDeferredCount | 0)
-        var n = _castPortraitPrewarmSecondPhase ? Math.min(cap, first + deferred) : first
-        var arr = []
-        for (var i = 0; i < n; ++i) {
-            var p = castPeopleAll[i]
-            if (p && p.Id && _personPrimaryTagForPrewarm(p)) arr.push(p)
-        }
-        castPortraitPrewarmPeople = arr
-        _castPortraitPrewarmEpoch++
-        if (!_castPortraitPrewarmSecondPhase && cap > n && !disposed && visible && !castPortraitPrewarmDeferredTimer.running)
-            castPortraitPrewarmDeferredTimer.restart()
-    }
     function _hydrateCastNow(){
         if (castExpanded || !castPeopleAll || !castPeopleAll.length) return
         castExpanded = true; castPeople = castPeopleAll
@@ -179,7 +121,6 @@ FocusScope {
         }
     }
     onCastPeopleChanged: {
-        _refreshCastPortraitPrewarm()
         if (castPageLoader.item) try { castPageLoader.item.people = castPeople } catch(e) {}
         _updateExtendedSectionGates()
     }
@@ -215,7 +156,7 @@ FocusScope {
     property string endTimeString: {
         if (!durationMinutes) return ""
         var n = new Date(); n.setMinutes(n.getMinutes() + durationMinutes)
-        return SeasonUtils.pad2(n.getHours()) + ":" + SeasonUtils.pad2(n.getMinutes())
+        return MediaCatalog.pad2(n.getHours()) + ":" + MediaCatalog.pad2(n.getMinutes())
     }
     property string directorsLine: {
         var s = MediaCatalog.mediaDirectorsText(item)
@@ -384,16 +325,17 @@ FocusScope {
     property bool gateBGReady: false
     property bool serverResponseSlow: false
     // Une fiche chaude peut rester interactive pendant la révalidation réseau.
-    readonly property bool hardLoading: (fetchInFlight && !warmSnapshotVisible) || !gateMinDelay || !gateItemReady || !gatePosterReady || !gateBGReady
+    readonly property bool hardLoading: (fetchInFlight && !warmSnapshotVisible) || !gateItemReady
     /* ===== Loading étendu semi-strict (hero + premières sections movie) =====
        On garde le CircleDotsLoader jusqu'à ce que le hero soit prêt ET que les blocs
        Cast / Similar soient au moins instanciés ou déclarés vides. Cast/Similar gardent
        leur logique lazy, avec timeout de sécurité pour éviter un écran noir infini. */
     property bool gateCastBlockReady: false
+    property bool gateChaptersBlockReady: false
     property bool gateSimilarBlockReady: false
     property bool gateLayoutReady: false
     property bool extendedLoadingTimedOut: false
-    readonly property bool extendedLoading: !hardLoading && (!gateCastBlockReady || !gateSimilarBlockReady || !gateLayoutReady)
+    readonly property bool extendedLoading: !hardLoading && (!gateCastBlockReady || !gateChaptersBlockReady || !gateSimilarBlockReady || !gateLayoutReady)
     // Gate commun de retour vers DetailMoviePage.
     // - Player : refresh Jellyfin forcé pour UserData / « Reprendre ».
     // - PersonPage : pas de requête forcée si la fiche en mémoire est encore valide,
@@ -407,7 +349,7 @@ FocusScope {
     // le snapshot chaud ne doit jamais être exposé seul. Il peut être préparé en
     // arrière-plan, mais le curtain reste actif pour éviter le flash "fiche -> loader".
     property bool initialAuthoritativeFetchPending: true
-    readonly property bool baseVisualLoading: hardLoading || extendedLoading
+    readonly property bool baseVisualLoading: hardLoading || !gatePosterReady || !gateBGReady || extendedLoading
     readonly property bool visualLoading: baseVisualLoading || detailReturnRefreshGate || initialAuthoritativeFetchPending
     readonly property bool isLoading: visualLoading
     readonly property bool shellLoading: visualLoading
@@ -444,9 +386,9 @@ FocusScope {
     }
     function _consumeDetailReturnRefreshMarker(reason){
         try {
-            if (!shared || !shared.__redefinDetailReturnRefresh)
+            if (!shared || !NavContext.detailReturnRefresh(shared))
                 return false
-            var marker = shared.__redefinDetailReturnRefresh
+            var marker = NavContext.detailReturnRefresh(shared)
             var markerId = String(marker.itemId || "")
             var scope = String(marker.scope || "player").toLowerCase()
             var now = Date.now()
@@ -455,7 +397,7 @@ FocusScope {
             // sans scope explicite, il reste considéré comme un retour Player.
             var maxAge = (scope === "person") ? 120000 : 15000
             if (ts > 0 && (now - ts) > maxAge) {
-                shared.__redefinDetailReturnRefresh = null
+                NavContext.clearDetailReturnRefresh(shared)
                 return false
             }
             if (!itemId || !markerId || markerId !== String(itemId))
@@ -472,7 +414,7 @@ FocusScope {
                     a.put(_focusKey(),s)
                 }
             }
-            shared.__redefinDetailReturnRefresh = null
+            NavContext.clearDetailReturnRefresh(shared)
             return _armDetailReturnRefresh(
                         reason || (scope + "-return-marker"),
                         forceRefresh,
@@ -525,15 +467,17 @@ FocusScope {
         loadingError = ""
         warmSnapshotVisible = true
         minLoadTimer.stop(); gateTimeoutTimer.stop()
-        gateMinDelay = gateItemReady = gatePosterReady = gateBGReady = true
-        _releaseExtendedGates()
+        gateMinDelay = gateItemReady = true
+        gatePosterReady = gateBGReady = false
+        _resetExtendedGates()
         _syncPosterSources()
         safeRestart(bgUpdateTimer)
-        safeCallLater(function(){ _updatePosterGate(); _updateBGGate(); _pokeRestore() })
+        safeCallLater(function(){ _updatePosterGate(); _updateBGGate(); _startExtendedLoadingGates(); _pokeRestore() })
         return true
     }
     function _resetExtendedGates(){
         gateCastBlockReady = false
+        gateChaptersBlockReady = false
         gateSimilarBlockReady = false
         gateLayoutReady = false
         extendedLoadingTimedOut = false
@@ -544,6 +488,7 @@ FocusScope {
         extendedLoadingTimeout.stop()
         layoutReadyTimer.stop()
         gateCastBlockReady = true
+        gateChaptersBlockReady = true
         gateSimilarBlockReady = true
         gateLayoutReady = true
         extendedLoadingTimedOut = true
@@ -558,6 +503,7 @@ FocusScope {
         if (hardLoading) return
         if (!hasItem) {
             gateCastBlockReady = true
+            gateChaptersBlockReady = true
             gateSimilarBlockReady = true
             return
         }
@@ -567,9 +513,16 @@ FocusScope {
             else if (castPageLoader.status === Loader.Ready && castPageLoader.item) gateCastBlockReady = true
         } catch(e1) {}
         try {
-            if (similarLoader.status === Loader.Error) gateSimilarBlockReady = true
-            else if (heavyStageSimilar && similarLoader.status === Loader.Ready && similarLoader.item) gateSimilarBlockReady = true
+            var hasChaptersNow = !!(item && item.Chapters && item.Chapters.length)
+            if (!hasChaptersNow || chaptersLoader.status === Loader.Error) gateChaptersBlockReady = true
+            else if (chaptersLoader.status === Loader.Ready && chaptersLoader.item) gateChaptersBlockReady = true
         } catch(e2) {}
+        try {
+            if (similarLoader.status === Loader.Error) gateSimilarBlockReady = true
+            else if (heavyStageSimilar && similarLoader.status === Loader.Ready && similarLoader.item
+                     && (similarLoader.item.loading === undefined || similarLoader.item.loading === false))
+                gateSimilarBlockReady = true
+        } catch(e3) {}
     }
     function _resetGates(){
         gateMinDelay = gateItemReady = gatePosterReady = gateBGReady = false
@@ -584,7 +537,7 @@ FocusScope {
         gateMinDelay = gateItemReady = gatePosterReady = gateBGReady = true
         _releaseExtendedGates()
     }
-    Timer { id: minLoadTimer; interval: 220; repeat: false; onTriggered: gateMinDelay = true }
+    Timer { id: minLoadTimer; interval: 0; repeat: false; onTriggered: gateMinDelay = true }
     Timer {
         id: gateTimeoutTimer
         interval: 1800; repeat: false
@@ -593,7 +546,7 @@ FocusScope {
         onTriggered: { if (fetchInFlight) serverResponseSlow = true }
     }
     Timer { id: layoutReadyTimer; interval: 320; repeat: false; onTriggered: gateLayoutReady = true }
-    Timer { id: extendedLoadingTimeout; interval: 2600; repeat: false; onTriggered: _releaseExtendedGates() }
+    Timer { id: extendedLoadingTimeout; interval: 10000; repeat: false; onTriggered: _releaseExtendedGates() }
     Timer {
         id: detailReturnReleaseTimer
         interval: 40
@@ -641,8 +594,7 @@ FocusScope {
     function _startHeavy(){
         _resetHeavy()
         heavyStageHero = true
-        // CastPage est préchauffée immédiatement : ses portraits peuvent commencer
-        // à charger pendant que le hero/backdrop termine, au lieu d'arriver après coup.
+        // Le rail peut préparer son layout ; les portraits attendent sa visibilité.
         heavyStageCast = true
         _heavyStage = 2
         heavyStageTimer.start()
@@ -662,8 +614,7 @@ FocusScope {
     property int _restoreBudget: 0
     function _movieId(){ return itemId || (item && item.Id) || "" }
     function _detailFocusApi(){
-        try { return shared && shared.__redefinDetailFocusApi ? shared.__redefinDetailFocusApi : null }
-        catch(e) { return null }
+        return NavContext.detailFocusApi(shared)
     }
     function armMemo(scope){
         var api = _detailFocusApi(), mid = _movieId()
@@ -688,56 +639,17 @@ FocusScope {
             if (!shared || !itemId || !personObj || !personObj.Id) return false
             var snap = _getFocusSnapshot()
             var savedY = (snap && typeof snap.scrollY === "number") ? Number(snap.scrollY) : Number(rootFlick ? rootFlick.contentY : 0)
-            shared.__redefinPersonReturnContext = ({
+            NavContext.setPersonReturn(shared, ({
                 detailItemId: String(itemId), personId: String(personObj.Id),
                 castIndex: (castPageLoader.item && castPageLoader.item.currentActorIndex !== undefined) ? (castPageLoader.item.currentActorIndex|0) : 0,
                 returnScrollY: isFinite(savedY) ? Math.max(0, savedY) : 0,
                 detailKind: "movie", ts: Date.now()
-            })
+            }))
             return true
         } catch(e) { return false }
     }
     function _focusKey(){ return "detailMovie|" + _movieId() }
     signal requestPlay(string itemId, string accessToken, string userId, string serverUrl, string itemTitle)
-    // Pool root-level : précharge les portraits Cast même quand CastPage est encore hors écran.
-    // Le léger opacity évite certains builds Qt/Freebox qui retardent des Images totalement invisibles.
-    Timer {
-        id: castPortraitPrewarmDeferredTimer
-        interval: 1500
-        repeat: false
-        onTriggered: {
-            if (detailMoviePage.disposed || !detailMoviePage.visible) return
-            if (detailMoviePage.visualLoading) { restart(); return }
-            detailMoviePage._castPortraitPrewarmSecondPhase = true
-            detailMoviePage._refreshCastPortraitPrewarm()
-        }
-    }
-    Item {
-        id: castPortraitPrewarmPool
-        x: -4
-        y: -4
-        width: 1
-        height: 1
-        opacity: 0.01
-        visible: !detailMoviePage.disposed && detailMoviePage.visible && castPortraitPrewarmEnabled && castPortraitPrewarmPeople && castPortraitPrewarmPeople.length > 0
-        z: -10000
-        Repeater {
-            model: castPortraitPrewarmPeople ? castPortraitPrewarmPeople.length : 0
-            delegate: Image {
-                width: 1
-                height: 1
-                visible: true
-                asynchronous: true
-                cache: index < Math.min(detailMoviePage.castPortraitPrewarmImmediateCount, detailMoviePage.castPortraitPrewarmCount)
-                mipmap: false
-                smooth: false
-                fillMode: Image.PreserveAspectCrop
-                source: (!detailMoviePage.disposed && detailMoviePage.visible) ? detailMoviePage.castPortraitUrlForPrewarm(detailMoviePage.castPortraitPrewarmPeople[index]) : ""
-                sourceSize.width: detailMoviePage.castPortraitPrewarmW
-                sourceSize.height: detailMoviePage.castPortraitPrewarmH
-            }
-        }
-    }
     signal requestNavigation(string page)
     signal requestBackToMenu()
     Timer { id: saveFocusTimer; interval: 0; repeat: false; onTriggered: { _saveQueued = false; _saveFocusSnapshotNow() } }
@@ -766,7 +678,7 @@ FocusScope {
     }
 
     // Retour terminal DetailMoviePage -> MoviePage : le stockage reste la
-    // responsabilité exclusive de l'API DetailFocus installée par ShellPage.
+    // responsabilité exclusive de l'API DetailFocus de NavigationContext.
     function _forgetFocusSnapshot(){
         if (_saveQueued) {
             try { saveFocusTimer.stop() } catch(e0) {}
@@ -981,13 +893,7 @@ FocusScope {
     /* ===== Scroll / focus helpers ===== */
     property bool scrollAnimEnabled: true
     function ensureItemVisible(target, m){
-        if (!target || !target.visible || !rootFlick) return
-        var margin = m || 20, p = target.mapToItem(rootFlick.contentItem, 0, 0)
-        var top = p.y - margin, bot = p.y + target.height + margin
-        var viewTop = rootFlick.contentY, viewBot = rootFlick.contentY + rootFlick.height
-        var maxY = Math.max(0, rootFlick.contentHeight - rootFlick.height)
-        if (top < viewTop) rootFlick.scrollToY(Math.max(0, top), true)
-        else if (bot > viewBot) rootFlick.scrollToY(Math.max(0, Math.min(maxY, bot - rootFlick.height)), true)
+        MediaRailLayout.ensureItemVisible(rootFlick, target, m || 20, true)
     }
     function hasCast(){
         return castPeople.length > 0 && castPageLoader.item && (
@@ -999,11 +905,7 @@ FocusScope {
     function hasSimilarContent(){ return !!(similarLoader.status === Loader.Ready && similarLoader.item && similarLoader.item.hasContent === true) }
     function hasChapters(){ return !!(chaptersLoader.status === Loader.Ready && chaptersLoader.item && chaptersLoader.item.hasContent === true) }
     function restoreCastFocus(){
-        if (!castPageLoader.item) return
-        if (castPageLoader.item.restoreLastActorFocus) castPageLoader.item.restoreLastActorFocus()
-        else if (castPageLoader.item.focusFirstActor) castPageLoader.item.focusFirstActor()
-        else if (castPageLoader.item.forceFirstActorFocus) castPageLoader.item.forceFirstActorFocus()
-        else if (castPageLoader.item.focusLastActor) castPageLoader.item.focusLastActor()
+        MediaRailLayout.restoreCastFocus(castPageLoader.item)
     }
     function _restoreSimilarFocusIfAny(){
         if (!similarLoader.item) return
@@ -1139,6 +1041,7 @@ FocusScope {
     readonly property int bgH: 720
     property int bgBlur: 8
     property real bgDarken: 0.40
+    readonly property real bgOpacity: 0.90 * (1.0 - Math.max(0.0, Math.min(1.0, bgDarken)))
     // URLs image Jellyfin sans token : ne jamais logger Image.source ou URL /Items/... brute.
 
 
@@ -1277,14 +1180,14 @@ FocusScope {
         _storeSensitiveNavContext()
         try {
             if (shared && startMs !== undefined && startMs !== null && Number(startMs) >= 0) {
-                shared.__redefinExplicitPlaybackStart = ({
+                NavContext.setExplicitPlaybackStart(shared, ({
                     source: sourceArg && String(sourceArg).length ? String(sourceArg) : "chapter",
                     itemId: String(itemIdArg || ""),
                     serverUrl: String(serverUrlArg || ""),
                     userId: String(userIdArg || ""),
                     startMs: Math.max(0, Math.floor(Number(startMs))),
                     ts: Date.now()
-                })
+                }))
             }
         } catch(e) {}
         requestPlay(itemIdArg, accessTokenArg, userIdArg, serverUrlArg, itemTitleArg)
@@ -1366,7 +1269,6 @@ FocusScope {
                 _warmDetailSnapshot = null
                 castPeopleAll = (res && res.People) ? res.People : []
                 _applyCastWarm()
-                _refreshCastPortraitPrewarm()
                 similarExpanded = false
                 recomputeChips()
                 serverResponseSlow = false
@@ -1417,8 +1319,17 @@ FocusScope {
     onMovieLogoUrlChanged: safeCallLater(function(){ posterLogoFailed = false; _syncPosterSources(); _updatePosterGate() })
     onMovieCoverUrlChanged: { _clearPosterHq(); safeCallLater(function(){ _syncPosterSources(); _updatePosterGate(); if (posterFocus && posterFocus.activeFocus) _schedulePosterHq() }) }
     /* ===== Wiring loaders ===== */
+    function _castImagesNeeded(){
+        if (!visible || !castPageLoader || !rootFlick) return false;
+        if (currentFocus === 3) return true;
+        // Lire contentY/height rend le binding sensible au défilement et au layout.
+        var scrollY = rootFlick.contentY, viewHeight = rootFlick.height;
+        var top = castPageLoader.mapToItem(rootFlick.contentItem, 0, 0).y - scrollY;
+        return top < viewHeight && top + castPageLoader.height > 0;
+    }
     function wireCastLoader(){
         var it = castPageLoader.item; if (!it) return
+        it.imageLoadEnabled = Qt.binding(function(){ return _castImagesNeeded() });
         it.people = castExpanded ? castPeopleAll : castPeople
         it.serverUrl = serverUrl; it.accessToken = accessToken; it.userId = userId
         it.userName = userName; it.userImageTag = userImageTag; it.fbx = fbx
@@ -1516,8 +1427,6 @@ FocusScope {
                 _ctxChanged()
                 _queueFocusRepair("detailmovie-visible", 16)
             }
-            if (castPeopleAll && castPeopleAll.length > 0)
-                _refreshCastPortraitPrewarm()
         } else {
             // Page conservée en mémoire : lever le rideau PENDANT qu'elle est
             // cachée garantit qu'aucune frame obsolète ne puisse apparaître
@@ -1527,7 +1436,6 @@ FocusScope {
                 _armDetailReturnRefresh("hidden-for-player", true, "player")
             else if (returnScope === "person")
                 _armDetailReturnRefresh("hidden-for-person", false, "person")
-            _clearCastPortraitPrewarm()
         }
     }
     onSharedChanged: {
@@ -1615,22 +1523,9 @@ FocusScope {
                     property int loadToken: 0
                     onStatusChanged: {
                         if (loadToken !== backdrop._token) return
-                        if (status === Image.Ready) { backdrop.lastFull = String(source || ""); backdrop.loadingFull = ""; opacity = 0.90; gateBGReady = true }
+                        if (status === Image.Ready) { backdrop.lastFull = String(source || ""); backdrop.loadingFull = ""; opacity = bgOpacity; gateBGReady = true }
                         else if (status === Image.Error) { backdrop.loadingFull = ""; opacity = 0.0; gateBGReady = true }
                     }
-                }
-                Rectangle {
-                    anchors.fill: bgImg
-                    z: bgImg.z + 1
-                    color: "#000000"
-                    opacity: bgDarken
-                    visible: (bgImg.source && ("" + bgImg.source).length > 0) && bgDarken > 0.001
-                }
-                function computeFullUrl(){
-                    return item ? Jellyfin.itemBackdropOrPrimaryUrl(serverUrl, item, {
-                        fillWidth: Math.round(bgW), fillHeight: Math.round(bgH),
-                        quality: 80, blur: MediaCatalog.clampBlur(bgBlur), format: "jpg"
-                    }) : ""
                 }
                 function updateBackdropNow(){
                     if (!item) {
@@ -1641,7 +1536,13 @@ FocusScope {
                         gateBGReady = true
                         return
                     }
-                    var ful = computeFullUrl()
+                    var ful = MediaCatalog.backdropOrPrimaryUrl(Jellyfin, serverUrl, item, {
+                        fillWidth: Math.round(bgW),
+                        fillHeight: Math.round(bgH),
+                        quality: 80,
+                        blur: MediaCatalog.clampBlur(bgBlur),
+                        format: "jpg"
+                    })
                     if (ful === lastFull || ful === loadingFull) { _updateBGGate(); return }
                     loadingFull = ful; _token += 1; bgImg.loadToken = _token
                     gateBGReady = false
@@ -1878,7 +1779,7 @@ FocusScope {
                             }
                             Text { textFormat: Text.PlainText;
                                 id: dateText
-                                text: (hasItem && item.PremiereDate) ? SeasonUtils.fmtDateLong(item.PremiereDate) : ""
+                                text: (hasItem && item.PremiereDate) ? MediaCatalog.formatDateLongFr(item.PremiereDate) : ""
                                 visible: text.length > 0
                                 color: "#E6FFFFFF"; font.pixelSize: 20; font.bold: true
                                 anchors.verticalCenter: parent.verticalCenter
@@ -2099,7 +2000,6 @@ FocusScope {
                                 }
                             }
                             OpacityMask {
-                                id: genresMaskedLine
                                 anchors.fill: parent
                                 visible: genresLineBox.maskActive
                                 enabled: genresLineBox.maskActive
@@ -2676,8 +2576,8 @@ FocusScope {
                     }
                     Item {
                         width: parent.width
-                        height: (castReady && castPeople.length > 0 && hasItem) ? 24 : 0
-                        visible: castReady && castPeople.length > 0 && hasItem
+                        height: (castPeople.length > 0 && hasItem) ? 24 : 0
+                        visible: castPeople.length > 0 && hasItem
                         Text { textFormat: Text.PlainText;
                             text: isMusicVideo ? "Équipe du clip" : "Distribution et équipe"
                             color: "#FFFFFF"
@@ -2692,10 +2592,10 @@ FocusScope {
                         width: parent.width
                         visible: status === Loader.Ready && castPageLoader.item
                         asynchronous: true
-                        height: (status === Loader.Ready && castPageLoader.item) ? (castPageLoader.item.implicitHeight || 0) : 0
+                        height: (status === Loader.Ready && castPageLoader.item) ? (castPageLoader.item.implicitHeight || 0) : (hasItem && castPeople.length > 0 ? 351 : 0)
                         onStatusChanged: _updateExtendedSectionGates()
                         onHeightChanged: _updateExtendedSectionGates()
-                        onLoaded: { wireCastLoader(); _refreshCastPortraitPrewarm(); _updateExtendedSectionGates() }
+                        onLoaded: { wireCastLoader(); _updateExtendedSectionGates() }
                     }
                     Loader {
                         id: chaptersLoader
@@ -2703,11 +2603,19 @@ FocusScope {
                         source: active ? Qt.resolvedUrl("ChaptersCarousel.qml") : ""
                         width: parent.width; asynchronous: true
                         visible: status === Loader.Ready && item && item.hasContent === true
-                        height: visible ? (item.implicitHeight || 0) : 0
+                        height: visible ? (item.implicitHeight || 0) : (detailMoviePage.item && detailMoviePage.item.Chapters && detailMoviePage.item.Chapters.length ? 300 : 0)
+                        onStatusChanged: _updateExtendedSectionGates()
                         onLoaded: {
                             item.serverUrl = Qt.binding(function(){ return detailMoviePage.serverUrl })
                             item.accessToken = Qt.binding(function(){ return detailMoviePage.accessToken })
                             item.itemId = Qt.binding(function(){ return detailMoviePage.itemId })
+                            // M1 : item.Chapters est déjà dans la réponse de la
+                            // fiche (fetchUserItem) ; évite un second GET complet
+                            // de l'item rien que pour les chapitres.
+                            item.itemChapters = Qt.binding(function(){
+                                return (detailMoviePage.item && detailMoviePage.item.Chapters !== undefined)
+                                    ? detailMoviePage.item.Chapters : null
+                            })
                             item.sectionLeftMargin = 28
                             item.requestFocusAbove.connect(function(){
                                 if (hasCast()) {
@@ -2732,7 +2640,7 @@ FocusScope {
                         width: parent.width
                         visible: status === Loader.Ready && similarLoader.item && similarLoader.item.hasContent === true
                         asynchronous: true
-                        height: (status === Loader.Ready && similarLoader.item && similarLoader.item.hasContent === true) ? Math.max((similarLoader.item.implicitHeight || 0), 140) : 0
+                        height: (status === Loader.Ready && similarLoader.item && similarLoader.item.hasContent === true) ? Math.max((similarLoader.item.implicitHeight || 0), 140) : (hasItem && (!similarLoader.item || similarLoader.item.loading) ? 415 : 0)
                         onStatusChanged: _updateExtendedSectionGates()
                         onHeightChanged: _updateExtendedSectionGates()
                         onLoaded: { wireSimilarLoader(); _updateExtendedSectionGates() }
@@ -2782,7 +2690,7 @@ FocusScope {
         ignoreUnknownSignals: true
         onActiveFocusChanged: if (chaptersLoader.item && chaptersLoader.item.activeFocus) { currentFocus = 5; requestSaveFocusSnapshot() }
         onLastFocusedIndexChanged: requestSaveFocusSnapshot()
-        onChapterActivated: function(index, chapter){ requestPlayAt(itemId, accessToken, userId, serverUrl, itemTitle, SeasonUtils.chapterStartMs(chapter)) }
+        onChapterActivated: function(index, chapter){ requestPlayAt(itemId, accessToken, userId, serverUrl, itemTitle, MediaCatalog.chapterStartMs(chapter)) }
     }
     Connections {
         target: similarLoader.item
@@ -2790,6 +2698,7 @@ FocusScope {
         onActiveFocusChanged: if (similarLoader.item && similarLoader.item.activeFocus) { currentFocus = 4; requestSaveFocusSnapshot() }
         onLastFocusedIndexChanged: requestSaveFocusSnapshot()
         onHasContentChanged: { _updateExtendedSectionGates(); safeCallLater(_pokeRestore) }
+        onLoadingChanged: _updateExtendedSectionGates()
         onOpenItemRequested: function(obj){ openSimilarSelection(obj) }
         onItemActivated: function(obj){ openSimilarSelection(obj) }
         onCardActivated: function(obj){ openSimilarSelection(obj) }
@@ -2850,7 +2759,7 @@ FocusScope {
     }
     function openPosterOverlay(){ openOverlay("poster", { posterUrl: _currentArtUrl() }) }
     function _overviewReaderImageUrl(){
-        return item ? Jellyfin.itemBackdropOrPrimaryUrl(serverUrl, item, { fillWidth:720, fillHeight:405, quality:88, format:"jpg" }) : ""
+        return item ? MediaCatalog.backdropOrPrimaryUrl(Jellyfin, serverUrl, item, { fillWidth:720, fillHeight:405, quality:88, format:"jpg" }) : ""
     }
     function _overviewReaderRuntimeText(){
         var mins=Math.max(0,durationMinutes|0); if(!mins) return ""
