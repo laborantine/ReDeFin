@@ -107,9 +107,7 @@ function buildProgressiveUrl(serverUrl, accessToken, itemId, options) {
 // Reprise serveur progressive dédiée aux changements de piste.
 // Cette URL doit lancer un vrai job FFmpeg avec StartTimeTicks tout en
 // conservant les codecs vidéo/audio par stream-copy lorsque Jellyfin le permet.
-function buildServerSeekProgressiveUrl(serverUrl, accessToken, itemId, options) {
-    options = options || {}
-
+function _progressiveJobBaseUrl(serverUrl, accessToken, itemId, options) {
     var cont = String(options.container || "mkv").toLowerCase().replace(/[^a-z0-9]/g, "") || "mkv"
     var url = _u(serverUrl, "/Videos/" + encodeURIComponent(itemId) + "/stream." + encodeURIComponent(cont))
     url = _appendParam(url, "ApiKey", accessToken)
@@ -119,6 +117,12 @@ function buildServerSeekProgressiveUrl(serverUrl, accessToken, itemId, options) 
     url = _appendParam(url, "Container", cont)
     if (typeof options.startTimeTicks === "number" && options.startTimeTicks > 0)
         url = _appendParam(url, "StartTimeTicks", options.startTimeTicks)
+    return url
+}
+
+function buildServerSeekProgressiveUrl(serverUrl, accessToken, itemId, options) {
+    options = options || {}
+    var url = _progressiveJobBaseUrl(serverUrl, accessToken, itemId, options)
     url = _appendOpt(url, options, "videoCodec", "VideoCodec")
     if (options.audioCodec)
         url = _appendParam(url, "AudioCodec", options.audioCodec)
@@ -133,16 +137,7 @@ function buildServerSeekProgressiveUrl(serverUrl, accessToken, itemId, options) 
 }
 function buildHighQualityProgressiveTranscodeUrl(serverUrl, accessToken, itemId, options) {
     options = options || {}
-
-    var cont = String(options.container || "mkv").toLowerCase().replace(/[^a-z0-9]/g, "") || "mkv"
-    var url = _u(serverUrl, "/Videos/" + encodeURIComponent(itemId) + "/stream." + encodeURIComponent(cont))
-    url = _appendParam(url, "ApiKey", accessToken)
-    url = _appendTrackParams(url, options)
-    url = _appendOpt(url, options, "mediaSourceId", "MediaSourceId")
-    url = _appendOpt(url, options, "playSessionId", "PlaySessionId")
-    url = _appendParam(url, "Container", cont)
-    if (typeof options.startTimeTicks === "number" && options.startTimeTicks > 0)
-        url = _appendParam(url, "StartTimeTicks", options.startTimeTicks)
+    var url = _progressiveJobBaseUrl(serverUrl, accessToken, itemId, options)
 
     var map = [
         ["videoCodec", "VideoCodec"], ["audioCodec", "AudioCodec"],
@@ -431,7 +426,7 @@ function _isTx3gSelected(src, subIndex) {
 }
 var _forceQueryCleanKeys = [
     "static", "Static", "AudioStreamIndex", "SubtitleStreamIndex", "SubtitleMethod",
-    "StartTimeTicks", "PlaySessionId", "ApiKey", "Container",
+    "StartTimeTicks", "PlaySessionId", "ApiKey", "api_key", "apikey", "Container",
     "AllowAudioStreamCopy", "AllowVideoStreamCopy", "EnableAutoStreamCopy",
     "EnableDirectStream", "EnableTranscoding", "allowAudioStreamCopy",
     "allowVideoStreamCopy", "enableAutoStreamCopy", "enableDirectStream",
@@ -484,6 +479,25 @@ function _applyHlsCtxQuery(p, ctx, isHlsUrl) {
 // volontairement minimal : authentification canonique et garde-fous manquants
 // uniquement. Les décisions Jellyfin (TranscodeReasons, codecs, profil H.264,
 // dimensions, framerate, segmentation...) ne sont jamais réécrites ici.
+// Canonicalise uniquement l'authentification d'une TranscodingUrl produite
+// par PlaybackInfo, sans toucher au reste de sa query. Utile pour les chemins
+// HLS où les paramètres du StreamBuilder doivent rester byte-for-byte identiques
+// au job préparé par Jellyfin.
+function _canonicalizePlaybackAuthOnly(url, accessToken) {
+    if (!url) return ""
+    var sp = _splitUrl(url)
+    var p = sp.params || {}
+    if (!sp.base) return ""
+    delete p.api_key
+    delete p.apikey
+    delete p.ApiKey
+    _setQuery(p, "ApiKey", accessToken || "")
+    return _joinUrl(sp.base, p)
+}
+
+// La TranscodingUrl HLS issue de PlaybackInfo doit rester verbatim sur Devialet.
+// La reprise audio-only est désormais effectuée localement après ouverture du manifeste.
+
 function _preserveJellyfinTranscodingQuery(url, ctx, includeTicks) {
     if (!url) return ""
 
@@ -526,6 +540,45 @@ function _preserveJellyfinTranscodingQuery(url, ctx, includeTicks) {
         _setQuery(p, "StartTimeTicks", Math.floor(Number(ctx.startMs) * 10000))
     }
 
+    // Le choix 2.0 explicite doit aussi survivre aux URLs HLS du serveur.
+    // Conserver les décisions vidéo et la segmentation de Jellyfin, mais nettoyer
+    // d'abord les variantes de casse : ASP.NET/Jellyfin traite les noms de query
+    // sans casse et deux valeurs équivalentes peuvent être concaténées/rejetées.
+    if (ctx && ctx.audioOutputStereoDownmix === true) {
+        // Le downmix ReDeFin cible AAC-LC. Ne jamais réintroduire l'ancien
+        // fallback AC-3 lors de la préservation d'une TranscodingUrl Jellyfin.
+        var stereoCodec = _normalizeAudioCodecHint(ctx.audioCodecHint) || "aac"
+        if (stereoCodec.indexOf(",") >= 0) stereoCodec = stereoCodec.split(",")[0]
+        var stereoBitrate = Number(ctx.audioBitrate || 256000)
+        if (!isFinite(stereoBitrate) || stereoBitrate <= 0) stereoBitrate = 256000
+        if (stereoBitrate > 384000) stereoBitrate = 384000
+        stereoBitrate = Math.floor(stereoBitrate)
+        _clearQueryParams(p, [
+            "AudioCodec", "audioCodec",
+            "AudioChannels", "audioChannels",
+            "TranscodingMaxAudioChannels", "transcodingMaxAudioChannels",
+            "AudioBitRate", "AudioBitrate", "audioBitRate", "audioBitrate",
+            "AllowAudioStreamCopy", "allowAudioStreamCopy",
+            "AllowVideoStreamCopy", "allowVideoStreamCopy",
+            "EnableAutoStreamCopy", "enableAutoStreamCopy"
+        ])
+        _setQuery(p, "AudioCodec", stereoCodec)
+        _setQuery(p, "AudioChannels", 2)
+        _setQuery(p, "TranscodingMaxAudioChannels", 2)
+        _setQuery(p, "AudioBitRate", stereoBitrate)
+        _setQuery(p, "AllowAudioStreamCopy", "false")
+        _setQuery(p, "AllowVideoStreamCopy", "true")
+        _setQuery(p, "EnableAutoStreamCopy", "false")
+        // Lors d'une bascule en cours de lecture, la nouvelle session doit repartir
+        // à la même position. Ceci vaut aussi pour HLS, pas seulement forceServerSeek.
+        if (includeTicks === true && Number(ctx.startMs) > 0) {
+            delete p.startTimeTicks
+            delete p.StartTimeTicks
+            _setQuery(p, "StartTimeTicks", Math.floor(Number(ctx.startMs) * 10000))
+        }
+    }
+    delete p.static
+    delete p.Static
     var preserved=_joinUrl(sp.base,p)
 
     return preserved
@@ -538,8 +591,9 @@ function _forceQuery(url, ctx, subMethodWanted, includeTicks) {
     var sp = _splitUrl(url)
     var p = sp.params
     var isHlsUrl = (sp.base.indexOf(".m3u8") >= 0) || (sp.base.indexOf("/hls") >= 0)
-    if (ctx && ctx.preserveJellyfinTranscodingUrl === true)
+    if (ctx && ctx.preserveJellyfinTranscodingUrl === true) {
         return _preserveJellyfinTranscodingQuery(url, ctx, includeTicks)
+    }
     // Conserver le bitrate calculé par Jellyfin dans TranscodingUrl. Le Core peut
     // réécrire l'URL pour les pistes/sous-titres, mais ne doit plus remplacer ce
     // choix dynamique par un ancien palier fixe ReDeFin.
@@ -613,7 +667,12 @@ function _forceQuery(url, ctx, subMethodWanted, includeTicks) {
     var prefCont = ctx.preferredContainer || _decidePreferredContainer(ctx)
     if (!isHlsUrl && prefCont)
         p.Container = prefCont
-    if (!isHlsUrl && !_needsServerTrackSelection_ctx(ctx) && !(includeTicks && ctx.startMs > 0) && ctx.forceServerRemux !== true)
+    // static=true demande le FICHIER BRUT : il est incompatible avec tout
+    // pipeline serveur. La sélection de piste ne suffit pas à le détecter (un
+    // média sans piste audio n'en demande aucune), d'où le même jeu de
+    // drapeaux que PlaySessionId ci-dessus.
+    if (!isHlsUrl && !_needsServerTrackSelection_ctx(ctx) && !(includeTicks && ctx.startMs > 0) && ctx.forceServerRemux !== true &&
+            ctx.forcePolicyTranscode !== true && ctx.forceServerTranscode !== true && ctx.lastUsedTranscoding !== true)
         p.static = "true"
     var forced=_joinUrl(sp.base,p)
 
@@ -845,6 +904,8 @@ function _transportFetchStreams(serverUrl, accessToken, itemId, onSuccess, onErr
         var aLabels = []
         var aMap = []
         var aCodecMap = []
+        var aChannelMap = []
+        var aBitrateMap = []
         var sLabels = []
         var sMap = [-1]
         var sIsText = [false]
@@ -894,6 +955,10 @@ function _transportFetchStreams(serverUrl, accessToken, itemId, onSuccess, onErr
                 aLabels.push(lbl)
                 aMap.push(audioIdx)
                 aCodecMap.push(_exactAudioCodecHint(st.Codec) || "")
+                aChannelMap.push((typeof st.Channels === "number" && isFinite(st.Channels))
+                                 ? Math.max(0, Math.floor(st.Channels)) : 0)
+                aBitrateMap.push((typeof st.BitRate === "number" && isFinite(st.BitRate) && st.BitRate > 0)
+                                 ? Math.floor(st.BitRate) : 0)
             } else if (_isType(st, "Subtitle")) {
                 var subIdx = (typeof st.Index === "number") ? st.Index : i
                 if (firstSubtitleStreamIndex < 0)
@@ -1031,10 +1096,13 @@ function _transportFetchStreams(serverUrl, accessToken, itemId, onSuccess, onErr
 
         onSuccess && onSuccess({
             runtimeTicks: j.RunTimeTicks || 0,
+            chapters: j.Chapters !== undefined ? j.Chapters : null,
             audioLabels: aLabels,
             subtitleLabels: sLabels,
             audioMap: aMap,
             audioCodecMap: aCodecMap,
+            audioChannelMap: aChannelMap,
+            audioBitrateMap: aBitrateMap,
             subtitleMap: sMap,
             subtitleIsText: sIsText,
             defaultAudioStreamIndex: defaultAudioStreamIndex,

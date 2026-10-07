@@ -1,11 +1,10 @@
 .pragma library
 .import "MediaCatalog.js" as MediaCatalog
+.import "SeasonUtils.js" as SeasonUtils
+.import "JellyfinHttpTransport.js" as HttpTransport
 .import "SafeLog.js" as SafeLog
 .import "clientId.js" as ClientId
 function _s(v){ return (v === undefined || v === null) ? "" : (v + ""); }
-function _safeCode(err, fallback) {
-    return SafeLog.safeErrorCode(err, fallback || "network_error");
-}
 function enc(v) {
     try { return encodeURIComponent(_s(v)); } catch (e) { return _s(v); }
 }
@@ -24,313 +23,19 @@ function _posInt(v) {
     var n = _int(v);
     return n > 0 ? n : 0;
 }
-function _errCode(err, fallback){ return _safeCode(err, fallback || "network_error"); }
-function _safeHttpErrorPayload(status) {
-    status = status | 0;
-    return {
-        code: "http_" + status,
-        message: "HTTP " + status,
-        data: "",
-        status: status
-    };
-}
-var MAX_HTTP_TEXT_LEN = 262144; var MAX_TEXT_RESPONSE_LEN = 4194304; var DEFAULT_XHR_TIMEOUT_MS = 15000; var DEFAULT_NATIVE_TIMEOUT_MS = 15000;
-// Budget unique des opérations qui enchaînent plusieurs pages/fallbacks.
-// 14 s reste dans la fenêtre 12–15 s demandée et inclut toutes les sous-requêtes.
-var PAGED_OPERATION_BUDGET_MS = 14000;
-// Watchdog commun aux transports XHR et Freebox. Le bridge ne crée aucun Timer
-// QML dynamique : ShellPage réveille un unique Timer uniquement tant qu'une
-// opération est enregistrée. Sur les firmwares qui exposent abort()/cancel(),
-// le transport est réellement interrompu ; sinon la réponse tardive est ignorée
-// avant lecture/parsing de son corps.
-var _httpOperationSeq = 0; var _httpOperations = {}; var _httpOperationCount = 0; var _httpWatchdogWake = null; var _httpWatchdogSignaled = false;
-function setHttpWatchdogWake(callback) {
-    _httpWatchdogWake = (typeof callback === "function") ? callback : null;
-    _httpWatchdogSignaled = !_httpOperationCount;
-    _syncHttpWatchdogWake();
-}
-function _syncHttpWatchdogWake() {
-    var active = _httpOperationCount > 0;
-    if (active === _httpWatchdogSignaled) return;
-    _httpWatchdogSignaled = active;
-    try { if (_httpWatchdogWake) _httpWatchdogWake(active); } catch(e0) {}
-}
-function _tryAbortTransport(transport) {
-    if (!transport) return false;
-    try {
-        if (typeof transport.abort === "function") {
-            transport.abort();
-            return true;
-        }
-    } catch(e0) {}
-    try {
-        if (typeof transport.cancel === "function") {
-            transport.cancel();
-            return true;
-        }
-    } catch(e1) {}
-    return false;
-}
-function _unregisterHttpOperation(op) {
-    if (!op || !_httpOperations[op.id]) return;
-    delete _httpOperations[op.id];
-    _httpOperationCount = Math.max(0, _httpOperationCount - 1);
-    _syncHttpWatchdogWake();
-}
-function _newHttpOperation(onSuccess, onError, timeoutMs) {
-    _httpOperationSeq++;
-    if (_httpOperationSeq > 2147483000) _httpOperationSeq = 1;
-    var op = {
-        id: _httpOperationSeq,
-        active: true,
-        deadlineAt: _nowMsBridge() + Math.max(100, Number(timeoutMs || DEFAULT_NATIVE_TIMEOUT_MS)),
-        transport: null,
-        transportPromise: null,
-        setTransport: function(transport, promise) {
-            this.transport = transport || null;
-            this.transportPromise = promise || null;
-        },
-        isActive: function() { return this.active === true; },
-        succeed: function(payload) {
-            if (!this.active) return false;
-            this.active = false;
-            _unregisterHttpOperation(this);
-            if (onSuccess) onSuccess(payload);
-            return true;
-        },
-        fail: function(error) {
-            if (!this.active) return false;
-            this.active = false;
-            _unregisterHttpOperation(this);
-            if (onError) onError(error || { code: "network_error", message: "network_error" });
-            return true;
-        },
-        cancel: function(reason, notifyError) {
-            if (!this.active) return false;
-            this.active = false;
-            _tryAbortTransport(this.transport);
-            _tryAbortTransport(this.transportPromise);
-            this.transport = null;
-            this.transportPromise = null;
-            _unregisterHttpOperation(this);
-            if (notifyError !== false && onError) {
-                var code = reason === "timeout" ? "timeout" : "cancelled";
-                onError({ code: code, message: code, cancelled: code === "cancelled" });
-            }
-            return true;
-        }
-    };
-    _httpOperations[op.id] = op;
-    _httpOperationCount++;
-    _syncHttpWatchdogWake();
-    return op;
-}
-function _completedHttpHandle() {
-    return {
-        active: false,
-        isActive: function() { return false; },
-        cancel: function() { return false; }
-    };
-}
-function createPagedRequestController(budgetMs) {
-    var budget = Number(budgetMs || PAGED_OPERATION_BUDGET_MS);
-    if (!isFinite(budget) || budget <= 0) budget = PAGED_OPERATION_BUDGET_MS;
-    budget = Math.max(12000, Math.min(15000, budget));
-    return {
-        active: true,
-        done: false,
-        cancelled: false,
-        deadlineAt: _nowMsBridge() + budget,
-        transport: null,
-        isActive: function() { return this.active === true && !this.done && !this.cancelled; },
-        remainingMs: function() { return Math.max(0, Number(this.deadlineAt || 0) - _nowMsBridge()); },
-        expired: function() { return this.remainingMs() <= 0; },
-        _setTransport: function(handle) {
-            if (!this.isActive()) {
-                try { if (handle && typeof handle.cancel === "function") handle.cancel("cancelled"); } catch(e0) {}
-                return false;
-            }
-            this.transport = handle || null;
-            return true;
-        },
-        _clearTransport: function(handle) {
-            if (!handle || this.transport === handle) this.transport = null;
-        },
-        _finish: function() {
-            if (!this.isActive()) return false;
-            this.active = false;
-            this.done = true;
-            this.transport = null;
-            return true;
-        },
-        cancel: function(reason) {
-            if (!this.isActive()) return false;
-            this.active = false;
-            this.cancelled = true;
-            var handle = this.transport;
-            this.transport = null;
-            try {
-                if (handle && typeof handle.cancel === "function")
-                    handle.cancel(reason || "cancelled");
-            } catch(e0) {}
-            return true;
-        }
-    };
-}
-function sweepHttpWatchdogs(nowMs) {
-    var now = Number(nowMs || _nowMsBridge()); var expired = [];
-    for (var key in _httpOperations) {
-        if (!Object.prototype.hasOwnProperty.call(_httpOperations, key)) continue;
-        var op = _httpOperations[key];
-        if (op && op.active && Number(op.deadlineAt || 0) <= now)
-            expired.push(op);
-    }
-    for (var i = 0; i < expired.length; i++)
-        expired[i].cancel("timeout", true);
-    return _httpOperationCount;
-}
-function cancelAllHttpRequests(reason) {
-    var pending = [];
-    for (var key in _httpOperations) {
-        if (Object.prototype.hasOwnProperty.call(_httpOperations, key) && _httpOperations[key])
-            pending.push(_httpOperations[key]);
-    }
-    for (var i = 0; i < pending.length; i++)
-        pending[i].cancel(reason || "cancelled", false);
-    return pending.length;
-}
-function _safeResponseText(txt, maxLen) {
-    txt = _s(txt);
-    var limit = maxLen || MAX_HTTP_TEXT_LEN;
-    if (txt.length > limit)
-        return "";
-    return txt;
-}
-function _parseJsonBounded(txt) {
-    try {
-        var s = _s(txt);
-        if (!s || s.length > MAX_HTTP_TEXT_LEN)
-            return null;
-        return JSON.parse(s);
-    } catch(e) {
-        return null;
-    }
-}
-function _headersWantText(headers) {
-    try {
-        headers = headers || {};
-        for (var k in headers) {
-            if (!Object.prototype.hasOwnProperty.call(headers, k)) continue;
-            var kk = _s(k).toLowerCase(); var vv = _s(headers[k]).toLowerCase();
-            if ((kk === "accept" || kk === "content-type") &&
-                (vv.indexOf("text/plain") >= 0 || vv.indexOf("text/vtt") >= 0 || vv.indexOf("application/x-subrip") >= 0))
-                return true;
-        }
-    } catch(e0) {}
-    return false;
-}
-function _isSubtitleTextUrl(url) {
-    var u = _s(url).toLowerCase();
-    return (u.indexOf("/subtitles/") >= 0 ||
-            u.indexOf("/stream.vtt") >= 0 ||
-            u.indexOf("/stream.srt") >= 0 ||
-            u.indexOf("/stream.ass") >= 0 ||
-            u.indexOf("/stream.ssa") >= 0);
-}
-function _shouldReturnTextForRequest(method, url, headers) {
-    method = _s(method || "GET").toUpperCase();
-    if (method !== "GET") return false;
-    return _headersWantText(headers) || _isSubtitleTextUrl(url);
-}
-function _safeResponseHeaderValue(value, maxLen) {
-    var s = _s(value); var limit = Math.max(64, Math.min(4096, Number(maxLen || 2048)));
-    if (!s) return "";
-    // Réponse serveur non fiable : aucune CR/LF et taille bornée.
-    s = s.replace(/[\r\n\u0000]/g, "");
-    return s.length > limit ? s.substr(0, limit) : s;
-}
-function _safeResponseHeaders(headers) {
-    headers = headers || {};
-    var out = {};
-    var allow = {
-        "content-type": "Content-Type",
-        "content-length": "Content-Length",
-        "content-range": "Content-Range",
-        "accept-ranges": "Accept-Ranges",
-        "location": "Location",
-        "etag": "ETag",
-        "last-modified": "Last-Modified",
-        "cache-control": "Cache-Control"
-    };
-    try {
-        for (var k in headers) {
-            if (!Object.prototype.hasOwnProperty.call(headers, k)) continue;
-            var lower = _s(k).toLowerCase(); var canonical = allow[lower];
-            if (!canonical) continue;
-            var value = _safeResponseHeaderValue(headers[k], lower === "location" ? 2048 : 1024);
-            if (!value) continue;
-            // Une redirection peut être nécessaire au bridge, mais un token
-            // renvoyé dans sa query ne doit pas ressortir dans le payload public.
-            if (lower === "location")
-                value = stripAuthQueryFromUrl(value);
-            out[canonical] = value;
-        }
-    } catch(e0) {}
-    return out;
-}
-function _makeSafeHttpSuccessPayload(status, rawText, headersObj, jsonParseFn, returnText) {
-    var raw = _s(rawText); var maxLen = returnText ? MAX_TEXT_RESPONSE_LEN : MAX_HTTP_TEXT_LEN;
-    if (raw.length > maxLen)
-        return { tooLarge: true };
-    var json = null;
-    if (!returnText) {
-        try {
-            json = (typeof jsonParseFn === "function") ? jsonParseFn() : _parseJsonBounded(raw);
-        } catch(e0) {
-            json = _parseJsonBounded(raw);
-        }
-    }
-    return {
-        tooLarge: false,
-        payload: {
-            status: status | 0,
-            text: returnText ? _safeResponseText(raw, maxLen) : "",
-            json: json,
-            headers: _safeResponseHeaders(headersObj)
-        }
-    };
-}
-function _stripQueryAndFragment(url) {
-    var s = _s(url); var cut = s.search(/[?#]/);
-    return cut >= 0 ? s.substring(0, cut) : s;
-}
-function _isAuthQueryKey(key) {
-    var k = _s(key).toLowerCase().replace(/[^a-z0-9]/g, "");
-    return k === "apikey" || k === "accesstoken" || k === "token" ||
-           k === "xembytoken" || k === "xmediabrowsertoken" ||
-           k === "authorization" || k === "cookie" || k === "setcookie";
-}
-function stripAuthQueryFromUrl(url) {
-    var s = _s(url);
-    // Les fragments ne sont jamais utiles à l'API et peuvent eux aussi transporter
-    // accidentellement un secret copié depuis une interface web.
-    var hashPos = s.indexOf("#");
-    if (hashPos >= 0) s = s.substring(0, hashPos);
-    var qPos = s.indexOf("?");
-    if (qPos < 0) return s;
-    var base = s.substring(0, qPos); var query = s.substring(qPos + 1); var parts = query.split("&"); var out = [];
-    for (var i = 0; i < parts.length; i++) {
-        var part = parts[i];
-        if (!part) continue;
-        var rawKey = part.split("=")[0] || ""; var key = rawKey;
-        try { key = decodeURIComponent(rawKey.replace(/\+/g, "%20")); } catch(e0) {}
-        if (_isAuthQueryKey(key)) continue;
-        out.push(part);
-    }
-    return base + (out.length ? ("?" + out.join("&")) : "");
-}
+function _errCode(err, fallback){ return SafeLog.safeErrorCode(err, fallback || "network_error"); }
 var _fbx = null;
-function setFbx(fbxCtx) { _fbx = fbxCtx; }
+function setFbx(fbxCtx) {
+    _fbx = fbxCtx;
+    HttpTransport.setFbx(fbxCtx);
+}
+// Contexte natif partagé avec les opérations de découverte LAN.
+function freeboxContext() { return _fbx; }
+
+// Images utilisées par les cartes et leur fond ; aucune variante Logo/Banner inutile.
+var IMG_TYPES_NAV_STANDARD = "&EnableImageTypes=Primary,Thumb,Backdrop&ImageTypeLimit=1";
+var IMG_TYPES_NAV_NEXTUP = "&EnableImageTypes=Primary,Thumb,Backdrop&ImageTypeLimit=1";
+var IMG_TYPES_NAV_PRIMARY_ONLY = "&EnableImageTypes=Primary&ImageTypeLimit=1";
 var _apiGetCache = {}; var _apiGetInflight = {}; var _apiGetFailUntil = {}; var _apiLatestParentFailUntil = {}; var _apiGetMaxEntries = 64; var _apiCooldownMaxEntries = 96; var _apiSweepTick = 0; var _apiCacheEpoch = 1;
 function _apiHashHex(h) {
     var out = (h >>> 0).toString(16);
@@ -505,9 +210,6 @@ function evictUserItemApiCache(itemId) {
     } catch(e0) {}
     return removed;
 }
-function _nowMsBridge() {
-    try { return Date.now(); } catch(e) { return (new Date()).getTime(); }
-}
 function _laterBridge(fn) {
     try {
         if (typeof Qt !== "undefined" && Qt && Qt.callLater) {
@@ -519,7 +221,7 @@ function _laterBridge(fn) {
 }
 function putBoundedMemory(bucket, key, value, maxEntries) {
     if (!bucket || typeof bucket !== "object" || !key) return false;
-    maxEntries = Math.max(8, Math.min(128, _int(maxEntries) || 48));
+    maxEntries = Math.max(1, Math.min(128, _int(maxEntries) || 48));
     var previous = bucket.__redefinOrder; var order = [], tracked = {}, i;
     if (_isArray(previous)) {
         for (i = 0; i < previous.length; i++) {
@@ -639,6 +341,10 @@ function _apiIsUserItemDetailsUrl(url) {
     url = _s(url);
     if (url.indexOf("/Items/") < 0) return false;
     if (url.indexOf("/Items?") >= 0) return false;
+    // /Items/Latest est une collection, pas la fiche d'un item : « Latest »
+    // n'est pas un identifiant. La confondre avec une fiche lui imposerait le
+    // TTL court des fiches et fausserait l'invalidation par identifiant.
+    if (url.indexOf("/Items/Latest") >= 0) return false;
     if (url.indexOf("/Images/") >= 0) return false;
     if (url.indexOf("/PlaybackInfo") >= 0) return false;
     if (url.indexOf("/UserData") >= 0) return false;
@@ -656,8 +362,13 @@ function _apiGetFailCooldownMs(url, err) {
     url = _s(url);
     var c = _errCode(err, "");
     if (url.indexOf("/Items/Latest") < 0) return 0;
+    // 10 min pénalisait une rangée d'accueil bien après qu'une bibliothèque
+    // en panne (5xx passager, redémarrage du serveur...) soit redevenue
+    // saine ; 120 s protège toujours le serveur d'un martèlement en boucle
+    // sans faire disparaître la rangée pour le reste de la session
+    // (audit-reseau.md §2, "Les 10 min sont peut-être excessives").
     if (c === "http_500" || c === "http_502" || c === "http_503" || c === "http_504")
-        return 600000;
+        return 120000;
     if (c === "network_error" || c === "timeout")
         return 60000;
     return 0;
@@ -771,7 +482,7 @@ function _urlContainsAuthSecret(url) {
 }
 function _bodyContainsCredentialSecret(url, body) {
     if (body === undefined || body === null || _s(body) === "") return false;
-    var path = _stripQueryAndFragment(_s(url)).toLowerCase();
+    var path = HttpTransport.stripQueryAndFragment(_s(url)).toLowerCase();
     return path.indexOf("/users/authenticatebyname") >= 0 ||
            path.indexOf("/users/authenticatewithquickconnect") >= 0;
 }
@@ -839,7 +550,7 @@ function normalizeServerUrl(input, preferHttps) {
         return "";
     if (/\s/.test(authority))
         return "";
-    u = _stripQueryAndFragment(u);
+    u = HttpTransport.stripQueryAndFragment(u);
     u = u.replace(/\/web\/index\.html.*$/i, "");
     u = u.replace(/\/web\/?$/i, "");
     while (u.length > 1 && u.charAt(u.length - 1) === "/")
@@ -895,29 +606,15 @@ function _safeTrim(v) {
     v = _s(v);
     return (v.trim ? v.trim() : v);
 }
-function _parseRawHeaders(raw) {
-    var out = {};
-    raw = _s(raw);
-    if (!raw) return out;
-    var lines = raw.split(/\r?\n/);
-    for (var i = 0; i < lines.length; i++) {
-        var L = _s(lines[i]); var p = L.indexOf(":");
-        if (p > 0) {
-            var key = _safeTrim(L.slice(0, p)); var val = _safeTrim(L.slice(p + 1));
-            if (key) out[key] = val;
-        }
-    }
-    return out;
-}
 function _resolveRedirect(currentUrl, location) {
     var loc = _s(location).trim();
     if (!loc) return "";
-    if (/^https?:\/\//i.test(loc)) return stripAuthQueryFromUrl(loc);
+    if (/^https?:\/\//i.test(loc)) return HttpTransport.stripAuthQueryFromUrl(loc);
     var cur = _s(currentUrl); var m = cur.match(/^(https?:\/\/[^/]+)([^?#]*)/i); var origin = m ? m[1] : "";
     if (!origin) return "";
-    if (loc.charAt(0) === '/') return stripAuthQueryFromUrl(origin + loc);
+    if (loc.charAt(0) === '/') return HttpTransport.stripAuthQueryFromUrl(origin + loc);
     var path = m[2] || "/"; var slash = path.lastIndexOf("/"); var dir = slash >= 0 ? path.substring(0, slash + 1) : "/";
-    return stripAuthQueryFromUrl(origin + dir + loc);
+    return HttpTransport.stripAuthQueryFromUrl(origin + dir + loc);
 }
 function _redirectHost(url) {
     var s = _s(url); var m = s.match(/^[a-zA-Z][a-zA-Z0-9+\-.]*:\/\/([^\/\?#]+)/);
@@ -992,162 +689,6 @@ function _safeAltUrlForAuth(url, altHost) {
         return _swapHost(url, altAuthority);
     return "";
 }
-function _xhrSend(method, url, headers, body, onSuccess, onError, timeoutMs) { if (_rejectInsecureTransport(url, headers, body, onError)) { return _completedHttpHandle(); }
-    var xhr = null; var op = null;
-    try {
-        if (typeof XMLHttpRequest === "undefined")
-            throw new Error("XMLHttpRequest indisponible");
-        xhr = new XMLHttpRequest();
-        var effectiveTimeout = Math.max(100, Number(timeoutMs || DEFAULT_XHR_TIMEOUT_MS));
-        op = _newHttpOperation(onSuccess, onError, effectiveTimeout);
-        op.setTransport(xhr, null);
-        xhr.open(_s(method || "GET").toUpperCase(), url, true);
-        try { xhr.timeout = effectiveTimeout; } catch(eTimeout) {}
-        if (headers && typeof headers === "object") {
-            for (var k in headers) {
-                if (Object.prototype.hasOwnProperty.call(headers, k)) {
-                    try { xhr.setRequestHeader(k, headers[k]); } catch (e) {}
-                }
-            }
-        }
-        xhr.onreadystatechange = function () {
-            if (!op || !op.isActive()) return;
-            try {
-                var DONE = (typeof XMLHttpRequest !== "undefined" && XMLHttpRequest && XMLHttpRequest.DONE != null)
-                    ? XMLHttpRequest.DONE
-                    : 4;
-                if (xhr.readyState !== DONE) return;
-                var status = xhr.status || 0; var rawTxt = (typeof xhr.responseText === "string") ? xhr.responseText : ""; var raw = (xhr.getAllResponseHeaders && xhr.getAllResponseHeaders()) || ""; var headersObj = _parseRawHeaders(raw);
-                if ((status | 0) === 0 && !rawTxt) {
-                    op.fail({ code: "network_error", message: "network_error" });
-                    return;
-                }
-                var safe = _makeSafeHttpSuccessPayload(
-                    status,
-                    rawTxt,
-                    headersObj,
-                    function() { return _parseJsonBounded(rawTxt); },
-                    _shouldReturnTextForRequest(method, url, headers)
-                );
-                if (safe.tooLarge) {
-                    op.fail({ code: "too_large", message: "too_large" });
-                    return;
-                }
-                op.succeed(safe.payload);
-            } catch (e2) {
-                op.fail({ code: "network_error", message: "network_error" });
-            }
-        };
-        xhr.onerror = function () {
-            if (op) op.fail({ code: "network_error", message: "network_error" });
-        };
-        xhr.ontimeout = function () {
-            if (op) op.fail({ code: "timeout", message: "timeout" });
-        };
-        var payload = (body == null)
-            ? null
-            : (typeof body === "string" ? body : JSON.stringify(body));
-        xhr.send(payload);
-        return op;
-    } catch (e3) {
-        if (op) {
-            op.fail({ code: "network_error", message: "network_error" });
-            return op;
-        }
-        if (onError) onError({ code: "network_error", message: "network_error" });
-        return _completedHttpHandle();
-    }
-}
-function _doHttp(method, url, headers, body, onSuccess, onError, timeoutMs) { if (_rejectInsecureTransport(url, headers, body, onError)) { return _completedHttpHandle(); }
-    var effectiveTimeout = Math.max(100, Number(timeoutMs || DEFAULT_NATIVE_TIMEOUT_MS)); var tx = null; var txOp = null;
-    try {
-        if (_fbx && _fbx.web && _fbx.web.http && _fbx.web.http.transaction && _fbx.web.http.transaction.factory) {
-            tx = _fbx.web.http.transaction.factory(_s(method || "GET").toUpperCase(), url);
-            if (headers) {
-                for (var hk in headers) {
-                    if (Object.prototype.hasOwnProperty.call(headers, hk)) {
-                        try { tx.setHeader(hk, headers[hk]); } catch (eh) {}
-                    }
-                }
-            }
-            if (body !== undefined && body !== null) {
-                try { tx.setBody(typeof body === "string" ? body : JSON.stringify(body)); } catch (eb) {}
-            }
-            var txPromise = tx.send();
-            if (!txPromise || typeof txPromise.then !== "function")
-                throw new Error("invalid_fbx_transaction_promise");
-            txOp = _newHttpOperation(onSuccess, onError, effectiveTimeout);
-            txOp.setTransport(tx, txPromise);
-            txPromise.then(function (resp) {
-                if (!txOp.isActive()) return;
-                var status = resp.status || 0; var rawTxt = resp.responseText || resp.body || "";
-                var safe = _makeSafeHttpSuccessPayload(
-                    status,
-                    rawTxt,
-                    resp.headers || {},
-                    function() { return resp.jsonParse ? resp.jsonParse() : _parseJsonBounded(rawTxt); },
-                    _shouldReturnTextForRequest(method, url, headers)
-                );
-                if (safe.tooLarge) {
-                    txOp.fail({ code: "too_large", message: "too_large" });
-                    return;
-                }
-                txOp.succeed(safe.payload);
-            }, function (err) {
-                txOp.fail({
-                    code: "network_error",
-                    message: "network_error"
-                });
-            });
-            return txOp;
-        }
-    } catch (e0) {
-        if (txOp) txOp.cancel("transport_error", false);
-        _tryAbortTransport(tx);
-    }
-    var req = null; var reqOp = null;
-    try {
-        if (typeof Http !== "undefined" && Http && Http.Transaction && Http.Transaction.factory) {
-            req = Http.Transaction.factory({
-                method: _s(method || "GET").toUpperCase(),
-                url: url,
-                headers: headers || {},
-                body: (typeof body === "string") ? body : (body ? JSON.stringify(body) : undefined)
-            });
-            var reqPromise = req.send();
-            if (!reqPromise || typeof reqPromise.then !== "function")
-                throw new Error("invalid_http_transaction_promise");
-            reqOp = _newHttpOperation(onSuccess, onError, effectiveTimeout);
-            reqOp.setTransport(req, reqPromise);
-            reqPromise.then(function (res) {
-                if (!reqOp.isActive()) return;
-                var status2 = res.status || 0; var rawTxt2 = res.responseText || res.body || "";
-                var safe2 = _makeSafeHttpSuccessPayload(
-                    status2,
-                    rawTxt2,
-                    res.headers || {},
-                    function() { return res.jsonParse ? res.jsonParse() : _parseJsonBounded(rawTxt2); },
-                    _shouldReturnTextForRequest(method, url, headers)
-                );
-                if (safe2.tooLarge) {
-                    reqOp.fail({ code: "too_large", message: "too_large" });
-                    return;
-                }
-                reqOp.succeed(safe2.payload);
-            }, function (err2) {
-                reqOp.fail({
-                    code: "network_error",
-                    message: "network_error"
-                });
-            });
-            return reqOp;
-        }
-    } catch (e2) {
-        if (reqOp) reqOp.cancel("transport_error", false);
-        _tryAbortTransport(req);
-    }
-    return _xhrSend(method, url, headers, body, onSuccess, onError, effectiveTimeout);
-}
 function _computeAltHost() {
     try { return _s(ClientId.ipv4AltHost()); }
     catch(e0) { return ""; }
@@ -1161,60 +702,6 @@ function _probeHeaderValue(headers, name) {
     }
     return "";
 }
-function _probeMetadataXhr(url, headers, onSuccess, onError, timeoutMs) {
-    if (_rejectInsecureTransport(url, headers, null, onError)) return null;
-    var xhr = null; var finished = false;
-    function fail(code) {
-        if (finished) return;
-        finished = true;
-        try { if (xhr && xhr.abort) xhr.abort(); } catch(e0) {}
-        if (onError) onError({ code: code || "network_error", message: code || "network_error" });
-    }
-    function finish(status, contentType) {
-        if (finished) return;
-        finished = true;
-        var ok = status >= 200 && status < 300;
-        try { if (xhr && xhr.abort) xhr.abort(); } catch(e0) {}
-        if (ok) {
-            if (onSuccess) onSuccess({ status: status | 0, contentType: _s(contentType).toLowerCase() });
-        } else if (onError) {
-            onError(_safeHttpErrorPayload(status | 0));
-        }
-    }
-    try {
-        xhr = new XMLHttpRequest();
-        xhr.open("GET", stripAuthQueryFromUrl(url), true);
-        try { xhr.timeout = Math.max(1000, Math.min(15000, Number(timeoutMs || 8000))); } catch(eTimeout) {}
-        for (var k in headers) {
-            if (!Object.prototype.hasOwnProperty.call(headers, k)) continue;
-            try { xhr.setRequestHeader(k, headers[k]); } catch(eHeader) {}
-        }
-        // Le corps n'est pas utile : on coupe dès réception des headers.
-        try { xhr.setRequestHeader("Range", "bytes=0-0"); } catch(eRange) {}
-        xhr.onreadystatechange = function() {
-            if (finished || xhr.readyState < 2) return;
-            var status = xhr.status || 0; var finalUrl = "";
-            try { finalUrl = _s(xhr.responseURL || ""); } catch(eFinal) {}
-            if (finalUrl && !_sameHostRedirect(url, finalUrl)) {
-                fail("redirect_refused");
-                return;
-            }
-            var contentType = "";
-            try { contentType = xhr.getResponseHeader("Content-Type") || ""; } catch(eCt) {}
-            if (status > 0 && (contentType || xhr.readyState === 4))
-                finish(status, contentType);
-            else if (xhr.readyState === 4)
-                fail("network_error");
-        };
-        xhr.onerror = function() { fail("network_error"); };
-        xhr.ontimeout = function() { fail("timeout"); };
-        xhr.send(null);
-        return xhr;
-    } catch(e) {
-        fail("network_error");
-        return null;
-    }
-}
 /*
  * Probe léger pour les images/logos/avatars.
  * - existence: passe par sendRequest et ses redirections same-origin/limites.
@@ -1224,8 +711,11 @@ function probeResource(url, accessToken, options, onSuccess, onError) {
     options = options || {};
     var token = _s(accessToken); var headers = token ? headersWithToken(token) : {};
     if (options.accept) headers["Accept"] = _s(options.accept);
-    if (options.metadataOnly === true)
-        return _probeMetadataXhr(url, headers, onSuccess, onError, options.timeoutMs);
+    if (options.metadataOnly === true) {
+        if (_rejectInsecureTransport(url, headers, null, onError)) return null;
+        return HttpTransport.probeMetadata(url, headers, onSuccess, onError,
+                                           options.timeoutMs, _sameHostRedirect);
+    }
     sendRequest("get", url, headers, null,
         function(res) {
             if (onSuccess) {
@@ -1313,11 +803,11 @@ function _newRequestController() {
 }
 function sendRequest(method, url, headers, body, onSuccess, onError, _state) { // L'authentification ReDeFin passe exclusivement par les headers. Toute copie
     // de token dans la query est supprimée avant cache, redirection ou transport.
-    url = stripAuthQueryFromUrl(url);
-    if (_rejectInsecureTransport(url, headers, body, onError)) { return _completedHttpHandle(); }
+    url = HttpTransport.stripAuthQueryFromUrl(url);
+    if (_rejectInsecureTransport(url, headers, body, onError)) { return HttpTransport.completedHttpHandle(); }
     var __methodUpper = _s(method || "GET").toUpperCase(); var __url = _s(url);
     if (!_state && _isMemoizableApiGet(__methodUpper, __url, body)) {
-        var __cacheEpoch = _apiCacheEpoch; var __authScope = _apiAuthContextFingerprint(__url, headers); var __key = _apiGetCacheKey(__methodUpper, __url, headers); var __now = _nowMsBridge();
+        var __cacheEpoch = _apiCacheEpoch; var __authScope = _apiAuthContextFingerprint(__url, headers); var __key = _apiGetCacheKey(__methodUpper, __url, headers); var __now = HttpTransport.nowMs();
         _apiPurgeExpiredMaps(__now, false);
         var __latestParentId = _apiLatestParentIdFromUrl(__url); var __userItemId = _apiUserItemIdFromUrl(__url); var __latestParentKey = __latestParentId
                 ? (__authScope + "#p" + _apiCacheFingerprint(__latestParentId))
@@ -1327,25 +817,26 @@ function sendRequest(method, url, headers, body, onSuccess, onError, _state) { /
             _laterBridge(function() {
                 if (onError) onError({ code: "http_500", message: "latest_parent_cooldown", parentId: __latestParentId });
             });
-            return _completedHttpHandle();
+            return HttpTransport.completedHttpHandle();
         }
         var __failUntil = _apiGetFailUntil[__key] || 0;
         if (__failUntil > __now) {
             _laterBridge(function() {
                 if (onError) onError({ code: "http_500", message: "cooldown", parentId: __latestParentId });
             });
-            return _completedHttpHandle();
+            return HttpTransport.completedHttpHandle();
         }
         var __ttl = _apiGetTtlMs(__url); var __cached = _apiGetCache[__key];
         if (__cached && __ttl > 0 && (__now - (__cached.ts || 0)) < __ttl) {
             _laterBridge(function() {
                 if (onSuccess) onSuccess(__cached.res);
             });
-            return _completedHttpHandle();
+            return HttpTransport.completedHttpHandle();
         }
         var __existingEntry = _apiGetInflight[__key];
-        if (__existingEntry && !_isArray(__existingEntry))
+        if (__existingEntry && !_isArray(__existingEntry)) {
             return _apiAddInflightWaiter(__key, __existingEntry, onSuccess, onError);
+        }
         // Chaque consommateur, y compris le premier, reçoit son propre handle.
         // Annuler une page ne laisse donc plus une entrée coalescée orpheline.
         var __entry = { waiters: [], leader: null, done: false, epoch: __cacheEpoch };
@@ -1359,7 +850,7 @@ function sendRequest(method, url, headers, body, onSuccess, onError, _state) { /
                 if (__latestParentKey)
                     delete _apiLatestParentFailUntil[__latestParentKey];
                 if (__ttl > 0) {
-                    var storedAt = _nowMsBridge();
+                    var storedAt = HttpTransport.nowMs();
                     _apiGetCache[__key] = { ts: storedAt, expiresAt: storedAt + __ttl,
                                             latestParentId: __latestParentId || "",
                                             userItemId: __userItemId || "", res: res };
@@ -1371,7 +862,7 @@ function sendRequest(method, url, headers, body, onSuccess, onError, _state) { /
                 if (__cacheEpoch !== _apiCacheEpoch) return;
                 var cd = _apiGetFailCooldownMs(__url, err);
                 if (cd > 0) {
-                    var until = _nowMsBridge() + cd;
+                    var until = HttpTransport.nowMs() + cd;
                     _apiGetFailUntil[__key] = until;
                     if (__latestParentKey)
                         _apiLatestParentFailUntil[__latestParentKey] = until;
@@ -1386,16 +877,16 @@ function sendRequest(method, url, headers, body, onSuccess, onError, _state) { /
     if (!_state.controller) _state.controller = _newRequestController();
     var controller = _state.controller;
     if (!controller.isActive()) return controller;
-    var requestTimeoutMs = DEFAULT_NATIVE_TIMEOUT_MS;
+    var requestTimeoutMs = HttpTransport.DEFAULT_NATIVE_TIMEOUT_MS;
     if (_state.deadlineAt) {
-        requestTimeoutMs = Number(_state.deadlineAt) - _nowMsBridge();
+        requestTimeoutMs = Number(_state.deadlineAt) - HttpTransport.nowMs();
         if (!isFinite(requestTimeoutMs) || requestTimeoutMs <= 0) {
             controller._finish();
             if (onError) onError({ code: "timeout", message: "paged_budget_exhausted", status: 0 });
             return controller;
         }
     }
-    var transportHandle = _doHttp(method, url, headers, body, function (res) {
+    var transportHandle = HttpTransport.send(method, url, headers, body, function (res) {
         if (!controller.isActive()) return;
         var s = (res.status | 0); if ((s === 301 || s === 302 || s === 307 || s === 308) && _state.redirects < 4) {
             var loc = (res.headers && (res.headers.Location || res.headers.location)) || "";
@@ -1404,7 +895,7 @@ function sendRequest(method, url, headers, body, onSuccess, onError, _state) { /
                 var resolved = _resolveRedirect(url, loc);
                 if (!_sameHostRedirect(url, resolved)) {
                     controller._finish();
-                    if (onError) onError(_safeHttpErrorPayload(s));
+                    if (onError) onError(HttpTransport.httpErrorPayload(s));
                     return;
                 }
                 _state.redirects++;
@@ -1417,7 +908,7 @@ function sendRequest(method, url, headers, body, onSuccess, onError, _state) { /
             if (onSuccess) onSuccess(res);
             return;
         }
-        if (onError) onError(_safeHttpErrorPayload(s));
+        if (onError) onError(HttpTransport.httpErrorPayload(s));
     }, function (err) {
         if (controller.cancelled) {
             controller._finish();
@@ -1455,7 +946,7 @@ function fetchBrandingConfiguration(serverUrl, onSuccess, onError) {
     var base = normalizeServerUrl(serverUrl, false);
     if (!base) {
         if (onError) onError({ code: "invalid_url", message: "invalid_url", status: 0 });
-        return _completedHttpHandle();
+        return HttpTransport.completedHttpHandle();
     }
     return sendRequest("get", _u(base, "/Branding/Configuration"),
         { "Accept": "application/json" }, null,
@@ -1476,9 +967,9 @@ function probePublicServer(serverUrl, timeoutMs, onSuccess, onError) {
     var base = normalizeServerUrl(serverUrl, false);
     if (!base) {
         if (onError) onError({ code: "invalid_url", message: "invalid_url", status: 0 });
-        return _completedHttpHandle();
+        return HttpTransport.completedHttpHandle();
     }
-    var startedAt = _nowMsBridge();
+    var startedAt = HttpTransport.nowMs();
     var timeout = Math.max(250, Number(timeoutMs || 1500));
     var state = {
         redirects: 0,
@@ -1495,253 +986,11 @@ function probePublicServer(serverUrl, timeoutMs, onSuccess, onError) {
                 return;
             }
             try { trustLanHost(base); } catch(e0) {}
-            if (onSuccess) onSuccess(info, Math.max(0, _nowMsBridge() - startedAt));
+            if (onSuccess) onSuccess(info, Math.max(0, HttpTransport.nowMs() - startedAt));
         },
         function(err) {
             if (onError) onError(err || { code: "network_error", message: "network_error", status: 0 });
         }, state);
-}
-function _discoveryCleanHost(raw) {
-    var h = _s(raw).trim();
-    if (!h) return "";
-    h = h.replace(/\\/g, "/");
-    var scheme = h.indexOf("://");
-    if (scheme >= 0) h = h.substring(scheme + 3);
-    var cut = h.search(/[\/?#]/);
-    if (cut >= 0) h = h.substring(0, cut);
-    if (!h || h.indexOf("@") >= 0) return "";
-    if (h.charAt(0) === "[") {
-        var rb = h.indexOf("]");
-        return rb > 1 ? h.substring(0, rb + 1) : "";
-    }
-    var firstColon = h.indexOf(":"), lastColon = h.lastIndexOf(":");
-    if (firstColon > 0 && firstColon === lastColon && /^\d+$/.test(h.substring(firstColon + 1)))
-        h = h.substring(0, firstColon);
-    else if (firstColon >= 0 && firstColon !== lastColon)
-        h = "[" + h.replace(/^\[|\]$/g, "") + "]";
-    return h;
-}
-function _discoveryIpv4(raw) {
-    var s = _s(raw).trim(), m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(s);
-    if (!m) return "";
-    for (var i = 1; i <= 4; i++)
-        if ((Number(m[i]) | 0) < 0 || (Number(m[i]) | 0) > 255) return "";
-    return s;
-}
-function _discoveryPushHost(out, seen, raw, maxHosts) {
-    if (out.length >= maxHosts) return false;
-    var h = _discoveryCleanHost(raw), key = h.toLowerCase();
-    if (!h || seen[key]) return false;
-    seen[key] = true; out.push(h); return true;
-}
-function _discoveryLanHosts(fbxCtx, maxHosts) {
-    var ranked = [], byKey = {};
-    function rankHost(raw, score) {
-        var h = _discoveryCleanHost(raw), key = h.toLowerCase();
-        if (!h) return;
-        if (byKey[key]) {
-            if (score > byKey[key].score) byKey[key].score = score;
-            return;
-        }
-        var rec = { host: h, score: score || 0 };
-        byKey[key] = rec; ranked.push(rec);
-    }
-    try {
-        if (fbxCtx && fbxCtx.lan && typeof fbxCtx.lan.hosts === "function") {
-            var arr = fbxCtx.lan.hosts() || [];
-            for (var i = 0; i < arr.length; i++) {
-                var it = arr[i] || {};
-                var hostScore = (it.active === true ? 420 : 0) +
-                                (it.reachable === true ? 360 : 0);
-                var l3 = it.l3connectivities || it.l3Connectivities || [];
-                if (_isArray(l3)) {
-                    for (var j = 0; j < l3.length; j++) {
-                        var c = l3[j] || {}, addr = _discoveryIpv4(c.addr || c.address || "");
-                        if (!addr) continue;
-                        var score = hostScore +
-                                    (c.active === true ? 700 : 0) +
-                                    (c.reachable === true ? 620 : 0);
-                        var last = Number(c.last_activity || c.lastActivity || c.last_time_reachable || 0);
-                        if (isFinite(last) && last > 0) score += Math.min(80, Math.floor(last / 100000000));
-                        rankHost(addr, score);
-                    }
-                }
-                rankHost(it.ip || it.address || it.host || it.hostname || it.name || "", hostScore + 40);
-            }
-        }
-    } catch(e0) {}
-    ranked.sort(function(a, b) { return b.score - a.score; });
-    var out = [];
-    for (var k = 0; k < ranked.length && out.length < maxHosts; k++)
-        out.push(ranked[k].host);
-    return out;
-}
-function _discoveryFallbackHosts(maxHosts, hints) {
-    var out = [], seen = {}, prefixes = [], prefixSeen = {};
-    function addPrefix(ip) {
-        ip = _discoveryIpv4(ip);
-        if (!ip) return;
-        var p = ip.split(".").slice(0, 3).join(".") + ".";
-        if (!prefixSeen[p]) { prefixSeen[p] = true; prefixes.push(p); }
-    }
-    hints = hints || [];
-    for (var i = 0; i < hints.length; i++) addPrefix(_discoveryCleanHost(hints[i]));
-    if (!prefixes.length) {
-        prefixes.push("192.168.1."); prefixes.push("192.168.0."); prefixes.push("10.0.0.");
-    }
-    // /24 : .0 = réseau, .255 = broadcast. ReDeFin réserve .1 à la
-    // passerelle et balaie donc les 253 candidats .2 -> .254 dans l'ordre.
-    for (var p = 0; p < prefixes.length && out.length < maxHosts; p++) {
-        for (var n = 2; n <= 254 && out.length < maxHosts; n++)
-            _discoveryPushHost(out, seen, prefixes[p] + n, maxHosts);
-    }
-    return out;
-}
-function _discoveryBaseParts(base) {
-    var m = /^(https?):\/\/(\[[^\]]+\]|[^\/:?#]+)(?::(\d+))?/i.exec(_s(base));
-    if (!m) return { host:"", port:0 };
-    return {
-        host: _s(m[2]).replace(/^\[|\]$/g, ""),
-        port: m[3] ? (Number(m[3]) | 0) : (_s(m[1]).toLowerCase() === "https" ? 443 : 80)
-    };
-}
-// Découverte Jellyfin optimisée Révolution :
-// 1) IP réellement vues par la Freebox, actives/reachable en tête ;
-// 2) phase HTTP 8096 complète avant tout HTTPS 8920 ;
-// 3) HTTPS seulement pour les hôtes où HTTP n'a pas déjà trouvé Jellyfin ;
-// 4) fallback /24 exhaustif de .2 à .254 en HTTP puis en HTTPS pour les hôtes
-//    qui n'ont pas déjà fourni un Jellyfin ; aucun arrêt au premier serveur ;
-// 5) aucun hôte n'est reprobé entre phase initiale et fallback.
-// Aucun Timer/probe supplémentaire n'est créé : maxParallel reste le garde-fou CPU/RAM.
-function discoverServers(options, onUpdate, onDone) {
-    options = options || {};
-    var maxHosts = Math.max(1, Math.min(256, Number(options.maxHosts || 96) | 0));
-    var maxParallel = Math.max(1, Math.min(4, Number(options.maxParallel || 2) | 0));
-    var httpTimeout = Math.max(250, Number(options.httpTimeoutMs || 700));
-    var httpsTimeout = Math.max(350, Number(options.httpsTimeoutMs || 1600));
-    var fallbackEnabled = options.fallbackSubnetScan !== false;
-    var fallbackMaxHosts = Math.max(1, Math.min(maxHosts, Number(options.fallbackMaxHosts || maxHosts) | 0));
-    var stopOnFirst = options.stopOnFirstFound === true;
-    var fbxCtx = options.fbx || _fbx || null;
-    var localNames = options.localNames && options.localNames.length
-            ? options.localNames : ["jellyfin.local", "jellyfin", "media", "nas", "synology"];
-    var results = [], seenServers = {}, seenServerIds = {}, foundHosts = {}, activeHandles = [], probedHttpHosts = {}, probedHttpsHosts = {};
-    var controller = {
-        cancelled: false, done: false,
-        cancel: function(reason) {
-            if (this.cancelled || this.done) return false;
-            this.cancelled = true;
-            var list = activeHandles.slice(0); activeHandles = [];
-            for (var i = 0; i < list.length; i++) {
-                try { if (list[i] && typeof list[i].cancel === "function") list[i].cancel(reason || "cancelled"); } catch(e0) {}
-            }
-            return true;
-        },
-        isActive: function() { return !this.cancelled && !this.done; }
-    };
-    function snapshot() { return results.slice(0); }
-    function dropHandle(handle) {
-        if (!handle) return;
-        for (var i = activeHandles.length - 1; i >= 0; i--)
-            if (activeHandles[i] === handle) { activeHandles.splice(i, 1); break; }
-    }
-    function finish() {
-        if (controller.cancelled || controller.done) return;
-        controller.done = true; activeHandles = [];
-        if (onDone) onDone(snapshot());
-    }
-    function addServer(info, base, ping) {
-        if (controller.cancelled || !isValidPublicSystemInfo(info)) return false;
-        var normalized = _normalizeBase(base), key = normalized.toLowerCase();
-        var id = _s(info.Id || info.ServerId || "").toLowerCase();
-        if (!key || seenServers[key] || (id && seenServerIds[id])) return false;
-        seenServers[key] = true; if (id) seenServerIds[id] = true;
-        var parts = _discoveryBaseParts(normalized), hostKey = _discoveryCleanHost(parts.host).toLowerCase();
-        if (hostKey) foundHosts[hostKey] = true;
-        var rec = {
-            name: info.ServerName || info.ProductName || "Jellyfin",
-            url: normalized,
-            pingMs: Math.max(0, Number(ping || 0) | 0),
-            version: _s(info.Version || ""),
-            id: _s(info.Id || info.ServerId || ""),
-            host: parts.host,
-            port: parts.port
-        };
-        results.push(rec);
-        try { trustLanHost(normalized); } catch(e0) {}
-        if (onUpdate) onUpdate(snapshot(), rec);
-        return true;
-    }
-    function runPhase(hosts, scheme, port, timeout, skipFound, done) {
-        hosts = hosts || [];
-        if (!hosts.length || controller.cancelled || (stopOnFirst && results.length)) { done(); return; }
-        var cursor = 0, inFlight = 0, ended = false, phaseSeen = {};
-        function complete() { if (!ended) { ended = true; done(); } }
-        function pump() {
-            if (ended || controller.cancelled) return;
-            if ((stopOnFirst && results.length) || (cursor >= hosts.length && inFlight === 0)) {
-                if (inFlight === 0) complete();
-                return;
-            }
-            while (inFlight < maxParallel && cursor < hosts.length && !(stopOnFirst && results.length)) {
-                var host = _discoveryCleanHost(hosts[cursor++]), hk = host.toLowerCase();
-                var probedMap = (scheme === "https") ? probedHttpsHosts : probedHttpHosts;
-                if (!host || phaseSeen[hk] || probedMap[hk] || (skipFound && foundHosts[hk])) continue;
-                phaseSeen[hk] = true;
-                probedMap[hk] = true;
-                inFlight++;
-                (function(hostValue) {
-                    var base = scheme + "://" + hostValue + ":" + port, handle = null;
-                    function doneOne() { inFlight = Math.max(0, inFlight - 1); pump(); }
-                    handle = probePublicServer(base, timeout,
-                        function(info, ping) {
-                            dropHandle(handle);
-                            if (!controller.cancelled) addServer(info, base, ping);
-                            doneOne();
-                        },
-                        function() {
-                            dropHandle(handle);
-                            if (!controller.cancelled) doneOne();
-                        });
-                    activeHandles.push(handle);
-                })(host);
-            }
-            if (cursor >= hosts.length && inFlight === 0) complete();
-        }
-        pump();
-    }
-    var lan = _discoveryLanHosts(fbxCtx, maxHosts), initial = [], seen = {};
-    for (var i = 0; i < lan.length && initial.length < maxHosts; i++)
-        _discoveryPushHost(initial, seen, lan[i], maxHosts);
-    for (var j = 0; j < localNames.length && initial.length < maxHosts; j++)
-        _discoveryPushHost(initial, seen, localNames[j], maxHosts);
-
-    runPhase(initial, "http", 8096, httpTimeout, false, function() {
-        if (controller.cancelled) return;
-        if (stopOnFirst && results.length) { finish(); return; }
-        runPhase(initial, "https", 8920, httpsTimeout, true, function() {
-            if (controller.cancelled) return;
-            if (stopOnFirst && results.length) { finish(); return; }
-            if (!fallbackEnabled) { finish(); return; }
-
-            // Le fallback HTTP du sous-réseau est volontairement exécuté même si
-            // un serveur a déjà été trouvé dans la table LAN Freebox. Cela évite
-            // qu'un second Jellyfin absent/inactif dans fbx.lan.hosts() soit ignoré.
-            // Les maps probedHttpHosts/probedHttpsHosts empêchent de retester les
-            // mêmes hôtes lorsqu'ils réapparaissent dans cette phase.
-            var fallback = _discoveryFallbackHosts(fallbackMaxHosts, lan);
-            runPhase(fallback, "http", 8096, httpTimeout, false, function() {
-                if (controller.cancelled) return;
-                if (stopOnFirst && results.length) { finish(); return; }
-
-                // Deuxième passe exhaustive : un second serveur peut n'écouter
-                // qu'en HTTPS 8920. Les hôtes déjà identifiés comme Jellyfin en
-                // HTTP sont sautés via foundHosts afin d'éviter un probe inutile.
-                runPhase(fallback, "https", 8920, httpsTimeout, true, finish);
-            });
-        });
-    });
-    return controller;
 }
 function authenticate(serverUrl, username, password, onSuccess, onError) {
     serverUrl = _normalizeBase(serverUrl);
@@ -1777,11 +1026,16 @@ function authenticate(serverUrl, username, password, onSuccess, onError) {
 function validateToken(serverUrl, accessToken, onSuccess, onError) {
     var url = _u(serverUrl, "/Users/Me");
     sendRequest("get", url, headersWithToken(accessToken), null, function (res) {
-        var j = jsonNormalize(res.json) || {};
-        if (j && (j.Id || j.Name))
+        var j = jsonNormalize(res && res.json);
+        // Un corps illisible (page d'erreur d'un reverse-proxy, réponse
+        // tronquée) ne prouve rien sur le token : le signaler comme
+        // invalid_token purgerait la session pour une panne de transport.
+        if (!j)
+            onError && onError("parse_error");
+        else if (j.Id || j.Name)
             onSuccess && onSuccess(j);
         else
-            onError && onError("invalid_token");
+            onError && onError("bad_response");
     }, function (err) {
         onError && onError(_errCode(err, "network_error"));
     });
@@ -1819,6 +1073,46 @@ function logout(serverUrl, accessToken, onSuccess, onError) {
         onError && onError(_errCode(err, "network_error"));
     });
 }
+// Déclare les capacités de contrôle distant de la session Jellyfin courante.
+// Le serveur ne rend la session réellement pilotable que lorsqu'un
+// SessionController actif (WebSocket) existe aussi.
+function postRemoteControlCapabilities(serverUrl, accessToken, enabled, onSuccess, onError) {
+    serverUrl = _normalizeBase(serverUrl);
+    accessToken = _s(accessToken);
+    if (!serverUrl || !accessToken) {
+        if (onError) onError("missing_params");
+        return;
+    }
+    if (isWanHttpUrl(serverUrl)) {
+        if (onError) onError("insecure_transport");
+        return;
+    }
+
+    var allow = enabled === true;
+    var body = {
+        PlayableMediaTypes: allow ? ["Video"] : [],
+        SupportedCommands: allow ? [
+            "Play",
+            "PlayState",
+            "PlayNext",
+            "SetAudioStreamIndex",
+            "SetSubtitleStreamIndex",
+            "DisplayMessage"
+        ] : [],
+        SupportsMediaControl: allow,
+        SupportsPersistentIdentifier: true
+    };
+
+    var url = _u(serverUrl, "/Sessions/Capabilities/Full");
+    return sendRequest("post", url, headersWithToken(accessToken), body,
+        function() {
+            if (onSuccess) onSuccess(true);
+        },
+        function(err) {
+            if (onError) onError(_errCode(err, "network_error"));
+        });
+}
+
 function quickConnectInitiate(serverUrl, onSuccess, onError) {
     var url = _u(serverUrl, "/QuickConnect/Initiate");
     return sendRequest("post", url, headersWithToken(""), {}, function (res) {
@@ -1834,7 +1128,7 @@ function quickConnectInitiate(serverUrl, onSuccess, onError) {
 function quickConnectTryAuthenticate(serverUrl, secret, onSuccess, onError) {
     if (!secret) {
         _laterBridge(function() { if (onError) onError("missing_secret"); });
-        return _completedHttpHandle();
+        return HttpTransport.completedHttpHandle();
     }
 
     // Une invocation = une vraie tentative réseau.
@@ -1950,7 +1244,8 @@ function fetchHomeResumeItems(serverUrl, accessToken, userId, limit, onSuccess, 
         "&EnableTotalRecordCount=false" +
         // ParentId permet à Home de rouvrir une vidéo personnelle dans
         // son dossier PersonalMediaPage sans requête supplémentaire au clic.
-        "&Fields=" + homeMediaFields("BackdropImageTags,Type,CollectionType,ParentId")
+        "&Fields=" + homeMediaFields("BackdropImageTags,Type,CollectionType,ParentId") +
+        IMG_TYPES_NAV_STANDARD
     );
 
     sendRequest("get", url, headersWithToken(accessToken), null, function(res) {
@@ -1964,13 +1259,14 @@ function fetchHomeResumeItems(serverUrl, accessToken, userId, limit, onSuccess, 
 function fetchHomeNextUpItems(serverUrl, accessToken, userId, limit, onSuccess, onError, seriesId, enableResumable) {
     if (!serverUrl || !accessToken || !userId) {
         onError && onError("missing_params");
-        return _completedHttpHandle();
+        return HttpTransport.completedHttpHandle();
     }
     var safeLimit = MediaCatalog.homeSectionLimit(limit);
     var path = "/Shows/NextUp?UserId=" + enc(userId) +
         "&Limit=" + enc(safeLimit) +
         "&EnableImages=true&EnableUserData=true&EnableTotalRecordCount=false" +
-        "&Fields=" + homeMediaFields("ParentId,ParentThumbItemId,ParentThumbImageTag,ParentBackdropItemId,ParentBackdropImageTags,SeriesPrimaryImageTag");
+        "&Fields=" + homeMediaFields("ParentId,ParentThumbItemId,ParentThumbImageTag,ParentBackdropItemId,ParentBackdropImageTags,SeriesPrimaryImageTag") +
+        IMG_TYPES_NAV_NEXTUP;
     if (seriesId) path += "&SeriesId=" + enc(seriesId);
     if (enableResumable === true) path += "&EnableResumable=true";
     var url = _u(serverUrl, path);
@@ -1983,7 +1279,7 @@ function fetchHomeNextUpItems(serverUrl, accessToken, userId, limit, onSuccess, 
 function fetchSeasonItemsFromIndex(serverUrl, accessToken, userId, seasonId, startIndex, limit, onSuccess, onError) {
     if (!serverUrl || !accessToken || !userId || !seasonId) {
         onError && onError("missing_params");
-        return _completedHttpHandle();
+        return HttpTransport.completedHttpHandle();
     }
 
     var safeStart = Math.max(0, Number(startIndex) || 0);
@@ -2008,12 +1304,13 @@ function fetchSeasonItemsFromIndex(serverUrl, accessToken, userId, seasonId, sta
 function fetchSimilarItems(serverUrl, accessToken, userId, itemId, limit, onSuccess, onError) {
     if (!serverUrl || !accessToken || !userId || !itemId) {
         onError && onError("missing_params");
-        return _completedHttpHandle();
+        return HttpTransport.completedHttpHandle();
     }
     var url = _u(serverUrl,
         "/Items/" + enc(itemId) + "/Similar?UserId=" + enc(userId) +
         "&Limit=" + enc(limit || 20) +
-        "&Fields=PrimaryImageAspectRatio,CustomRating,ItemCounts,RecursiveItemCount"
+        "&Fields=PrimaryImageAspectRatio,CustomRating,ItemCounts,RecursiveItemCount" +
+        IMG_TYPES_NAV_PRIMARY_ONLY
     );
     return sendRequest("get", url, headersWithToken(accessToken), null, function(res) {
         var j = jsonNormalize(res && res.json);
@@ -2027,7 +1324,7 @@ function fetchHomeLatestItemsForParent(serverUrl, accessToken, userId, parentId,
                                            onSuccess, onError, groupItems) {
     if (!serverUrl || !accessToken || !userId || !parentId) {
         onError && onError("missing_params");
-        return _completedHttpHandle();
+        return HttpTransport.completedHttpHandle();
     }
 
     var safeLimit = MediaCatalog.homeSectionLimit(limit);
@@ -2046,7 +1343,8 @@ function fetchHomeLatestItemsForParent(serverUrl, accessToken, userId, parentId,
         "&EnableUserData=true" +
         "&Fields=" + homeMediaFields(
             "BackdropImageTags,SeriesPrimaryImageTag,ParentId,Type,CollectionType"
-        )
+        ) +
+        IMG_TYPES_NAV_STANDARD
     );
 
     return sendRequest("get", url, headersWithToken(accessToken), null, function(res) {
@@ -2078,7 +1376,7 @@ function fetchFolderItemCount(serverUrl, accessToken, userId, folderId, includeI
                               recursive, onSuccess, onError) {
     if (!serverUrl || !accessToken || !userId || !folderId) {
         onError && onError("missing_params");
-        return _completedHttpHandle();
+        return HttpTransport.completedHttpHandle();
     }
     var url = _u(serverUrl,
         "/Items?UserId=" + enc(userId) +
@@ -2170,7 +1468,7 @@ function _folderPagePayload(startIndex, limit, rawLen, filteredItems, sortMode,
     };
 }
 function _fetchFolderItemsByTypePage(serverUrl, accessToken, userId, folderId, typeName, recursive, startIndex, limit, sortMode, onSuccess, onError, _controller, _finishController) {
-    var controller = _controller || createPagedRequestController(); var finishController = (_finishController !== false);
+    var controller = _controller || HttpTransport.createPagedRequestController(); var finishController = (_finishController !== false);
     if (!serverUrl || !accessToken || !userId || !folderId || !typeName) {
         if (finishController) controller._finish();
         onError && onError("missing_params");
@@ -2187,7 +1485,8 @@ function _fetchFolderItemsByTypePage(serverUrl, accessToken, userId, folderId, t
                  "&EnableTotalRecordCount=false&SortBy=" + enc(_folderServerSortBy(sortMode)) +
                  "&SortOrder=" + enc(_folderServerSortOrder(sortMode)) +
                  "&StartIndex=" + localStart + "&Limit=" + pageLimit +
-                 "&Fields=" + _folderListFields(typeName);
+                 "&Fields=" + _folderListFields(typeName) +
+                 IMG_TYPES_NAV_STANDARD;
         return _u(serverUrl, query);
     }
     function finish(more, partialCode) {
@@ -2239,7 +1538,7 @@ function _fetchFolderItemsByTypePage(serverUrl, accessToken, userId, folderId, t
     return controller;
 }
 function _fetchFolderItemsByTypePageWithDirectFallback(serverUrl, accessToken, userId, folderId, typeName, recursive, startIndex, limit, sortMode, onSuccess, onError) {
-    var controller = createPagedRequestController();
+    var controller = HttpTransport.createPagedRequestController();
     function complete(page) {
         if (!controller.isActive()) return;
         controller._finish();
@@ -2416,11 +1715,19 @@ function fetchItemAncestors(serverUrl, accessToken, userId, itemId, onSuccess, o
     });
 }
 function fetchItemChapters(serverUrl, accessToken, itemId, onSuccess, onError) {
-    return fetchItem(serverUrl, accessToken, itemId, function(item) {
-        var arr = item && (item.Chapters || item.chapters) ? (item.Chapters || item.chapters) : [];
-        if (!arr || typeof arr.length !== "number") arr = [];
-        if (onSuccess) onSuccess(arr);
-    }, onError);
+    if (!serverUrl || !accessToken || !itemId) {
+        if (onError) onError("missing_params");
+        return HttpTransport.completedHttpHandle();
+    }
+    var url = _u(serverUrl, "/Items?Ids=" + enc(itemId) +
+        "&Fields=Chapters&Limit=1&EnableImages=false&EnableUserData=false&EnableTotalRecordCount=false");
+    return sendRequest("get", url, headersWithToken(accessToken), null, function(res) {
+        var items = homeItemsFromResponse(res);
+        var item = items.length ? items[0] : null;
+        if (!item || !item.Id) { if (onError) onError("bad_response"); return; }
+        var arr = item.Chapters || [];
+        if (onSuccess) onSuccess(_isArray(arr) ? arr : []);
+    }, function(err) { if (onError) onError(_errCode(err, "network_error")); });
 }
 function fetchUserItem(serverUrl, accessToken, userId, itemId, onSuccess, onError) {
     if (!serverUrl || !accessToken || !userId || !itemId) {
@@ -2455,6 +1762,36 @@ function fetchUserItem(serverUrl, accessToken, userId, itemId, onSuccess, onErro
         else failDirect("bad_response");
     }, failDirect));
     return controller;
+}
+// F6/M2 (audit-grilles.md) : au repos du focus, une grille de bibliothèque
+// n'affiche dans son en-tête que des étiquettes techniques calculées par
+// MediaCatalog.movieStreamInfo() (MediaStreams : résolution, codecs, canaux,
+// langues) et MediaCatalog.movieBrowserTagChips() (Genres en plus des
+// étiquettes précédentes). fetchItem()/fetchUserItem() demandent la fiche
+// COMPLÈTE (/Items/{id} : People, MediaSources, Chapters, Overview...) pour
+// n'en lire que ces deux champs. Cette fonction ne demande que ce qui est
+// réellement lu, sur le même endpoint de liste que fetchMovieFolderItemsPage
+// (poids et forme de réponse déjà éprouvés), en gardant EnableImages=false
+// (aucune image n'est affichée par ce détail) et EnableTotalRecordCount=false
+// (un seul item attendu, le compteur est inutile).
+function fetchUserItemTechSummary(serverUrl, accessToken, userId, itemId, onSuccess, onError) {
+    if (!serverUrl || !accessToken || !userId || !itemId) {
+        onError && onError("missing_params");
+        return null;
+    }
+    var url = _u(serverUrl, "/Items?UserId=" + enc(userId) +
+        "&Ids=" + enc(itemId) +
+        "&Fields=MediaStreams,Genres" +
+        "&EnableImages=false&EnableTotalRecordCount=false");
+    return sendRequest("get", url, headersWithToken(accessToken), null, function(res) {
+        var j = jsonNormalize(res && res.json);
+        var items = j && j.Items ? j.Items : [];
+        var item = items && items.length ? items[0] : null;
+        if (item && item.Id) onSuccess && onSuccess(item);
+        else onError && onError("bad_response");
+    }, function(err) {
+        onError && onError(_errCode(err, "network_error"));
+    });
 }
 function fetchUserItemWithPublicFallback(serverUrl, accessToken, userId, itemId, onSuccess, onError) {
     itemId = _s(itemId);
@@ -2523,8 +1860,22 @@ function fetchRandomEpisode(serverUrl, accessToken, userId, parentId, preferUnpl
 // SortName correspond au champ « Titre de tri ». Le nom visible reste uniquement
 // un fallback si le serveur ne renvoie pas SortName. Les égalités sont départagées
 // par Name puis Id afin de conserver un ordre déterministe pendant la pagination.
+// Mémo d'UNE entrée (comme putBoundedMemory le fait ailleurs à plus grande
+// échelle) : une grille rappelle itemImageUrl() 2 à 3 fois par carte avec le
+// même serverUrl, et _normalizeBase() est sinon refait à l'identique à
+// chaque appel. Le serveur ne change pas en cours de session, donc une seule
+// entrée suffit ; un serveur différent invalide simplement le mémo au
+// prochain appel (comparaison stricte de l'entrée brute, avant normalisation).
+var _itemImageUrlBaseCacheIn = undefined;
+var _itemImageUrlBaseCacheOut = "";
+function _itemImageUrlNormalizedBase(serverUrl) {
+    if (serverUrl === _itemImageUrlBaseCacheIn) return _itemImageUrlBaseCacheOut;
+    _itemImageUrlBaseCacheOut = _normalizeBase(serverUrl);
+    _itemImageUrlBaseCacheIn = serverUrl;
+    return _itemImageUrlBaseCacheOut;
+}
 function itemImageUrl(serverUrl, itemId, type, tag, opts) {
-    var u = _normalizeBase(serverUrl);
+    var u = _itemImageUrlNormalizedBase(serverUrl);
     if (!u || !itemId || !type) return "";
     opts = opts || {};
     var q = [];
@@ -2537,8 +1888,24 @@ function itemImageUrl(serverUrl, itemId, type, tag, opts) {
     if (opts.blur) q.push("blur=" + Math.max(1, Math.min(50, _posInt(opts.blur))));
     if (opts.format) q.push("format=" + enc(opts.format));
     var qs = q.length ? ("?" + q.join("&")) : "";
-    return stripAuthQueryFromUrl(u + "/Items/" + enc(itemId) + "/Images/" + enc(type) + qs);
+    return HttpTransport.stripAuthQueryFromUrl(u + "/Items/" + enc(itemId) + "/Images/" + enc(type) + qs);
 }
+function chapterImageUrl(serverUrl, itemId, index, tag, opts) {
+    var u = _normalizeBase(serverUrl);
+    var idx = Math.max(0, _int(index));
+    if (!u || !itemId) return "";
+    opts = opts || {};
+    var q = [];
+    if (tag) q.push("tag=" + enc(tag));
+    if (opts.maxHeight) q.push("maxHeight=" + _posInt(opts.maxHeight));
+    if (opts.maxWidth) q.push("maxWidth=" + _posInt(opts.maxWidth));
+    if (opts.quality != null) q.push("quality=" + _posInt(opts.quality));
+    if (opts.format) q.push("format=" + enc(opts.format));
+    var qs = q.length ? ("?" + q.join("&")) : "";
+    return HttpTransport.stripAuthQueryFromUrl(u + "/Items/" + enc(itemId)
+           + "/Images/Chapter/" + idx + qs);
+}
+
 function itemBackdropOrPrimaryUrl(serverUrl, item, opts) {
     if (!item || !item.Id) return "";
     var backdrops = item.BackdropImageTags || [];
@@ -2555,7 +1922,7 @@ function fetchPersonItemsPage(serverUrl, accessToken, userId, personId, includeT
     var pid = _s(personId);
     if (!base || !accessToken || !uid || !pid) {
         if (onError) onError({ code: "missing_params", message: "missing_params", status: 0 });
-        return _completedHttpHandle();
+        return HttpTransport.completedHttpHandle();
     }
     var start = Math.max(0, _int(startIndex));
     var pageLimit = Math.max(1, _int(limit));
@@ -2623,14 +1990,14 @@ function fetchSeasons(serverUrl, accessToken, userId, seriesId, onSuccess, onErr
     var url1 = _u(serverUrl,
         "/Shows/" + enc(seriesId) +
         "/Seasons?UserId=" + enc(userId) +
-        "&EnableImages=true&EnableUserData=true" +
+        "&EnableImages=true&EnableUserData=true" + IMG_TYPES_NAV_PRIMARY_ONLY +
         "&Fields=" + _modernItemFields("PrimaryImageAspectRatio,Overview,ChildCount")
     );
     sendRequest("get", url1, headersWithToken(accessToken), null, function (res) {
         var j = jsonNormalize(res.json);
         var items = (j && j.Items) ? j.Items : (_isArray(j) ? j : []);
         if (items && items.length) {
-            MediaCatalog.sortSeasonsInPlace(items);
+            SeasonUtils.sortSeasonsInPlace(items);
             onSuccess && onSuccess(items);
             return;
         }
@@ -2638,13 +2005,13 @@ function fetchSeasons(serverUrl, accessToken, userId, seriesId, onSuccess, onErr
             "/Items?UserId=" + enc(userId) +
             "&ParentId=" + enc(seriesId) +
             "&IncludeItemTypes=Season&Recursive=false&SortBy=SortName" +
-            "&EnableTotalRecordCount=false&EnableImages=true&EnableUserData=true" +
+            "&EnableTotalRecordCount=false&EnableImages=true&EnableUserData=true" + IMG_TYPES_NAV_PRIMARY_ONLY +
             "&Fields=" + _modernItemFields("PrimaryImageAspectRatio,Overview,ChildCount")
         );
         sendRequest("get", url2, headersWithToken(accessToken), null, function (res2) {
             var jj = jsonNormalize(res2.json);
             var it = (jj && jj.Items) ? jj.Items : (_isArray(jj) ? jj : []);
-            MediaCatalog.sortSeasonsInPlace(it);
+            SeasonUtils.sortSeasonsInPlace(it);
             onSuccess && onSuccess(it || []);
         }, function (e2) {
             onError && onError(_errCode(e2, "network_error"));
@@ -2654,7 +2021,7 @@ function fetchSeasons(serverUrl, accessToken, userId, seriesId, onSuccess, onErr
     });
 }
 function fetchEpisodes(serverUrl, accessToken, userId, seasonId, onSuccess, onError) {
-    if (!serverUrl || !accessToken || !userId || !seasonId) { onError && onError("missing_params"); return _completedHttpHandle(); }
+    if (!serverUrl || !accessToken || !userId || !seasonId) { onError && onError("missing_params"); return HttpTransport.completedHttpHandle(); }
     var fields = _modernItemFields("PrimaryImageAspectRatio");
     var baseUrl = _u(serverUrl,
         "/Items?UserId=" + enc(userId) + "&ParentId=" + enc(seasonId) +
@@ -2664,14 +2031,14 @@ function fetchEpisodes(serverUrl, accessToken, userId, seasonId, onSuccess, onEr
     );
     return _fetchPagedItems(baseUrl, accessToken, 50, 1000, function (items, meta) {
         items = items || [];
-        MediaCatalog.sortEpisodesInPlace(items);
+        SeasonUtils.sortEpisodesInPlace(items);
         onSuccess && onSuccess(items || [], meta || { partial: false });
     }, function (e) { onError && onError(_errCode(e, "network_error")); });
 }
 function fetchUnknownSeasonEpisodesItems(serverUrl, accessToken, userId, seriesId, onSuccess, onError) {
     if (!serverUrl || !accessToken || !userId || !seriesId) {
         onError && onError("missing_params");
-        return _completedHttpHandle();
+        return HttpTransport.completedHttpHandle();
     }
     var fields = _modernItemFields("PrimaryImageAspectRatio");
     var baseUrl = _u(serverUrl,
@@ -2686,9 +2053,9 @@ function fetchUnknownSeasonEpisodesItems(serverUrl, accessToken, userId, seriesI
         items = items || [];
         var filtered = [];
         for (var i = 0; i < items.length; i++) {
-            if (MediaCatalog.isUnknownSeasonEpisode(items[i])) filtered.push(items[i]);
+            if (SeasonUtils.isUnknownSeasonEpisode(items[i])) filtered.push(items[i]);
         }
-        MediaCatalog.sortUnknownSeasonEpisodesInPlace(filtered);
+        SeasonUtils.sortUnknownSeasonEpisodesInPlace(filtered);
         if (meta && meta.partial && filtered.length === 0) {
             onError && onError({ code:"budget_exhausted", message:"paged_budget_exhausted" });
             return;
@@ -2706,7 +2073,7 @@ function _itemsArrayFromResponse(json) {
     return [];
 }
 function _fetchPagedItems(baseUrl, accessToken, pageSize, maxItems, onSuccess, onError, _controller, _finishController) {
-    var controller = _controller || createPagedRequestController();
+    var controller = _controller || HttpTransport.createPagedRequestController();
     var finishController = (_finishController !== false);
     baseUrl = _s(baseUrl);
     var limit = Math.max(20, pageSize | 0);
@@ -2771,6 +2138,17 @@ function _fetchPagedItems(baseUrl, accessToken, pageSize, maxItems, onSuccess, o
     next();
     return controller;
 }
+// Les quatre routes séries gardent leurs champs et limites propres, mais
+// livrent toutes les épisodes triés avec la même forme de callback.
+function _fetchSortedSeriesEpisodes(baseUrl, accessToken, pageSize,
+                                    onSuccess, onError, controller, finishController) {
+    return _fetchPagedItems(baseUrl, accessToken, pageSize, 3000, function (arr, meta) {
+        SeasonUtils.sortEpisodesInPlace(arr);
+        if (onSuccess) onSuccess(arr || [], meta);
+    }, function (err) {
+        if (onError) onError(_errCode(err, "network_error"));
+    }, controller, finishController);
+}
 function _fetchSeriesEpisodesItemsViaUsers(serverUrl, accessToken, userId, seriesId, onSuccess, onError, _controller, _finishController) {
     var baseUrl = _u(serverUrl,
         "/Items?UserId=" + enc(userId) +
@@ -2783,12 +2161,8 @@ function _fetchSeriesEpisodesItemsViaUsers(serverUrl, accessToken, userId, serie
         "&SortOrder=Ascending" +
         "&Fields=" + _seriesPlayableEpisodeFields()
     );
-    return _fetchPagedItems(baseUrl, accessToken, 300, 3000, function (arr, meta) {
-        MediaCatalog.sortEpisodesInPlace(arr);
-        onSuccess && onSuccess(arr || [], meta);
-    }, function (e) {
-        onError && onError(_errCode(e, "network_error"));
-    }, _controller, _finishController);
+    return _fetchSortedSeriesEpisodes(baseUrl, accessToken, 300,
+                                      onSuccess, onError, _controller, _finishController);
 }
 function _fetchSeriesEpisodesItemsViaShows(serverUrl, accessToken, userId, seriesId, onSuccess, onError, _controller, _finishController) {
     var baseUrl = _u(serverUrl,
@@ -2799,22 +2173,18 @@ function _fetchSeriesEpisodesItemsViaShows(serverUrl, accessToken, userId, serie
         "&SortBy=IndexNumber" +
         "&Fields=" + _seriesPlayableEpisodeFields()
     );
-    return _fetchPagedItems(baseUrl, accessToken, 300, 3000, function (arr, meta) {
-        MediaCatalog.sortEpisodesInPlace(arr);
-        onSuccess && onSuccess(arr || [], meta);
-    }, function (e) {
-        onError && onError(_errCode(e, "network_error"));
-    }, _controller, _finishController);
+    return _fetchSortedSeriesEpisodes(baseUrl, accessToken, 300,
+                                      onSuccess, onError, _controller, _finishController);
 }
 function _fetchSeriesItemsWithShowsFallback(serverUrl, accessToken, userId, seriesId,
                                                 fetchViaShows, fetchViaUsers,
                                                 onSuccess, onError) {
     if (!serverUrl || !accessToken || !userId || !seriesId) {
         onError && onError("missing_params");
-        return _completedHttpHandle();
+        return HttpTransport.completedHttpHandle();
     }
 
-    var controller = createPagedRequestController();
+    var controller = HttpTransport.createPagedRequestController();
     function complete(items, meta) {
         if (!controller.isActive()) return;
         controller._finish();
@@ -2866,12 +2236,8 @@ function _fetchSeriesLightEpisodeItemsViaShows(serverUrl, accessToken, userId, s
         "&SortBy=ParentIndexNumber,IndexNumber" +
         "&SortOrder=Ascending"
     );
-    return _fetchPagedItems(baseUrl, accessToken, 100, 3000, function (arr, meta) {
-        MediaCatalog.sortEpisodesInPlace(arr);
-        onSuccess && onSuccess(arr || [], meta);
-    }, function (e) {
-        onError && onError(_errCode(e, "network_error"));
-    }, _controller, _finishController);
+    return _fetchSortedSeriesEpisodes(baseUrl, accessToken, 100,
+                                      onSuccess, onError, _controller, _finishController);
 }
 function _fetchSeriesLightEpisodeItemsViaUsers(serverUrl, accessToken, userId, seriesId, onSuccess, onError, _controller, _finishController) {
     var baseUrl = _u(serverUrl,
@@ -2884,12 +2250,8 @@ function _fetchSeriesLightEpisodeItemsViaUsers(serverUrl, accessToken, userId, s
         "&SortBy=ParentIndexNumber,IndexNumber" +
         "&SortOrder=Ascending"
     );
-    return _fetchPagedItems(baseUrl, accessToken, 100, 3000, function (arr, meta) {
-        MediaCatalog.sortEpisodesInPlace(arr);
-        onSuccess && onSuccess(arr || [], meta);
-    }, function (e) {
-        onError && onError(_errCode(e, "network_error"));
-    }, _controller, _finishController);
+    return _fetchSortedSeriesEpisodes(baseUrl, accessToken, 100,
+                                      onSuccess, onError, _controller, _finishController);
 }
 function _fetchSeriesLightEpisodeItems(serverUrl, accessToken, userId, seriesId, onSuccess, onError) {
     return _fetchSeriesItemsWithShowsFallback(
@@ -2903,7 +2265,7 @@ function fetchSeriesPlayableEpisodeIds(serverUrl, accessToken, userId, seriesId,
         // Le endpoint est déjà limité à la série. Ce filtre est volontairement
         // tolérant quand Path/MediaSources ne sont pas demandés, mais exclut les
         // épisodes virtuels/manquants/placeholder grâce aux champs BaseItemDto.
-        var ids = MediaCatalog.episodeIdListFromItems(items);
+        var ids = SeasonUtils.episodeIdListFromItems(items);
         if (meta && meta.partial) {
             onError && onError({ code: "budget_exhausted", message: "paged_budget_exhausted",
                                  partial: true, partialCount: ids.length });
@@ -2915,27 +2277,48 @@ function fetchSeriesPlayableEpisodeIds(serverUrl, accessToken, userId, seriesId,
     });
 }
 function fetchSeriesAverageEpisodeRuntimeTicks(serverUrl, accessToken, userId, seriesId, fallbackTicks, onSuccess, onError) {
-    var fb = MediaCatalog.seriesRuntimeTicksFallback(fallbackTicks);
+    var fb = SeasonUtils.seriesRuntimeTicksFallback(fallbackTicks);
+    // F4 (audit-fiches.md) : la série connaît déjà sa durée moyenne d'épisode
+    // via RunTimeTicks la plupart du temps. Paginer TOUS ses épisodes
+    // pendant l'ouverture de la fiche rien que pour retomber sur cette même
+    // valeur coûtait un aller-retour réseau et un JSON.parse potentiellement
+    // gros sur le thread GUI du Révolution, pour rien : ce cas répond
+    // maintenant sans requête.
+    if (fb > 0) { onSuccess && onSuccess(fb); return HttpTransport.completedHttpHandle(); }
     if (!serverUrl || !accessToken || !userId || !seriesId) {
-        if (fb > 0) { onSuccess && onSuccess(fb); return _completedHttpHandle(); }
         onError && onError("missing_params");
-        return _completedHttpHandle();
+        return HttpTransport.completedHttpHandle();
     }
-    return _fetchSeriesLightEpisodeItems(serverUrl, accessToken, userId, seriesId, function (items) {
+    // Pas de RunTimeTicks connu : un seul appel borné (Limit=20) suffit à
+    // estimer une moyenne raisonnable, au lieu de paginer toute la série par
+    // pages de 100 (jusqu'à 3000 épisodes) via _fetchSeriesLightEpisodeItems,
+    // qui reste utilisé tel quel par la construction de playlist (elle a
+    // besoin de la liste complète, pas d'une estimation).
+    var url = _u(serverUrl,
+        "/Shows/" + enc(seriesId) +
+        "/Episodes?UserId=" + enc(userId) +
+        "&IsMissing=false" +
+        "&IsVirtualUnaired=false" +
+        "&EnableImages=false&EnableUserData=false" +
+        "&EnableTotalRecordCount=false" +
+        "&SortBy=ParentIndexNumber,IndexNumber" +
+        "&SortOrder=Ascending" +
+        "&Limit=20"
+    );
+    return sendRequest("get", url, headersWithToken(accessToken), null, function (res) {
+        var items = _itemsArrayFromResponse(res && res.json);
         var eps = [];
         for (var i = 0; items && i < items.length; i++) {
-            var ep = items[i];
-            if (MediaCatalog.episodeIsPlayableForPlaylist(ep)) eps.push(ep);
+            if (SeasonUtils.episodeIsPlayableForPlaylist(items[i])) eps.push(items[i]);
         }
-        onSuccess && onSuccess(MediaCatalog.averageEpisodeRuntimeTicks(eps, fb));
+        onSuccess && onSuccess(SeasonUtils.averageEpisodeRuntimeTicks(eps, fb));
     }, function (err) {
-        if (fb > 0) { onSuccess && onSuccess(fb); return; }
-        onError && onError(err || "network_error");
+        onError && onError(_errCode(err, "network_error"));
     });
 }
 function buildRandomPlayableSeriesPlaylist(serverUrl, accessToken, userId, seriesId, onSuccess, onError) {
     return fetchSeriesPlayableEpisodeIds(serverUrl, accessToken, userId, seriesId, function (ids) {
-        var a = MediaCatalog.shuffledCopy(ids);
+        var a = SeasonUtils.shuffledCopy(ids);
         if (typeof onSuccess === "function") onSuccess(a || []);
     }, function(err){
         if (typeof onError === "function") onError(err);
@@ -2943,7 +2326,10 @@ function buildRandomPlayableSeriesPlaylist(serverUrl, accessToken, userId, serie
 }
 
 function _bool(v) { return !!v; }
+var _libraryWindowRevision = 0;
+function libraryWindowRevision() { return _libraryWindowRevision; }
 function setPlayedState(serverUrl, accessToken, userId, itemId, played, onSuccess, onError) {
+    _libraryWindowRevision++;
     if (!serverUrl || !userId || !itemId) { onError && onError("missing_params"); return; }
     var url = _u(serverUrl,
         "/UserPlayedItems/" + enc(itemId) + "?UserId=" + enc(userId));
@@ -2982,6 +2368,7 @@ function sessionsPlayingStopped(serverUrl, accessToken, payload, onSuccess, onEr
     return _postPlayingEvent(serverUrl, accessToken, "/Sessions/Playing/Stopped", payload, onSuccess, onError);
 }
 function updateUserPlaybackPosition(serverUrl, accessToken, userId, itemId, ticks, onSuccess, onError) {
+    _libraryWindowRevision++;
     var url = _u(serverUrl,
         "/UserItems/" + enc(itemId) + "/UserData?UserId=" + enc(userId));
     var safeTicks = Math.max(0, Math.floor(+ticks || 0));

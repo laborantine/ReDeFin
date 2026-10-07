@@ -1,6 +1,8 @@
 .pragma library
 .import "JellyfinPlaybackCoreUrl.js" as CoreUrl
 .import "clientId.js" as ClientId
+.import "AudioOutputPolicy.js" as AudioOutput
+.import "ForcedSubtitlePolicy.js" as ForcedSubs
 // ReDeFin playback policy: VFF priority, dormant subtitle safety, VO + French full auto-remux, TrueHD 5.1 audio-only transcoding and global high-quality DVDSub transcoding.
 // Text subtitles: local QML overlay is reserved for pure DirectPlay. Server-side modes use server-managed Embed by default; burn-in remains an explicit fallback.
 // Any internal DVDSub/VobSub forces a progressive H.264 transcode only in Smart mode; global Original and manual DirectPlay bypass this soft safety rule.
@@ -48,6 +50,9 @@ function _policy() {
 }
 function _normalizePlaybackRuleMode(value) {
     return _s(value).toLowerCase().trim() === "directplay" ? "directplay" : "smart"
+}
+function normalizePlaybackRuleMode(value) {
+    return _normalizePlaybackRuleMode(value)
 }
 function _smartPlaybackRulesEnabled(ctx) {
     return _normalizePlaybackRuleMode(ctx && ctx.playbackRuleMode) !== "directplay"
@@ -138,6 +143,20 @@ function _policyRequiresHardVideoTranscode(ctx, src) {
     // connue ici. Les policies materiel peuvent declarer une liste plus large.
     return _isAv1Source(src)
 }
+function _policyRequiresAudioOnlyTranscode(ctx, src, audioIndex) {
+    // Incompatibilite AUDIO SEULE declaree par la policy materielle : la video
+    // reste copiee et seul le son est reencode. Les choix explicites de
+    // l'utilisateur (DirectPlay manuel, mode global Original) restent
+    // souverains, comme pour les autres regles de precaution.
+    if (!ctx || !src) return false
+    if (ctx.manualDirectPlayOverride === true) return false
+    if (_normalizePlaybackRuleMode(ctx.playbackRuleMode) === "directplay") return false
+    var p = _policy()
+    if (p && typeof p.requiresAudioOnlyTranscode === "function") {
+        try { return !!p.requiresAudioOnlyTranscode(ctx, src, audioIndex) } catch(e) {}
+    }
+    return false
+}
 function _policyTranscodeVideoCodecHint(ctx, src) {
     if (ctx && ctx.forceVideoTranscodeCodec) return _s(ctx.forceVideoTranscodeCodec).toLowerCase().trim()
     var p = _policy()
@@ -197,9 +216,15 @@ function _policyTranscodeAudioCodecHint(ctx, src, audioIndex, useHls) {
         else
             wanted = _selectedAudioCodec(src, audioIndex) || "ac3,eac3,aac,mp3"
     }
+    // Sortie audio stéréo : le mixage serveur impose la cible AAC-LC 2.0
+    // via AudioCodec=aac. Cette cible gagne aussi lorsque la policy matérielle
+    // demanderait normalement AC-3 pour un codec source non sûr (DTS/TrueHD).
+    var stereoPlan = _audioOutputPlan(ctx, src, audioIndex)
+    if (stereoPlan.downmix === true) return stereoPlan.codec
     return _safeFullTranscodeAudioCodecHint(wanted, src, audioIndex)
 }
 function _policyTranscodeAllowAudioCopy(ctx, src, audioIndex, useHls) {
+    if (_shouldStereoDownmixAudio(ctx, src, audioIndex)) return false
     if (_fullTranscodeAudioNeedsAc3(src, audioIndex)) return false
     if (ctx && ctx.forcePolicyTranscodeAllowAudioCopy === true) return true
     if (ctx && ctx.forcePolicyTranscodeAllowAudioCopy === false) return false
@@ -209,6 +234,120 @@ function _policyTranscodeAllowAudioCopy(ctx, src, audioIndex, useHls) {
     }
     if (useHls && _isAv1Source(src)) return true
     return true
+}
+/* ===== Sortie audio (réglage Multicanal / Stéréo) ===== */
+// Le réglage est lu à CHAQUE négociation : changer de piste audio d'une 5.1
+// vers une stéréo réautorise la copie, et inversement.
+function _audioOutputMode(ctx) {
+    try { return AudioOutput.normalizeMode(ctx && ctx.audioOutputMode) } catch(e0) {}
+    return AudioOutput.MODE_MULTICHANNEL
+}
+function _audioOutputPlan(ctx, src, audioIndex) {
+    try {
+        var stream = _audioStreamByIndex(src, audioIndex)
+        var plan = AudioOutput.plan(_audioOutputMode(ctx), stream)
+        return plan
+    } catch(e0) { }
+    var fallback = { mode: AudioOutput.MODE_MULTICHANNEL, sourceChannels: 0, downmix: false,
+                     channels: 0, codec: "", bitrate: 0, maxChannels: 0 }
+    return fallback
+}
+function _shouldStereoDownmixAudio(ctx, src, audioIndex) {
+    return _audioOutputPlan(ctx, src, audioIndex).downmix === true
+}
+// Abaisse au plafond du mode un nombre de canaux déjà calculé par un chemin
+// de transcodage existant (TS entrelacé...), sans inventer de valeur.
+function _capAudioChannelsForOutput(ctx, channels) {
+    try { return AudioOutput.capChannels(_audioOutputMode(ctx), channels) } catch(e0) {}
+    return channels
+}
+// Plafond de canaux à annoncer quand aucun plan audio n'en impose un : celui
+// du profil de l'appareil actif (6 sur Révolution, 8 sur Devialet), abaissé
+// par le mode stéréo. Sans policy matérielle, le Core neutre garde sa valeur
+// historique de 8, cohérente avec son propre DeviceProfile.
+function _defaultTranscodingMaxAudioChannels(ctx) {
+    var n = 0
+    try {
+        var prof = _policyBuildDeviceProfile("http")
+        if (prof) n = Number(prof.MaxAudioChannels)
+    } catch(e0) { n = 0 }
+    if (!isFinite(n) || n <= 0) n = 8
+    return _capAudioChannelsForOutput(ctx, n)
+}
+// Applique le plafond stéréo à un plan audio de transcodage déjà calculé :
+// la copie devient impossible pour une piste de plus de 2 canaux.
+function _audioOutputTranscodePlan(ctx, src, audioIndex, plan) {
+    var out = _audioOutputPlan(ctx, src, audioIndex)
+    if (!plan || out.downmix !== true) {
+        return plan
+    }
+    return {
+        sourceNeedsAc3: plan.sourceNeedsAc3,
+        sourceIsDts: plan.sourceIsDts,
+        sourceIsTrueHd: plan.sourceIsTrueHd,
+        codec: out.codec,
+        allowCopy: false,
+        channels: out.channels,
+        bitrate: out.bitrate
+    }
+}
+// Point d'étranglement unique du profil envoyé dans PlaybackInfo : Révolution,
+// Devialet et profil générique passent tous par ici. En mode stéréo, le
+// plafond est annoncé pour TOUTES les pistes (une 2.0 reste donc éligible à la
+// lecture directe, une 5.1 ne l'est plus).
+function _applyStereoAudioProfileCeiling(profile, targetBitrate) {
+    if (!profile) return profile
+    var max = AudioOutput.STEREO_CHANNELS
+    var bitrate = Number(targetBitrate || 0)
+    if (!isFinite(bitrate) || bitrate <= 0) bitrate = AudioOutput.STEREO_DEFAULT_BITRATE
+    bitrate = Math.max(32000, Math.min(AudioOutput.STEREO_MAX_BITRATE, Math.floor(bitrate)))
+    try {
+        var current = Number(profile.MaxAudioChannels || 0)
+        if (!isFinite(current) || current <= 0 || current > max)
+            profile.MaxAudioChannels = max
+        var list = profile.CodecProfiles
+        var found = false
+        if (list && list.length) {
+            for (var i = 0; i < list.length; i++) {
+                var conds = list[i] ? list[i].Conditions : null
+                if (!conds || !conds.length) continue
+                for (var j = 0; j < conds.length; j++) {
+                    var cond = conds[j]
+                    if (!cond || _s(cond.Property) !== "AudioChannels") continue
+                    if (_s(cond.Condition) !== "LessThanEqual") continue
+                    if (!(Number(cond.Value || 0) > 0) || Number(cond.Value) > max)
+                        cond.Value = String(max)
+                    found = true
+                }
+            }
+        }
+        if (!found) {
+            if (!list) {
+                list = []
+                profile.CodecProfiles = list
+            }
+            list.push({
+                Type: "VideoAudio",
+                Conditions: [ { Condition: "LessThanEqual", Property: "AudioChannels", Value: String(max), IsRequired: false } ],
+                ApplyConditions: []
+            })
+        }
+        // Pour la VIDEO, Jellyfin peut sinon choisir son propre débit audio par défaut
+        // lors d'un downmix. Un CodecProfile VideoAudio avec AudioBitrate
+        // est la façon prise en charge par StreamBuilder de plafonner la valeur
+        // AVANT la génération du TranscodingUrl. Ainsi le master HLS reçu peut
+        // être utilisé tel quel, sans le réécrire après PlaybackInfo.
+        list.push({
+            Type: "VideoAudio",
+            Codec: AudioOutput.STEREO_CODEC,
+            Conditions: [
+                { Condition: "LessThanEqual", Property: "AudioChannels", Value: String(max), IsRequired: false },
+                { Condition: "LessThanEqual", Property: "AudioBitrate", Value: String(bitrate), IsRequired: false }
+            ],
+            ApplyConditions: []
+        })
+    } catch(e0) {}
+    return profile
 }
 function _sourceVideoDimensions(src) {
     var v = _firstStream(src, "Video"); var w = Number(v && v.Width || 0); var h = Number(v && v.Height || 0)
@@ -769,7 +908,7 @@ function _shouldRemuxDvdFolderMpeg(ctx, src) {
 function _dvdMpegAudioCodecLock(src, audioIndex) {
     var c = _selectedAudioCodec(src, audioIndex)
     if (!c) return null
-    c = _normalizeAudioCodecHint(c)
+    c = CoreUrl._normalizeAudioCodecHint(c)
     if (!c) return null
     if (c === "ac3") return "ac3"
     if (c === "dts" || c === "dca" || c === "dts,dca") return "dts,dca"
@@ -926,6 +1065,12 @@ function _firstInternalSubtitleStreamIndex(src) {
     }
     return -1
 }
+// En DirectPlay natif QtMultimedia 5.15 peut ignorer les drapeaux Matroska
+// Default/Forced et afficher la première piste de sous-titres interne physique.
+// Cette valeur sert uniquement à synchroniser l'UI avec le comportement Qt.
+function _nativeDirectPlaySubtitleIndex(src) {
+    return _firstInternalSubtitleStreamIndex(src)
+}
 function _preferredFrenchForcedSubtitleNeedsServerSelection(ctx, src) {
     if (!ctx || !src) return false
     if (!_smartPlaybackRulesEnabled(ctx)) return false
@@ -1051,12 +1196,12 @@ function _hasInternalSubtitle(src) {
     return false
 }
 function _hasAudioCodec(src, codec) {
-    codec = _normalizeAudioCodecHint(codec)
+    codec = CoreUrl._normalizeAudioCodecHint(codec)
     if (!src || !src.MediaStreams || !codec) return false
     for (var i = 0; i < src.MediaStreams.length; i++) {
         var st = src.MediaStreams[i]
         if (!st || !_isType(st, "Audio")) continue
-        var c = _normalizeAudioCodecHint(st.Codec)
+        var c = CoreUrl._normalizeAudioCodecHint(st.Codec)
         if (c === codec) return true
     }
     return false
@@ -1101,11 +1246,11 @@ function _selectedAudioCodec(src, audioIndex) {
     return _exactAudioCodecHint(st.Codec)
 }
 function _isDtsAudioCodecHint(codec) {
-    var c = _normalizeAudioCodecHint(codec)
+    var c = CoreUrl._normalizeAudioCodecHint(codec)
     return c === "dts" || c === "dca" || c === "dts,dca" || c === "a_dts"
 }
 function _isTrueHdAudioCodecHint(codec) {
-    var c = _normalizeAudioCodecHint(codec)
+    var c = CoreUrl._normalizeAudioCodecHint(codec)
     return c === "truehd" || c === "mlp" || c === "mlp_fba" || c === "a_truehd" || c === "dolby_truehd" || c === "true-hd" || c === "true_hd"
 }
 function _isTrueHd51AudioStream(st) {
@@ -1135,7 +1280,7 @@ function _fullTranscodeAudioNeedsAc3(src, audioIndex) {
     return _isUnsafeFullTranscodeAudioCodecHint(_selectedAudioCodec(src, audioIndex))
 }
 function _safeFullTranscodeAudioCodecHint(wanted, src, audioIndex) {
-    var sourceNeedsAc3 = _fullTranscodeAudioNeedsAc3(src, audioIndex); var normalized = _normalizeAudioCodecHint(wanted)
+    var sourceNeedsAc3 = _fullTranscodeAudioNeedsAc3(src, audioIndex); var normalized = CoreUrl._normalizeAudioCodecHint(wanted)
     if (sourceNeedsAc3 || _isUnsafeFullTranscodeAudioCodecHint(normalized)) return "ac3"
     return normalized || "ac3"
 }
@@ -1148,17 +1293,17 @@ function _audioChannelCountForStream(src, audioIndex) {
     return channels
 }
 function _audioCodecHintContains(codecHint, codec) {
-    var wanted = _normalizeAudioCodecHint(codecHint); var source = _normalizeAudioCodecHint(codec)
+    var wanted = CoreUrl._normalizeAudioCodecHint(codecHint); var source = CoreUrl._normalizeAudioCodecHint(codec)
     if (!wanted || !source) return false
     var parts = wanted.split(",")
     for (var i = 0; i < parts.length; i++) {
-        if (_normalizeAudioCodecHint(parts[i]) === source) return true
+        if (CoreUrl._normalizeAudioCodecHint(parts[i]) === source) return true
     }
     return false
 }
 function _safeFullTranscodeAudioPlan(src, audioIndex, wantedCodec, allowCopyDefault) {
     var sourceCodec = _selectedAudioCodec(src, audioIndex); var sourceNeedsAc3 = _fullTranscodeAudioNeedsAc3(src, audioIndex); var codec = _safeFullTranscodeAudioCodecHint(wantedCodec || sourceCodec, src, audioIndex)
-    var targetIsAc3 = _normalizeAudioCodecHint(codec) === "ac3"; var sourceAllowedByTarget = _audioCodecHintContains(codec, sourceCodec); var allowCopy = allowCopyDefault !== false && !sourceNeedsAc3 && sourceAllowedByTarget
+    var targetIsAc3 = CoreUrl._normalizeAudioCodecHint(codec) === "ac3"; var sourceAllowedByTarget = _audioCodecHintContains(codec, sourceCodec); var allowCopy = allowCopyDefault !== false && !sourceNeedsAc3 && sourceAllowedByTarget
     var channels = (!allowCopy && targetIsAc3) ? _audioChannelCountForStream(src, audioIndex) : null
     return {
         sourceNeedsAc3: sourceNeedsAc3,
@@ -1213,7 +1358,7 @@ var _CORE_URL_REQUIRED = [
     "_needsServerTrackSelection_ctx", "_decidePreferredContainerWithSrc",
     "_buildRemuxProgressiveUrl", "_normalizeAudioCodecHint", "_isTx3gSelected",
     "_forceQuery", "_u", "_headersWithToken", "_jsonNormalize", "_sendRequest",
-    "_extFrom", "_isProblematicForSeek", "_transportValidateServerUrlStrict",
+    "_sendPlaybackInfoExact", "_extFrom", "_isProblematicForSeek", "_transportValidateServerUrlStrict",
     "_transportValidatePlaybackUrlStrict", "_transportFetchStreams"
 ]
 function _coreUrlContractValid() {
@@ -1245,36 +1390,11 @@ function _ensureCoreUrlConfigured() {
         return false
     }
 }
-function buildProgressiveUrl(a,b,c,d) { return _ensureCoreUrlConfigured() ? CoreUrl.buildProgressiveUrl(a,b,c,d) : "" }
-function buildServerSeekProgressiveUrl(a,b,c,d) { return _ensureCoreUrlConfigured() ? CoreUrl.buildServerSeekProgressiveUrl(a,b,c,d) : "" }
-function buildHighQualityProgressiveTranscodeUrl(a,b,c,d) { return _ensureCoreUrlConfigured() ? CoreUrl.buildHighQualityProgressiveTranscodeUrl(a,b,c,d) : "" }
-function buildHlsUrl(a,b,c,d) { return _ensureCoreUrlConfigured() ? CoreUrl.buildHlsUrl(a,b,c,d) : "" }
-function getVideoStreamUrl(a,b,c,d) { return _ensureCoreUrlConfigured() ? CoreUrl.getVideoStreamUrl(a,b,c,d) : "" }
-function _subtitleResultUrl(a,b,c,d,e,f) { return _ensureCoreUrlConfigured() ? CoreUrl._subtitleResultUrl(a,b,c,d,e,f) : "" }
-function buildDeviceProfile(a) { return _ensureCoreUrlConfigured() ? CoreUrl.buildDeviceProfile(a) : null }
-function _needsServerTrackSelection_ctx(a) { return _ensureCoreUrlConfigured() ? CoreUrl._needsServerTrackSelection_ctx(a) : false }
-function _decidePreferredContainerWithSrc(a,b) { return _ensureCoreUrlConfigured() ? CoreUrl._decidePreferredContainerWithSrc(a,b) : null }
-function _buildRemuxProgressiveUrl(a,b,c,d,e,f,g,h,i,j,k) { return _ensureCoreUrlConfigured() ? CoreUrl._buildRemuxProgressiveUrl(a,b,c,d,e,f,g,h,i,j,k) : "" }
-function _normalizeAudioCodecHint(a) { return _ensureCoreUrlConfigured() ? CoreUrl._normalizeAudioCodecHint(a) : null }
-function _isTx3gSelected(a,b) { return _ensureCoreUrlConfigured() ? CoreUrl._isTx3gSelected(a,b) : false }
-function _forceQuery(a,b,c,d) { return _ensureCoreUrlConfigured() ? CoreUrl._forceQuery(a,b,c,d) : a }
-function _u(a,b) { return _ensureCoreUrlConfigured() ? CoreUrl._u(a,b) : "" }
-function _headersWithToken(a) { return _ensureCoreUrlConfigured() ? CoreUrl._headersWithToken(a) : ({}) }
-function _jsonNormalize(a) { return _ensureCoreUrlConfigured() ? CoreUrl._jsonNormalize(a) : (a || null) }
-function _sendRequest(a,b,c,d,e,f,g) {
-    if (_ensureCoreUrlConfigured()) return CoreUrl._sendRequest(a,b,c,d,e,f,g)
-    if (typeof f === "function") f({ code:"core_url_unavailable", status:0, data:null })
-}
-function _sendPlaybackInfoRequest(url, headers, body, onSuccess, onError) {
-    if (_ensureCoreUrlConfigured() && typeof CoreUrl._sendPlaybackInfoExact === "function") return CoreUrl._sendPlaybackInfoExact(url, headers, body, onSuccess, onError)
-    return _sendRequest("post", url, headers, body, onSuccess, onError)
-}
+// Public compatibility surfaces used outside the Core. Internal URL/transport
+// helpers call CoreUrl directly after _ensureCoreUrlConfigured() succeeds.
 function _extFrom(a) { return _ensureCoreUrlConfigured() ? CoreUrl._extFrom(a) : "" }
-function _isProblematicForSeek(a) { return _ensureCoreUrlConfigured() ? CoreUrl._isProblematicForSeek(a) : false }
-function validateServerUrlStrict(a,b) { return _ensureCoreUrlConfigured() ? CoreUrl._transportValidateServerUrlStrict(a,b) : false }
-function validatePlaybackUrlStrict(a,b) { return _ensureCoreUrlConfigured() ? CoreUrl._transportValidatePlaybackUrlStrict(a,b) : false }
-function fetchStreams(a,b,c,d,e) {
-    if (_ensureCoreUrlConfigured()) return CoreUrl._transportFetchStreams(a,b,c,d,e)
+function fetchStreams(a, b, c, d, e) {
+    if (_ensureCoreUrlConfigured()) return CoreUrl._transportFetchStreams(a, b, c, d, e)
     if (typeof e === "function") e("core_url_unavailable")
 }
 var _negotiating = false; var _lastNegKey  = ""; var _lastNegTs   = 0; var _minIntervalMs = 1100; var _lastNegResultKey = ""; var _lastNegResultTs = 0; var _lastNegResult = null; var _inFlightKeys = {}
@@ -1312,6 +1432,7 @@ function _ctxRequiresServerPipeline(ctx) {
 function _makeNegKey(ctx) {
     return [ "policy=" + (_devicePolicyId || "none"),
         "policyRev=" + (_devicePolicyRevision | 0), "playbackRules=" + _normalizePlaybackRuleMode(ctx.playbackRuleMode),
+        "audioOut=" + _audioOutputMode(ctx),
         "routerMode=" + (ctx.playbackRouterMode || ""),
         "routerBackend=" + (ctx.playbackRouterBackend || ""), Math.floor(ctx.startMs || 0),
         !!ctx.forceHls, !!ctx.forceMp4,
@@ -1402,7 +1523,7 @@ function _chooseSubtitleMethod(ctx, mustHls) {
     return mustHls ? "Hls" : "Embed"
 }
 function _preparePlaybackInfoRequest(ctx) {
-    var wantsServerSelect = _needsServerTrackSelection_ctx(ctx)
+    var wantsServerSelect = CoreUrl._needsServerTrackSelection_ctx(ctx)
     var mustHls = (ctx.forceHls === true)
     var allowTextSubtitleServerBurnIn = _allowTextSubtitleServerBurnIn(ctx)
     var preflightTextEncode = !!(allowTextSubtitleServerBurnIn &&
@@ -1420,12 +1541,24 @@ function _preparePlaybackInfoRequest(ctx) {
                                       ctx.manualDirectPlayOverride !== true &&
                                       ctx.manualRemuxOverride !== true)
     var playbackInfoWantsHlsProfile = (ctx.forceHlsProfileInPlaybackInfo === true)
+    var stereoPlaybackInfo = AudioOutput.isStereo(_audioOutputMode(ctx))
+    var stereoPlaybackCodec = AudioOutput.STEREO_CODEC
+    // Un downmix audio seul doit conserver la vidéo en stream-copy. Le profil
+    // exact dépend du Player : HTTP/MKV reste possible, tandis que Devialet
+    // privilégie HLS/TS pour éviter le MKV progressif live rejeté par QtMultimedia.
+    // Sur Devialet, un MKV progressif produit en temps réel par le serveur est
+    // rejeté par QtMultimedia alors que la même source MKV statique est lue.
+    // Pour le downmix 5.1 -> 2.0, la policy peut donc demander HLS/TS tout en
+    // conservant explicitement le stream-copy vidéo. La Révolution garde son
+    // chemin HTTP historique tant que sa policy ne demande pas ce mode.
+    var stereoPreferHls = stereoPlaybackInfo && ctx.preferStereoAudioOnlyHls === true
     var dpMode = (ctx.forceMp4 === true) ? "mp4"
                : (forceDvdSubPreflight ? "encode"
                : (explicitEncode ? "hls-encode"
-               : ((mustHls || playbackInfoWantsHlsProfile) ? "hls" : "auto")))
+               : ((mustHls || playbackInfoWantsHlsProfile || stereoPreferHls) ? "hls"
+               : (stereoPlaybackInfo ? "http" : "auto"))))
     var subMethodWanted = _chooseSubtitleMethod(ctx, mustHls || explicitEncode)
-    var url = _u(ctx.serverUrl, "/Items/" + encodeURIComponent(ctx.itemId) + "/PlaybackInfo")
+    var url = CoreUrl._u(ctx.serverUrl, "/Items/" + encodeURIComponent(ctx.itemId) + "/PlaybackInfo")
     var requestedManualVideoBitrate = _forcedPolicyTranscodeVideoBitrate(ctx)
     var playbackInfoMaxBitrate = requestedManualVideoBitrate > 0
                                ? requestedManualVideoBitrate
@@ -1458,7 +1591,7 @@ function _preparePlaybackInfoRequest(ctx) {
         AudioCodec: ctx.forcePlaybackInfoAudioCodec || null,
         MaxStreamingBitrate: playbackInfoMaxBitrate,
         SubtitleDeliveryMethod: subMethodWanted,
-        DeviceProfile: buildDeviceProfile(dpMode)
+        DeviceProfile: CoreUrl.buildDeviceProfile(dpMode)
     }
 
     // Faire calculer le TranscodingUrl directement par Jellyfin avec le débit
@@ -1506,6 +1639,50 @@ function _preparePlaybackInfoRequest(ctx) {
         body.AudioCodec = "ac3"
         body.AllowAudioStreamCopy = false
     }
+    // Sortie audio stéréo : le plafond de canaux est annoncé au serveur dès
+    // PlaybackInfo. Le nombre de canaux de la piste retenue n'est connu qu'à
+    // la réponse, mais annoncer 2 est inoffensif pour une piste déjà stéréo et
+    // c'est la seule façon d'obtenir une TranscodingUrl Jellyfin déjà mixée.
+    if (stereoPlaybackInfo) {
+        var sourceBitrateHint = Number(ctx.audioSourceBitrateHint || 0)
+        if (!isFinite(sourceBitrateHint) || sourceBitrateHint <= 0) sourceBitrateHint = 0
+        var stereoPlaybackBitrate = AudioOutput.stereoBitrateForStream({ BitRate: sourceBitrateHint })
+        // Contrat explicite du sélecteur 5.1 -> 2.0 : le serveur doit encoder
+        // l'audio, mais la vidéo doit rester éligible au stream-copy.
+        body.EnableDirectPlay = false
+        // Le downmix n'est pas un DirectStream : l'audio doit passer par le
+        // TranscodingProfile afin que Jellyfin respecte le codec cible. La vidéo
+        // reste néanmoins copiable via AllowVideoStreamCopy=true.
+        body.EnableDirectStream = false
+        body.EnableTranscoding = true
+        body.AllowVideoStreamCopy = true
+        body.AllowAudioStreamCopy = false
+        body.MaxAudioChannels = AudioOutput.STEREO_CHANNELS
+        // AudioCodec reste un hint toléré par certaines versions Jellyfin ;
+        // le verrou réel est porté par DeviceProfile.TranscodingProfiles.
+        // Ne pas imposer ici un bitrate fixe : le débit de la piste sélectionnée
+        // a déjà été collecté avant PlaybackInfo et plafonné à 384 kb/s.
+        body.AudioCodec = stereoPlaybackCodec
+        // Un changement de canaux doit reprendre exactement à la position courante.
+        // En HLS, forcer les ticks même si une policy avait demandé un cold-start.
+        if (playbackInfoStartMs > 0) {
+            playbackInfoStartTicks = Math.floor(playbackInfoStartMs * 10000)
+            body.StartTimeTicks = playbackInfoStartTicks
+        }
+        _applyStereoAudioProfileCeiling(body.DeviceProfile, stereoPlaybackBitrate)
+        // StreamBuilder prend le codec audio cible dans le TranscodingProfile.
+        // Ne laisser aucune liste concurrente (aac/mp3/...) pour ce PlaybackInfo.
+        var stereoProfiles = body.DeviceProfile.TranscodingProfiles || []
+        for (var sp = 0; sp < stereoProfiles.length; sp++) {
+            if (stereoProfiles[sp].Type === "Video") {
+                stereoProfiles[sp].AudioCodec = stereoPlaybackCodec
+                stereoProfiles[sp].MaxAudioChannels = String(AudioOutput.STEREO_CHANNELS)
+            }
+        }
+        // MusicStreamingTranscodingBitrate ne pilote pas ce chemin vidéo. Le
+        // plafond audio est porté par CodecProfiles/VideoAudio ci-dessus.
+        try { delete body.DeviceProfile.MusicStreamingTranscodingBitrate } catch(eStereoBitrate) {}
+    }
 
     return {
         wantsServerSelect: wantsServerSelect,
@@ -1521,6 +1698,11 @@ function _preparePlaybackInfoRequest(ctx) {
 }
 
 function _finishPlaybackInfoFailure(ctx, key, explicitEncode, allowTextSubtitleServerBurnIn, onSuccess, onError) {
+    if (AudioOutput.isStereo(_audioOutputMode(ctx))) {
+        delete _inFlightWaiters[key]
+        if (onError) onError("server_pipeline_required")
+        return
+    }
     var forceHlsFallback = (ctx.forceHls === true || ctx.forceHlsOnDpSeekFallback === true || ctx.forceServerSeek === true)
     var requiresServerPipeline = _ctxRequiresServerPipeline(ctx)
     var hasFallbackTicks = !!(ctx.startMs && ctx.startMs > 0)
@@ -1535,7 +1717,7 @@ function _finishPlaybackInfoFailure(ctx, key, explicitEncode, allowTextSubtitleS
     }
     if (forceHlsFallback) {
         var fallbackManualVideoBitrate = _forcedPolicyTranscodeVideoBitrate(ctx)
-        fbUrl = buildHlsUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
+        fbUrl = CoreUrl.buildHlsUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
             audioStreamIndex: (typeof ctx.selectedAudioStream === "number" && ctx.selectedAudioStream >= 0) ? ctx.selectedAudioStream : null,
             subtitleStreamIndex: (!ctx.useLocalSubs && typeof ctx.selectedSubtitleStream === "number" && ctx.selectedSubtitleStream >= 0) ? ctx.selectedSubtitleStream : null,
             subtitleMethod: explicitEncode ? "Encode" : "Hls",
@@ -1557,12 +1739,12 @@ function _finishPlaybackInfoFailure(ctx, key, explicitEncode, allowTextSubtitleS
             allowAudioStreamCopy: true, allowVideoStreamCopy: true,
             enableAutoStreamCopy: true, enableDirectStream: true
         }
-        fbUrl = _forceQuery(fbUrl, qctx, explicitEncode ? "Encode" : "Hls", true)
+        fbUrl = CoreUrl._forceQuery(fbUrl, qctx, explicitEncode ? "Encode" : "Hls", true)
     } else {
-        fbUrl = getVideoStreamUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId)
+        fbUrl = CoreUrl.getVideoStreamUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId)
     }
     if (!fbUrl || !/[?&]ApiKey=/i.test(fbUrl) ||
-            !validatePlaybackUrlStrict(fbUrl, ctx.serverUrl)) {
+            !CoreUrl._transportValidatePlaybackUrlStrict(fbUrl, ctx.serverUrl)) {
         delete _inFlightWaiters[key]
         if (onError) onError("invalid_playback_url")
         return
@@ -1616,7 +1798,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
         return
     }
     // Playback porte toujours un token/API key : WAN HTTP interdit avant toute négociation.
-    if (!validateServerUrlStrict(ctx.serverUrl, false)) {
+    if (!CoreUrl._transportValidateServerUrlStrict(ctx.serverUrl, false)) {
 
         if (onError) onError("insecure_transport")
         return
@@ -1657,13 +1839,12 @@ function negotiatePlayback(ctx, onSuccess, onError) {
     var url = playbackInfoPlan.url
     var body = playbackInfoPlan.body
 
-    _sendPlaybackInfoRequest(url, _headersWithToken(ctx.accessToken), body, function (res) {
+    CoreUrl._sendPlaybackInfoExact(url, CoreUrl._headersWithToken(ctx.accessToken), body, function (res) {
         _negotiating = false
         delete _inFlightKeys[key]
         _lastNegTs = (new Date()).getTime()
-        var resp = _jsonNormalize(res.json) || {}; var playSessionId = resp && resp.PlaySessionId ? resp.PlaySessionId : ""; var src = (resp && resp.MediaSources && resp.MediaSources.length > 0) ? resp.MediaSources[0] : null
+        var resp = CoreUrl._jsonNormalize(res.json) || {}; var playSessionId = resp && resp.PlaySessionId ? resp.PlaySessionId : ""; var src = (resp && resp.MediaSources && resp.MediaSources.length > 0) ? resp.MediaSources[0] : null
         var mediaSourceId = (src && src.Id) ? src.Id : ""
-
 
         var autoVoFrenchFullSubtitleIndex = _autoVoFrenchFullSubtitleIndex(ctx, src); var autoVoFrenchFullSubtitle = autoVoFrenchFullSubtitleIndex >= 0
         if (autoVoFrenchFullSubtitle) {
@@ -1730,9 +1911,14 @@ function negotiatePlayback(ctx, onSuccess, onError) {
         var mp4EditListTimestampRisk = _shouldRemuxMp4EditListTimestampRisk(ctx, src); var mp4TimedMetadataTrackRisk = _shouldRemuxMp4TimedMetadataTrackRisk(ctx, src); var mp4ContainerTimelineRisk = !!(mp4EditListTimestampRisk || mp4TimedMetadataTrackRisk); var singleAudioNoSubtitleDirectPlay = _isSingleAudioNoSubtitleDirectPlayCandidate(ctx, src)
         var remuxMkvHevcMain10 = _shouldServerRemuxHevcMain10(ctx, src); var autoFrenchAudioIndex = _autoFrenchAudioStreamIndex(ctx, src); var autoFrenchAudio = autoFrenchAudioIndex >= 0
         var plannedAudioStreamIndex = _plannedAutomaticAudioStreamIndex(ctx, src, autoFrenchAudioIndex); var forceTrueHd51AudioTranscode = _shouldForceTrueHd51AudioTranscode(ctx, src, plannedAudioStreamIndex)
+        var forcePolicyAudioOnlyTranscode = _policyRequiresAudioOnlyTranscode(ctx, src, plannedAudioStreamIndex)
+        // Première estimation du downmix stéréo, sur la piste pressentie, afin
+        // de sortir du DirectPlay statique comme le fait le TrueHD 5.1. Elle est
+        // recalculée plus bas sur la piste réellement retenue.
+        var stereoDownmixAudio = _shouldStereoDownmixAudio(ctx, src, plannedAudioStreamIndex)
         var preferredFrenchAudioNeedsServerSelection = _preferredFrenchAudioNeedsServerSelection(ctx, src); var defaultFrenchAudioNotFirst = _shouldRemuxDefaultFrenchAudioNotFirst(ctx, src)
         var dvdFolderMpegRemux = _shouldRemuxDvdFolderMpeg(ctx, src); var pinNoSubDefaultAudio = _shouldPinDefaultAudioForNoSubRemux(ctx, src, remuxNoSubs); var forceServerRemux = forceRemuxByPolicy ||
-            forceInterlacedTsTranscode || forceTrueHd51AudioTranscode ||
+            forceInterlacedTsTranscode || forceTrueHd51AudioTranscode || forcePolicyAudioOnlyTranscode || stereoDownmixAudio ||
             remuxNoSubs || remuxMkvHevcMain10 ||
             mp4ContainerTimelineRisk || autoFrenchAudio ||
             preferredFrenchAudioNeedsServerSelection || preferredFrenchForcedSubtitleNeedsServerSelection ||
@@ -1764,27 +1950,53 @@ function negotiatePlayback(ctx, onSuccess, onError) {
             }
         }
         var safeFrenchForcedSubStream = _subtitleStreamByIndex(src, safeFrenchForcedSubIndex); var safeFrenchForcedSubIsText = _isSafeFrenchForcedTextSubtitle(safeFrenchForcedSubStream)
-        var carrySafeFrenchForcedSubtitle = !!( _smartPlaybackRulesEnabled(ctx) && forceServerRemux &&
-            safeFrenchForcedSubIndex >= 0 && safeFrenchForcedSubIsText &&
-            !ctx.useLocalSubs && !(typeof ctx.selectedSubtitleStream === "number" && ctx.selectedSubtitleStream >= 0) &&
-            !forceImageBurnIn && !preferImageRemux &&
-            !textSubtitleSelected && !serverExternalTextSubtitle &&
-            !hevcMain10Eac3InternalSubRisk )
+        // Réinjection du sous-titre FORCÉ français. Elle ne dépend plus du seul
+        // forceServerRemux : le même fichier perdait ses sous-titres forcés en
+        // transcodage de politique et les retrouvait après un changement de
+        // piste audio. Le critère est désormais « le flux final est un flux
+        // SERVEUR capable d'embarquer du texte » (remux, transcodage audio seul
+        // ou transcodage vidéo progressif), tous les autres garde-fous étant
+        // conservés. Le chemin réel n'est pas encore arrêté ici : les drapeaux
+        // sont mémorisés et la décision est réévaluée plus bas, une fois l'URL
+        // construite, pour écarter HLS et la TranscodingUrl Jellyfin conservée.
+        var forcedSubtitleStreamFlags = {
+            serverRemux: forceServerRemux, policyTranscode: forceTranscodeByPolicy,
+            policyTranscodeHls: policyTranscodeUseHls, serverSelect: wantsServerSelect,
+            mustHls: mustHls, dvdSubtitleTranscode: forceDvdSubFileTranscode,
+            hlsUrl: false, preserveTranscodingUrl: false
+        }
+        var forcedSubtitleCarry = ForcedSubs.decideCarry({
+            smartRules: _smartPlaybackRulesEnabled(ctx),
+            serverStream: ForcedSubs.isEmbeddableServerStream(forcedSubtitleStreamFlags),
+            forcedIndex: safeFrenchForcedSubIndex, forcedIsText: safeFrenchForcedSubIsText,
+            useLocalSubs: ctx.useLocalSubs === true,
+            explicitSubtitleIndex: (typeof ctx.selectedSubtitleStream === "number") ? ctx.selectedSubtitleStream : -1,
+            // « Aucun » explicite : playerOverlayHelper pose ce drapeau dès que
+            // l'utilisateur coupe les sous-titres, et il survit aux
+            // négociations suivantes (seek réseau, changement de piste, rejeu
+            // différé). Un choix explicite ne doit jamais être écrasé.
+            explicitSubtitlesOff: ctx.disableAutoVoFrenchFullSubtitle === true,
+            imageBurnIn: forceImageBurnIn, imageRemux: preferImageRemux,
+            textSubtitleSelected: textSubtitleSelected, serverExternalSubtitle: serverExternalTextSubtitle,
+            internalSubtitleRisk: hevcMain10Eac3InternalSubRisk
+        })
+        var carrySafeFrenchForcedSubtitle = forcedSubtitleCarry.carry; var forcedSubtitleCarryReason = forcedSubtitleCarry.reason
         var autoSubtitleEmbedIndex = carrySafeFrenchForcedSubtitle ? safeFrenchForcedSubIndex : -1
+        var subMethodBeforeForcedCarry = subMethodWanted
         if (carrySafeFrenchForcedSubtitle)
-            subMethodWanted = "Embed"
+            subMethodWanted = forcedSubtitleCarry.method
 
         var pinDefaultAudio = _hasExplicitAudio(ctx) ||
             autoFrenchAudio || preferredFrenchAudioNeedsServerSelection ||
             preferredFrenchForcedSubtitleNeedsServerSelection || defaultFrenchAudioNotFirst ||
             dvdFolderMpegRemux || preferImageRemux ||
             forceImageBurnIn || forceDvdSubFileTranscode ||
-            forceInterlacedTsTranscode || forceTrueHd51AudioTranscode ||
+            forceInterlacedTsTranscode || forceTrueHd51AudioTranscode || forcePolicyAudioOnlyTranscode ||
             forceTranscodeByPolicy || forceServerRemux ||
             ctx.forceServerSeek === true || textSubtitleSelected ||
             serverExternalTextSubtitle || (imageSubtitleSelected === true) ||
             pinNoSubDefaultAudio
-        if (forceServerRemux || forceTranscodeByPolicy || forceDvdSubFileTranscode || forceInterlacedTsTranscode || forceTrueHd51AudioTranscode)
+        if (forceServerRemux || forceTranscodeByPolicy || forceDvdSubFileTranscode || forceInterlacedTsTranscode || forceTrueHd51AudioTranscode || forcePolicyAudioOnlyTranscode)
             wantsServerSelect = true
         var effectiveAudioStreamIndex = _effectiveAudioStreamForServer( ctx,
             src, imageSubtitleSelected,
@@ -1792,8 +2004,27 @@ function negotiatePlayback(ctx, onSuccess, onError) {
             pinDefaultAudio, autoFrenchAudioIndex
         )
         forceTrueHd51AudioTranscode = _shouldForceTrueHd51AudioTranscode(ctx, src, effectiveAudioStreamIndex)
+        forcePolicyAudioOnlyTranscode = _policyRequiresAudioOnlyTranscode(ctx, src, effectiveAudioStreamIndex)
+        // Piste réellement envoyée au serveur : soit l'index explicite/auto,
+        // soit la piste par défaut que le serveur choisira. Le plan audio, et
+        // donc la sélection automatique française, portent sur CELLE-LÀ.
+        var audioOutputStreamIndex = (typeof effectiveAudioStreamIndex === "number" && effectiveAudioStreamIndex >= 0)
+                                     ? effectiveAudioStreamIndex : plannedAudioStreamIndex
+        var audioOutputPlan = _audioOutputPlan(ctx, src, audioOutputStreamIndex)
+        // Le downmix serveur cible AAC-LC 2.0 via AudioCodec=aac. Les codecs source
+        // (E-AC-3, AC-3, DTS, etc.) restent traités normalement hors de ce mode ;
+        // ici la cible stéréo explicite gagne sur la policy audio matérielle.
+        stereoDownmixAudio = audioOutputPlan.downmix === true
+        // Transcodage AUDIO SEUL, vidéo copiée : historiquement le TrueHD 5.1,
+        // désormais aussi le mixage stéréo demandé par l'utilisateur et toute
+        // incompatibilité audio seule déclarée par la policy matérielle. Quand
+        // plusieurs s'appliquent, le downmix stéréo gagne (AAC-LC 2.0).
+        var audioOnlyTranscodeNeeded = !!(forceTrueHd51AudioTranscode || forcePolicyAudioOnlyTranscode || stereoDownmixAudio)
+        var audioOnlyTranscodeCodec = stereoDownmixAudio ? audioOutputPlan.codec
+                                    : (forceTrueHd51AudioTranscode ? "ac3"
+                                       : (forcePolicyAudioOnlyTranscode ? _policyTranscodeAudioCodecHint(ctx, src, audioOutputStreamIndex, false) : null))
 
-        var tx3gSelected = _isTx3gSelected(src, ctx.selectedSubtitleStream)
+        var tx3gSelected = CoreUrl._isTx3gSelected(src, ctx.selectedSubtitleStream)
         // Aucun overlay local ne doit être créé pendant une négociation serveur,
         // sauf opt-in explicite d'un vrai DirectPlay. Le chemin manuel SRT
         // DirectPlay ne passe de toute façon pas par cette négociation.
@@ -1832,15 +2063,29 @@ function negotiatePlayback(ctx, onSuccess, onError) {
 
         }
         var newUrl = ""; var includeTicks = !!ctx.preferTicks; var lastUsedTranscoding = false; var lastUsedDirectStream = false; var isServerRemux = false; var remuxAudioCodecLock = null; var fragileSeekRemux = false; var dvdDims = null
-        var dvdVideoBitrate = 0; var dvdTicks = 0; var dvdAudioCodec = null; var dvdAudioAllowCopy = true; var dvdAudioChannels = null; var dvdAudioBitrate = null; var imageBurnAudioPlan = null; var trueHd51AudioChannels = forceTrueHd51AudioTranscode ? 6 : null
-        var trueHd51AudioBitrate = forceTrueHd51AudioTranscode ? 640000 : null; var trueHd51Ticks = 0; var trueHd51AudioOnlyTranscodeActive = false
+        var dvdVideoBitrate = 0; var dvdTicks = 0; var dvdAudioCodec = null; var dvdAudioAllowCopy = true; var dvdAudioChannels = null; var dvdAudioBitrate = null; var imageBurnAudioPlan = null; var audioOnlyTranscodeChannels = stereoDownmixAudio ? audioOutputPlan.channels : (forceTrueHd51AudioTranscode ? 6 : (forcePolicyAudioOnlyTranscode ? _audioChannelCountForStream(src, audioOutputStreamIndex) : null))
+        var audioOnlyTranscodeBitrate = stereoDownmixAudio ? audioOutputPlan.bitrate : ((forceTrueHd51AudioTranscode || forcePolicyAudioOnlyTranscode) ? 640000 : null); var audioOnlyTicks = 0; var audioOnlyTranscodeActive = false
         // Quand PlaybackInfo fournit déjà une TranscodingUrl HLS pour un
         // transcodage de politique (dont la qualité manuelle), cette URL est
         // désormais considérée comme la source de vérité. Le CoreUrl ne doit
         // alors plus reconstruire les contraintes décidées par Jellyfin.
         var preserveJellyfinTranscodingUrl = false
+        // Devialet + downmix audio HLS : la TranscodingUrl renvoyée par Jellyfin
+        // doit rester strictement intacte. Si une reprise est demandée, QtMultimedia
+        // effectuera le seek localement une fois le manifeste chargé. Ajouter
+        // StartTimeTicks à une TranscodingUrl déjà construite change le job HLS et
+        // provoque un MediaError sur le Devialet.
+        var stereoHlsClientSeekAfterOpen = false
         if (src) {
-            var hasTC   = !!(src.TranscodingUrl && src.TranscodingUrl.length > 0); var cont    = _s(src.Container).toLowerCase(); var pathExt = _extFrom(src.Path || ""); var isFrag  = _isProblematicForSeek(cont || pathExt)
+            var hasTC   = !!(src.TranscodingUrl && src.TranscodingUrl.length > 0); var cont    = _s(src.Container).toLowerCase(); var pathExt = _extFrom(src.Path || ""); var isFrag  = CoreUrl._isProblematicForSeek(cont || pathExt)
+            // Devialet + downmix HLS : conserver la TranscodingUrl complète
+            // fournie par Jellyfin. Les URLs reconstruites avec StartTimeTicks
+            // peuvent échouer avant même d'exposer une durée sur QtMultimedia,
+            // alors que le manifeste complet + seek local est stable.
+            var playbackInfoTranscodingUrl = hasTC ? CoreUrl._u(ctx.serverUrl, src.TranscodingUrl) : ""
+            var playbackInfoTranscodingIsHls = !!(playbackInfoTranscodingUrl &&
+                (playbackInfoTranscodingUrl.indexOf(".m3u8") >= 0 || playbackInfoTranscodingUrl.indexOf("/hls") >= 0 ||
+                 _s(src && src.TranscodingSubProtocol).toLowerCase() === "hls"))
             fragileSeekRemux = !!( isFrag &&
                 ctx.manualDirectPlayOverride !== true &&
                 !mustHls && !forceTranscodeByPolicy &&
@@ -1855,14 +2100,16 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                 (includeTicks && (ctx.startMs || 0) > 0)
             if (forceInterlacedTsTranscode) {
                 var tsDims = _interlacedTsTranscodeDimensions(src); var tsVideoBitrate = _policyTranscodeVideoBitrate(ctx, src); var tsMaxFramerate = _interlacedTsMaxFramerate(src)
-                var tsAudioChannels = _audioChannelsForStream(src, effectiveAudioStreamIndex); var tsAudioBitrate = _ac3BitrateForChannels(tsAudioChannels); var tsTicks = (ctx.startMs > 0) ? Math.floor(ctx.startMs * 10000) : 0
+                // Transcodage complet TS entrelacé : la cible AC3 est conservée,
+                // seul le nombre de canaux est ramené au plafond stéréo.
+                var tsAudioChannels = _capAudioChannelsForOutput(ctx, _audioChannelsForStream(src, effectiveAudioStreamIndex)); var tsAudioBitrate = _ac3BitrateForChannels(tsAudioChannels); var tsTicks = (ctx.startMs > 0) ? Math.floor(ctx.startMs * 10000) : 0
                 var tsSubtitleIndex = (!ctx.useLocalSubs && typeof ctx.selectedSubtitleStream === "number" && ctx.selectedSubtitleStream >= 0)
                                       ? ctx.selectedSubtitleStream : -1
                 var tsSubtitleMethod = tsSubtitleIndex >= 0
                                       ? (_isTextSubtitleSelected(src, tsSubtitleIndex) ? "Embed" : "Encode")
                                       : null
 
-                newUrl = buildHighQualityProgressiveTranscodeUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
+                newUrl = CoreUrl.buildHighQualityProgressiveTranscodeUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
                     audioStreamIndex: effectiveAudioStreamIndex, subtitleStreamIndex: tsSubtitleIndex >= 0 ? tsSubtitleIndex : null,
                     subtitleMethod: tsSubtitleMethod, forceNoSubtitle: tsSubtitleIndex < 0,
                     mediaSourceId: mediaSourceId, playSessionId: playSessionId,
@@ -1888,13 +2135,14 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                 dvdDims = _policyTranscodeDimensions(ctx, src)
                 dvdVideoBitrate = _policyTranscodeVideoBitrate(ctx, src)
                 dvdTicks = (ctx.startMs > 0) ? Math.floor(ctx.startMs * 10000) : 0
-                var dvdAudioPlan = _safeFullTranscodeAudioPlan(src, effectiveAudioStreamIndex, _selectedAudioCodec(src, effectiveAudioStreamIndex), true)
+                var dvdAudioPlan = _audioOutputTranscodePlan(ctx, src, effectiveAudioStreamIndex,
+                    _safeFullTranscodeAudioPlan(src, effectiveAudioStreamIndex, _selectedAudioCodec(src, effectiveAudioStreamIndex), true))
                 dvdAudioCodec = dvdAudioPlan.codec
                 dvdAudioAllowCopy = dvdAudioPlan.allowCopy
                 dvdAudioChannels = dvdAudioPlan.channels
                 dvdAudioBitrate = dvdAudioPlan.bitrate
 
-                newUrl = buildHighQualityProgressiveTranscodeUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
+                newUrl = CoreUrl.buildHighQualityProgressiveTranscodeUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
                     audioStreamIndex: effectiveAudioStreamIndex, subtitleStreamIndex: dvdSubTranscodeSubtitleIndex >= 0 ? dvdSubTranscodeSubtitleIndex : null,
                     subtitleMethod: dvdSubTranscodeSubtitleIndex >= 0 ? dvdSubTranscodeSubtitleMethod : null, forceNoSubtitle: dvdSubTranscodeSubtitleIndex < 0,
                     mediaSourceId: mediaSourceId, playSessionId: playSessionId,
@@ -1902,7 +2150,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                     videoCodec: "h264", audioCodec: dvdAudioCodec || null,
                     videoBitrate: dvdVideoBitrate, maxWidth: dvdDims.width,
                     maxHeight: dvdDims.height, maxVideoBitDepth: 8,
-                    maxStreamingBitrate: REDEFIN_MAX_STREAMING_BITRATE, transcodingMaxAudioChannels: dvdAudioChannels || 8,
+                    maxStreamingBitrate: REDEFIN_MAX_STREAMING_BITRATE, transcodingMaxAudioChannels: dvdAudioChannels || _defaultTranscodingMaxAudioChannels(ctx),
                     audioChannels: dvdAudioChannels, audioBitrate: dvdAudioBitrate,
                     allowAudioStreamCopy: dvdAudioAllowCopy, allowVideoStreamCopy: false,
                     enableAutoStreamCopy: dvdAudioAllowCopy, enableDirectStream: false,
@@ -1920,8 +2168,9 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                 var hlsTicksBurn = (ctx.startMs > 0) ? Math.floor(ctx.startMs * 10000) : 0
                 var imageBurnAudioCodec = _policyTranscodeAudioCodecHint(ctx, src, effectiveAudioStreamIndex, true)
                 var imageBurnAllowAudioCopy = _policyTranscodeAllowAudioCopy(ctx, src, effectiveAudioStreamIndex, true)
-                imageBurnAudioPlan = _safeFullTranscodeAudioPlan(src, effectiveAudioStreamIndex, imageBurnAudioCodec, imageBurnAllowAudioCopy)
-                newUrl = buildHlsUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
+                imageBurnAudioPlan = _audioOutputTranscodePlan(ctx, src, effectiveAudioStreamIndex,
+                    _safeFullTranscodeAudioPlan(src, effectiveAudioStreamIndex, imageBurnAudioCodec, imageBurnAllowAudioCopy))
+                newUrl = CoreUrl.buildHlsUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
                     audioStreamIndex: effectiveAudioStreamIndex,
                     subtitleStreamIndex: (!ctx.useLocalSubs && typeof ctx.selectedSubtitleStream === "number" && ctx.selectedSubtitleStream >= 0) ? ctx.selectedSubtitleStream : null,
                     subtitleMethod: "Encode", mediaSourceId: mediaSourceId,
@@ -1944,7 +2193,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                 // renvoyer HLS alors que la qualité manuelle attend un progressif.
                 // Dans ce cas, laisser newUrl vide déclenche le fallback progressif
                 // commun plus bas, avec StartTimeTicks et sans seek local HLS.
-                var jellyfinTcCandidate = hasTC ? _u(ctx.serverUrl, src.TranscodingUrl) : ""
+                var jellyfinTcCandidate = hasTC ? CoreUrl._u(ctx.serverUrl, src.TranscodingUrl) : ""
                 var jellyfinTcIsHls = !!(jellyfinTcCandidate &&
                     (jellyfinTcCandidate.indexOf(".m3u8") >= 0 || jellyfinTcCandidate.indexOf("/hls") >= 0 ||
                      _s(src && src.TranscodingSubProtocol).toLowerCase() === "hls"))
@@ -1970,7 +2219,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                     var policyHlsAudioCodec = _policyTranscodeAudioCodecHint(ctx, src, effectiveAudioStreamIndex, true); var policyHlsAllowAudioCopy = _policyTranscodeAllowAudioCopy(ctx, src, effectiveAudioStreamIndex, true)
 
                     var policyHlsTicks = (!policyTranscodeHlsColdStart && ctx.startMs > 0) ? Math.floor(ctx.startMs * 10000) : 0
-                    newUrl = buildHlsUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
+                    newUrl = CoreUrl.buildHlsUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
                         audioStreamIndex: effectiveAudioStreamIndex,
                         subtitleStreamIndex: (!ctx.useLocalSubs && typeof ctx.selectedSubtitleStream === "number" && ctx.selectedSubtitleStream >= 0) ? ctx.selectedSubtitleStream : null,
                         subtitleMethod: subMethodWanted || null, mediaSourceId: mediaSourceId,
@@ -1981,7 +2230,8 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                         breakOnNonKeyFrames: true, h264Profile: ((policyTranscodeVideoCodec || "h264") === "h264") ? "high,main,baseline,constrainedbaseline" : null,
                         h264Level: ((policyTranscodeVideoCodec || "h264") === "h264") ? fullTranscodeH264Level : null, h264VideoBitDepth: null,
                         h264RangeType: null, h264Deinterlace: undefined,
-                        transcodingMaxAudioChannels: null, audioBitrate: null,
+                        transcodingMaxAudioChannels: stereoDownmixAudio ? audioOutputPlan.channels : null,
+                        audioBitrate: stereoDownmixAudio ? audioOutputPlan.bitrate : null,
                         videoBitrate: fullTranscodeVideoBitrate, maxVideoBitDepth: null,
                         maxWidth: fullTranscodeDims.width, maxHeight: fullTranscodeDims.height,
                         maxBitrate: REDEFIN_MAX_STREAMING_BITRATE, allowAudioStreamCopy: policyHlsAllowAudioCopy,
@@ -1993,30 +2243,57 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                     lastUsedTranscoding = true
                     lastUsedDirectStream = false
                 }
-            } else if (forceTrueHd51AudioTranscode && !mustHls && !forceTranscodeByPolicy) {
-                trueHd51AudioOnlyTranscodeActive = true
-                trueHd51Ticks = (ctx.startMs > 0) ? Math.floor(ctx.startMs * 10000) : 0
-                var trueHd51SubtitleIndex = serverExternalTextSubtitle ? -1
+            } else if (audioOnlyTranscodeNeeded && !mustHls && !forceTranscodeByPolicy) {
+                // Vidéo copiée, audio réencodé par le serveur : TrueHD 5.1 non
+                // décodable, ou mixage stéréo demandé par l'utilisateur.
+                audioOnlyTranscodeActive = true
+                audioOnlyTicks = (ctx.startMs > 0) ? Math.floor(ctx.startMs * 10000) : 0
+                var audioOnlySubtitleIndex = serverExternalTextSubtitle ? -1
                                             : (carrySafeFrenchForcedSubtitle ? safeFrenchForcedSubIndex
                                                : ((!ctx.useLocalSubs && typeof ctx.selectedSubtitleStream === "number" && ctx.selectedSubtitleStream >= 0)
                                                   ? ctx.selectedSubtitleStream : -1))
-                var trueHd51SubtitleMethod = trueHd51SubtitleIndex >= 0 ? (carrySafeFrenchForcedSubtitle ? "Embed" : (subMethodWanted || "Embed"))
+                var audioOnlySubtitleMethod = audioOnlySubtitleIndex >= 0 ? (carrySafeFrenchForcedSubtitle ? "Embed" : (subMethodWanted || "Embed"))
                                            : null
-                var trueHd51Container = mp4EditListTimestampRisk ? "mkv"
-                                      : (_decidePreferredContainerWithSrc(ctx, src) || "mkv")
+                var audioOnlyContainer = mp4EditListTimestampRisk ? "mkv"
+                                      : (CoreUrl._decidePreferredContainerWithSrc(ctx, src) || "mkv")
 
-                newUrl = buildServerSeekProgressiveUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
-                    audioStreamIndex: effectiveAudioStreamIndex, subtitleStreamIndex: trueHd51SubtitleIndex >= 0 ? trueHd51SubtitleIndex : null,
-                    subtitleMethod: trueHd51SubtitleMethod, forceNoSubtitle: trueHd51SubtitleIndex < 0,
-                    mediaSourceId: mediaSourceId, playSessionId: playSessionId,
-                    container: trueHd51Container, startTimeTicks: trueHd51Ticks,
-                    videoCodec: _selectedVideoCodec(src), audioCodec: "ac3",
-                    allowAudioStreamCopy: false, allowVideoStreamCopy: true,
-                    enableAutoStreamCopy: false, enableDirectStream: false,
-                    enableTranscoding: true, copyTimestamps: false,
-                    context: "Streaming", transcodeReasons: "AudioCodecNotSupported"
-                })
-                includeTicks = !!(trueHd51Ticks > 0)
+                // PlaybackInfo a été négocié avec un profil HTTP/MKV dédié au
+                // downmix. Si Jellyfin fournit une URL progressive, elle est
+                // prioritaire : elle contient les choix exacts du StreamBuilder
+                // (dont la décision video-copy) et évite de reconstruire à la main
+                // une URL incompatible avec la session de transcodage préparée.
+                var audioOnlyServerUrl = (src && src.TranscodingUrl) ? CoreUrl._u(ctx.serverUrl, src.TranscodingUrl) : ""
+                var audioOnlyServerIsHls = !!(audioOnlyServerUrl &&
+                    (audioOnlyServerUrl.indexOf(".m3u8") >= 0 || audioOnlyServerUrl.indexOf("/hls") >= 0 ||
+                     _s(src && src.TranscodingSubProtocol).toLowerCase() === "hls"))
+                if (stereoDownmixAudio && audioOnlyServerUrl &&
+                        (!audioOnlyServerIsHls || ctx.preferStereoAudioOnlyHls === true)) {
+                    // Sur Devialet le flux HLS/TS généré par Jellyfin est préféré au
+                    // MKV progressif live, que QtMultimedia 5.15 refuse sur le boîtier.
+                    // La vidéo reste en COPY grâce au contrat PlaybackInfo ci-dessus.
+                    newUrl = audioOnlyServerUrl
+                    preserveJellyfinTranscodingUrl = true
+                    // La reprise HLS audio-only sur Devialet se fait côté Player.
+                    // Le job Jellyfin doit rester verbatim : le dernier test matériel
+                    // montre qu'ajouter StartTimeTicks à master.m3u8 transforme un
+                    // flux lisible en MediaError. Le Core expose donc startMs comme
+                    // initialLocalSeekMs après ouverture, sans base temporelle serveur.
+                    stereoHlsClientSeekAfterOpen = !!(audioOnlyServerIsHls && ctx.startMs > 0)
+                    includeTicks = /(?:[?&])StartTimeTicks=[1-9][0-9]*/i.test(newUrl)
+                } else {
+                    newUrl = CoreUrl.buildServerSeekProgressiveUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
+                        audioStreamIndex: effectiveAudioStreamIndex, subtitleStreamIndex: audioOnlySubtitleIndex >= 0 ? audioOnlySubtitleIndex : null,
+                        subtitleMethod: audioOnlySubtitleMethod, forceNoSubtitle: audioOnlySubtitleIndex < 0,
+                        mediaSourceId: mediaSourceId, playSessionId: playSessionId,
+                        container: audioOnlyContainer, startTimeTicks: audioOnlyTicks,
+                        videoCodec: _selectedVideoCodec(src), audioCodec: stereoDownmixAudio ? AudioOutput.STEREO_CODEC : (audioOnlyTranscodeCodec || "ac3"),
+                        allowAudioStreamCopy: false, allowVideoStreamCopy: true,
+                        enableAutoStreamCopy: false, enableDirectStream: false,
+                        enableTranscoding: true, copyTimestamps: false,
+                        context: "Streaming", transcodeReasons: "AudioCodecNotSupported"
+                    })
+                    includeTicks = !!(audioOnlyTicks > 0)
+                }
                 lastUsedTranscoding = true
                 lastUsedDirectStream = false
                 isServerRemux = false
@@ -2024,13 +2301,13 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                 remuxAudioCodecLock = dvdFolderMpegRemux ? _dvdMpegAudioCodecLock(src, effectiveAudioStreamIndex)
                                    : _remuxAudioCodecLock(ctx, src, effectiveAudioStreamIndex, true, false, false)
                 var explicitSeekContainer = mp4ContainerTimelineRisk ? "mkv"
-                                          : (dvdFolderMpegRemux ? "mpeg" : (_decidePreferredContainerWithSrc(ctx, src) || (cont || pathExt || "mkv")))
+                                          : (dvdFolderMpegRemux ? "mpeg" : (CoreUrl._decidePreferredContainerWithSrc(ctx, src) || (cont || pathExt || "mkv")))
                 var explicitSeekSubMethod = carrySafeFrenchForcedSubtitle ? "Embed"
                                           : ((!ctx.useLocalSubs && typeof ctx.selectedSubtitleStream === "number" && ctx.selectedSubtitleStream >= 0)
                                               ? (subMethodWanted || (preferImageRemux ? "Embed" : null)) : null)
 
                 includeTicks = true
-                newUrl = buildServerSeekProgressiveUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
+                newUrl = CoreUrl.buildServerSeekProgressiveUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
                     audioStreamIndex: effectiveAudioStreamIndex,
                     subtitleStreamIndex: (!ctx.useLocalSubs && typeof ctx.selectedSubtitleStream === "number" && ctx.selectedSubtitleStream >= 0) ? ctx.selectedSubtitleStream : null,
                     subtitleMethod: explicitSeekSubMethod,
@@ -2052,7 +2329,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                                    : _remuxAudioCodecLock(ctx, src, effectiveAudioStreamIndex, true, false, false)
 
                 includeTicks = !!(includeTicks || forceTicksForServerRemux || ctx.forceServerSeek || (ctx.startMs || 0) > 0)
-                newUrl = _u(ctx.serverUrl, src.TranscodingUrl)
+                newUrl = CoreUrl._u(ctx.serverUrl, src.TranscodingUrl)
                 lastUsedDirectStream = false
                 lastUsedTranscoding = false
                 isServerRemux = true
@@ -2060,7 +2337,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                 remuxAudioCodecLock = _remuxAudioCodecLock(ctx, src, effectiveAudioStreamIndex, true, false, false)
 
                 includeTicks = true
-                newUrl = _buildRemuxProgressiveUrl( ctx,
+                newUrl = CoreUrl._buildRemuxProgressiveUrl( ctx,
                     src, mediaSourceId,
                     playSessionId, effectiveAudioStreamIndex,
                     carrySafeFrenchForcedSubtitle ? "Embed" : null, includeTicks,
@@ -2076,11 +2353,11 @@ function negotiatePlayback(ctx, onSuccess, onError) {
 
                 includeTicks = !!(includeTicks || forceTicksForServerRemux || ctx.forceServerSeek)
                 var forcedCont0 = mp4ContainerTimelineRisk ? "mkv"
-                                : (dvdFolderMpegRemux ? "mpeg" : (_decidePreferredContainerWithSrc(ctx, src) || (cont || pathExt || "mkv")))
+                                : (dvdFolderMpegRemux ? "mpeg" : (CoreUrl._decidePreferredContainerWithSrc(ctx, src) || (cont || pathExt || "mkv")))
                 var strictSubMethod = carrySafeFrenchForcedSubtitle ? "Embed"
                                     : ((!ctx.useLocalSubs && typeof ctx.selectedSubtitleStream === "number" && ctx.selectedSubtitleStream >= 0)
                                         ? (subMethodWanted || (preferImageRemux ? "Embed" : null)) : null)
-                newUrl = _buildRemuxProgressiveUrl( ctx,
+                newUrl = CoreUrl._buildRemuxProgressiveUrl( ctx,
                     src, mediaSourceId,
                     playSessionId, effectiveAudioStreamIndex,
                     strictSubMethod, includeTicks,
@@ -2092,7 +2369,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                 isServerRemux = true
             } else if (wantDpLocalSeek) {
 
-                newUrl = getVideoStreamUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
+                newUrl = CoreUrl.getVideoStreamUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
                     mediaSourceId: mediaSourceId, container: _containerOrExt(src)
                 })
                 includeTicks = false
@@ -2100,21 +2377,34 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                 lastUsedTranscoding = false
             } else if (wantDpStatic) {
 
-                newUrl = getVideoStreamUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
+                newUrl = CoreUrl.getVideoStreamUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
                     mediaSourceId: mediaSourceId, container: _containerOrExt(src)
                 })
                 includeTicks = false
                 lastUsedDirectStream = false
                 lastUsedTranscoding = false
+            } else if (ctx.forceServerSeek === true && stereoDownmixAudio && playbackInfoTranscodingIsHls) {
+                // Seek interactif HLS + downmix 2.0 : ne pas reconstruire le
+                // manifeste. Si Jellyfin a déjà fourni StartTimeTicks, on respecte
+                // sa timeline ; sinon le Player ouvre le manifeste intact puis
+                // restaure la cible par seek local après Loaded/Buffered.
+                newUrl = playbackInfoTranscodingUrl
+                preserveJellyfinTranscodingUrl = true
+                var jellyfinProvidedSeekTicks = /(?:[?&])StartTimeTicks=[1-9][0-9]*/i.test(newUrl)
+                includeTicks = jellyfinProvidedSeekTicks
+                stereoHlsClientSeekAfterOpen = !!(!jellyfinProvidedSeekTicks && ctx.startMs > 0)
+                lastUsedTranscoding = true
+                lastUsedDirectStream = false
+                isServerRemux = false
             } else if (mustHls) {
 
                 var hlsTicks = (ctx.startMs > 0) ? Math.floor(ctx.startMs * 10000) : 0
-                newUrl = buildHlsUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
+                newUrl = CoreUrl.buildHlsUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
                     audioStreamIndex: effectiveAudioStreamIndex,
                     subtitleStreamIndex: (!ctx.useLocalSubs && typeof ctx.selectedSubtitleStream === "number" && ctx.selectedSubtitleStream >= 0) ? ctx.selectedSubtitleStream : null,
                     subtitleMethod: subMethodWanted || "Hls", mediaSourceId: mediaSourceId,
                     playSessionId: playSessionId, startTimeTicks: hlsTicks,
-                    audioCodec: "ac3,eac3,aac,mp3", maxBitrate: REDEFIN_MAX_STREAMING_BITRATE,
+                    audioCodec: stereoDownmixAudio ? AudioOutput.STEREO_CODEC : "ac3,eac3,aac,mp3", maxBitrate: REDEFIN_MAX_STREAMING_BITRATE,
                     allowAudioStreamCopy: true, allowVideoStreamCopy: true,
                     enableAutoStreamCopy: true, enableDirectStream: true
                 })
@@ -2124,8 +2414,8 @@ function negotiatePlayback(ctx, onSuccess, onError) {
             } else if ((wantsServerSelect || subMethodWanted === "Embed" || ctx.forceServerSeek === true) && !forceTranscodeByPolicy) {
                 remuxAudioCodecLock = _remuxAudioCodecLock(ctx, src, effectiveAudioStreamIndex, true, false, false)
 
-                var includeRemuxTicks = !!((includeTicks && (ctx.startMs || 0) > 0) || ctx.forceServerSeek === true); var forcedCont1 = _decidePreferredContainerWithSrc(ctx, src) || (cont || pathExt || "mkv")
-                newUrl = _buildRemuxProgressiveUrl( ctx,
+                var includeRemuxTicks = !!((includeTicks && (ctx.startMs || 0) > 0) || ctx.forceServerSeek === true); var forcedCont1 = CoreUrl._decidePreferredContainerWithSrc(ctx, src) || (cont || pathExt || "mkv")
+                newUrl = CoreUrl._buildRemuxProgressiveUrl( ctx,
                     src, mediaSourceId,
                     playSessionId, effectiveAudioStreamIndex,
                     subMethodWanted, includeRemuxTicks,
@@ -2138,7 +2428,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                 isServerRemux = true
             } else if (hasTC && ctx.forceAllowTranscoding === true) {
 
-                newUrl = _u(ctx.serverUrl, src.TranscodingUrl)
+                newUrl = CoreUrl._u(ctx.serverUrl, src.TranscodingUrl)
                 includeTicks = true
                 lastUsedTranscoding = true
                 lastUsedDirectStream = false
@@ -2150,7 +2440,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                 var policyTicks = (policyTranscodeUseHls && policyTranscodeHlsColdStart) ? 0 : ((ctx.startMs > 0) ? Math.floor(ctx.startMs * 10000) : 0)
                 if (policyTranscodeUseHls) {
                     var fallbackPolicyAudioCodec = _policyTranscodeAudioCodecHint(ctx, src, effectiveAudioStreamIndex, true); var fallbackPolicyAllowAudioCopy = _policyTranscodeAllowAudioCopy(ctx, src, effectiveAudioStreamIndex, true)
-                    newUrl = buildHlsUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
+                    newUrl = CoreUrl.buildHlsUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
                         audioStreamIndex: effectiveAudioStreamIndex,
                         subtitleStreamIndex: (!ctx.useLocalSubs && typeof ctx.selectedSubtitleStream === "number" && ctx.selectedSubtitleStream >= 0) ? ctx.selectedSubtitleStream : null,
                         subtitleMethod: subMethodWanted || null, mediaSourceId: mediaSourceId,
@@ -2159,22 +2449,24 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                         segmentContainer: "ts", transcodeReasons: "VideoCodecNotSupported",
                         requireAvc: ((policyTranscodeVideoCodec || "h264") === "h264") ? true : undefined, minSegments: 1,
                         breakOnNonKeyFrames: true, h264Profile: ((policyTranscodeVideoCodec || "h264") === "h264") ? "high,main,baseline,constrainedbaseline" : null,
-                        h264Level: ((policyTranscodeVideoCodec || "h264") === "h264") ? fullTranscodeH264Level : null, transcodingMaxAudioChannels: null,
-                        audioBitrate: null, videoBitrate: fullTranscodeVideoBitrate,
+                        h264Level: ((policyTranscodeVideoCodec || "h264") === "h264") ? fullTranscodeH264Level : null,
+                        transcodingMaxAudioChannels: stereoDownmixAudio ? audioOutputPlan.channels : null,
+                        audioBitrate: stereoDownmixAudio ? audioOutputPlan.bitrate : null, videoBitrate: fullTranscodeVideoBitrate,
                         maxWidth: fullTranscodeDims.width, maxHeight: fullTranscodeDims.height,
                         maxBitrate: REDEFIN_MAX_STREAMING_BITRATE,
                         allowAudioStreamCopy: fallbackPolicyAllowAudioCopy, allowVideoStreamCopy: false,
                         enableAutoStreamCopy: fallbackPolicyAllowAudioCopy, enableDirectStream: false
                     })
                 } else {
-                    var fallbackProgressiveAudioPlan = _safeFullTranscodeAudioPlan( src,
-                        effectiveAudioStreamIndex, _policyTranscodeAudioCodecHint(ctx, src, effectiveAudioStreamIndex, false),
-                        _policyTranscodeAllowAudioCopy(ctx, src, effectiveAudioStreamIndex, false) )
-                    newUrl = buildHighQualityProgressiveTranscodeUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
+                    var fallbackProgressiveAudioPlan = _audioOutputTranscodePlan( ctx, src, effectiveAudioStreamIndex,
+                        _safeFullTranscodeAudioPlan( src,
+                            effectiveAudioStreamIndex, _policyTranscodeAudioCodecHint(ctx, src, effectiveAudioStreamIndex, false),
+                            _policyTranscodeAllowAudioCopy(ctx, src, effectiveAudioStreamIndex, false) ) )
+                    newUrl = CoreUrl.buildHighQualityProgressiveTranscodeUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
                         audioStreamIndex: effectiveAudioStreamIndex,
                         subtitleStreamIndex: (!ctx.useLocalSubs && typeof ctx.selectedSubtitleStream === "number" && ctx.selectedSubtitleStream >= 0) ? ctx.selectedSubtitleStream : null,
                         subtitleMethod: subMethodWanted, mediaSourceId: mediaSourceId,
-                        container: _decidePreferredContainerWithSrc(ctx, src) || "mkv", playSessionId: playSessionId || "",
+                        container: CoreUrl._decidePreferredContainerWithSrc(ctx, src) || "mkv", playSessionId: playSessionId || "",
                         startTimeTicks: policyTicks, videoCodec: policyTranscodeVideoCodec || "h264",
                         audioCodec: fallbackProgressiveAudioPlan.codec,
                         forceNoSubtitle: !(typeof ctx.selectedSubtitleStream === "number" && ctx.selectedSubtitleStream >= 0),
@@ -2195,38 +2487,38 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                 lastUsedTranscoding = true
                 lastUsedDirectStream = false
                 isServerRemux = false
-            } else if (forceTrueHd51AudioTranscode && !mustHls) {
-                trueHd51AudioOnlyTranscodeActive = true
-                trueHd51Ticks = (ctx.startMs > 0) ? Math.floor(ctx.startMs * 10000) : 0
+            } else if (audioOnlyTranscodeNeeded && !mustHls) {
+                audioOnlyTranscodeActive = true
+                audioOnlyTicks = (ctx.startMs > 0) ? Math.floor(ctx.startMs * 10000) : 0
                 var fallbackTrueHd51SubIndex = serverExternalTextSubtitle ? -1
                                                : (carrySafeFrenchForcedSubtitle ? safeFrenchForcedSubIndex
                                                   : ((!ctx.useLocalSubs && typeof ctx.selectedSubtitleStream === "number" && ctx.selectedSubtitleStream >= 0)
                                                      ? ctx.selectedSubtitleStream : -1))
-                newUrl = buildServerSeekProgressiveUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
+                newUrl = CoreUrl.buildServerSeekProgressiveUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
                     audioStreamIndex: effectiveAudioStreamIndex, subtitleStreamIndex: fallbackTrueHd51SubIndex >= 0 ? fallbackTrueHd51SubIndex : null,
                     subtitleMethod: fallbackTrueHd51SubIndex >= 0 ? (carrySafeFrenchForcedSubtitle ? "Embed" : (subMethodWanted || "Embed")) : null,
                     forceNoSubtitle: fallbackTrueHd51SubIndex < 0, mediaSourceId: mediaSourceId,
-                    playSessionId: playSessionId || "", container: _decidePreferredContainerWithSrc(ctx, src) || "mkv",
-                    startTimeTicks: trueHd51Ticks, videoCodec: _selectedVideoCodec(src),
-                    audioCodec: "ac3", allowAudioStreamCopy: false,
+                    playSessionId: playSessionId || "", container: CoreUrl._decidePreferredContainerWithSrc(ctx, src) || "mkv",
+                    startTimeTicks: audioOnlyTicks, videoCodec: _selectedVideoCodec(src),
+                    audioCodec: stereoDownmixAudio ? AudioOutput.STEREO_CODEC : (audioOnlyTranscodeCodec || "ac3"), allowAudioStreamCopy: false,
                     allowVideoStreamCopy: true, enableAutoStreamCopy: false,
                     enableDirectStream: false, enableTranscoding: true,
                     copyTimestamps: false, context: "Streaming",
                     transcodeReasons: "AudioCodecNotSupported"
                 })
-                includeTicks = !!(trueHd51Ticks > 0)
+                includeTicks = !!(audioOnlyTicks > 0)
                 lastUsedTranscoding = true
                 lastUsedDirectStream = false
                 isServerRemux = false
             } else if (mustHls) {
 
                 var fallbackHlsTicks = (ctx.startMs > 0) ? Math.floor(ctx.startMs * 10000) : 0
-                newUrl = buildHlsUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
+                newUrl = CoreUrl.buildHlsUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
                     audioStreamIndex: effectiveAudioStreamIndex,
                     subtitleStreamIndex: (!ctx.useLocalSubs && typeof ctx.selectedSubtitleStream === "number" && ctx.selectedSubtitleStream >= 0) ? ctx.selectedSubtitleStream : null,
                     subtitleMethod: subMethodWanted || "Hls", mediaSourceId: mediaSourceId,
                     playSessionId: playSessionId, startTimeTicks: fallbackHlsTicks,
-                    audioCodec: "ac3,eac3,aac,mp3", maxBitrate: REDEFIN_MAX_STREAMING_BITRATE,
+                    audioCodec: stereoDownmixAudio ? AudioOutput.STEREO_CODEC : "ac3,eac3,aac,mp3", maxBitrate: REDEFIN_MAX_STREAMING_BITRATE,
                     allowAudioStreamCopy: true, allowVideoStreamCopy: true,
                     enableAutoStreamCopy: true, enableDirectStream: true
                 })
@@ -2235,7 +2527,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                 lastUsedDirectStream = false
             } else if (!wantsServerSelect && !forceServerRemux && !forceTranscodeByPolicy && !fragileSeekRemux) {
 
-                newUrl = getVideoStreamUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
+                newUrl = CoreUrl.getVideoStreamUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
                     mediaSourceId: mediaSourceId, container: _containerOrExt(src)
                 })
                 includeTicks = false
@@ -2245,8 +2537,8 @@ function negotiatePlayback(ctx, onSuccess, onError) {
             } else {
                 remuxAudioCodecLock = _remuxAudioCodecLock(ctx, src, effectiveAudioStreamIndex, true, false, false)
 
-                var fbCont = src ? (_decidePreferredContainerWithSrc(ctx, src) || _containerOrExt(src) || "mkv") : "mkv"
-                newUrl = buildProgressiveUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
+                var fbCont = src ? (CoreUrl._decidePreferredContainerWithSrc(ctx, src) || _containerOrExt(src) || "mkv") : "mkv"
+                newUrl = CoreUrl.buildProgressiveUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, {
                     audioStreamIndex: effectiveAudioStreamIndex,
                     subtitleStreamIndex: (serverExternalTextSubtitle ? null : (carrySafeFrenchForcedSubtitle ? safeFrenchForcedSubIndex : ((!ctx.useLocalSubs && typeof ctx.selectedSubtitleStream === "number" && ctx.selectedSubtitleStream >= 0) ? ctx.selectedSubtitleStream : null))),
                     subtitleMethod: serverExternalTextSubtitle ? null : (carrySafeFrenchForcedSubtitle ? "Embed" : subMethodWanted), mediaSourceId: mediaSourceId,
@@ -2264,12 +2556,27 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                 isServerRemux = true
             }
         }
-        var forcedContainer = mp4ContainerTimelineRisk ? "mkv" : (ctx.preferredContainer || _decidePreferredContainerWithSrc(ctx, src)); var looksLikeHls = (newUrl.indexOf(".m3u8") >= 0) || (newUrl.indexOf("/hls") >= 0)
+        var forcedContainer = mp4ContainerTimelineRisk ? "mkv" : (ctx.preferredContainer || CoreUrl._decidePreferredContainerWithSrc(ctx, src)); var looksLikeHls = (newUrl.indexOf(".m3u8") >= 0) || (newUrl.indexOf("/hls") >= 0)
         var policyTranscode = !!(forceTranscodeByPolicy && lastUsedTranscoding); var dvdSubFileTranscodeActive = !!(forceDvdSubFileTranscode && lastUsedTranscoding && !looksLikeHls)
         var interlacedTsTranscodeActive = !!(forceInterlacedTsTranscode && lastUsedTranscoding && !looksLikeHls)
+        // Décision finale de la réinjection du sous-titre forcé : le chemin
+        // réellement retenu est connu. Une URL HLS ne peut pas porter de texte
+        // embarqué, et une TranscodingUrl Jellyfin conservée n'est jamais
+        // réécrite par _forceQuery : l'injection n'y serait pas demandée.
+        if (carrySafeFrenchForcedSubtitle) {
+            forcedSubtitleStreamFlags.hlsUrl = looksLikeHls
+            forcedSubtitleStreamFlags.preserveTranscodingUrl = preserveJellyfinTranscodingUrl
+            if (!ForcedSubs.isEmbeddableServerStream(forcedSubtitleStreamFlags)) {
+                carrySafeFrenchForcedSubtitle = false
+                autoSubtitleEmbedIndex = -1
+                subMethodWanted = subMethodBeforeForcedCarry
+                forcedSubtitleCarryReason = looksLikeHls ? "hlsStream" : "jellyfinTranscodingUrl"
+            }
+        }
         var policyTranscodeAudioCodecLock = policyTranscode ? _policyTranscodeAudioCodecHint(ctx, src, effectiveAudioStreamIndex, looksLikeHls) : null
         var policyTranscodeAllowAudioCopy = policyTranscode ? _policyTranscodeAllowAudioCopy(ctx, src, effectiveAudioStreamIndex, looksLikeHls) : true; var policyTranscodeAudioPlan = policyTranscode
-                                     ? _safeFullTranscodeAudioPlan(src, effectiveAudioStreamIndex, policyTranscodeAudioCodecLock, policyTranscodeAllowAudioCopy) : null
+                                     ? _audioOutputTranscodePlan(ctx, src, effectiveAudioStreamIndex,
+                                         _safeFullTranscodeAudioPlan(src, effectiveAudioStreamIndex, policyTranscodeAudioCodecLock, policyTranscodeAllowAudioCopy)) : null
         if (policyTranscodeAudioPlan) {
             policyTranscodeAudioCodecLock = policyTranscodeAudioPlan.codec
             policyTranscodeAllowAudioCopy = policyTranscodeAudioPlan.allowCopy
@@ -2281,33 +2588,33 @@ function negotiatePlayback(ctx, onSuccess, onError) {
         var ctxForQuery = {
             serverUrl: ctx.serverUrl, accessToken: ctx.accessToken,
             itemId: ctx.itemId,
-            selectedAudioStream: (isServerRemux || policyTranscode || dvdSubFileTranscodeActive || interlacedTsTranscodeActive || trueHd51AudioOnlyTranscodeActive) ? effectiveAudioStreamIndex : -1,
+            selectedAudioStream: (isServerRemux || policyTranscode || dvdSubFileTranscodeActive || interlacedTsTranscodeActive || audioOnlyTranscodeActive) ? effectiveAudioStreamIndex : -1,
             selectedSubtitleStream: interlacedTsTranscodeActive ? tsSubtitleIndex
                                     : (dvdSubFileTranscodeActive ? dvdSubTranscodeSubtitleIndex
                                        : (serverExternalTextSubtitle ? -1 : (carrySafeFrenchForcedSubtitle ? safeFrenchForcedSubIndex : ctx.selectedSubtitleStream))),
             useLocalSubs: ctx.useLocalSubs || (forceLocalOverlay && !looksLikeHls), startMs: ctx.startMs,
-            playSessionId: (isServerRemux || policyTranscode || dvdSubFileTranscodeActive || interlacedTsTranscodeActive || trueHd51AudioOnlyTranscodeActive || looksLikeHls || ctx.forceServerSeek) ? playSessionId : "",
-            preferredContainer: (dvdSubFileTranscodeActive || interlacedTsTranscodeActive || trueHd51AudioOnlyTranscodeActive) ? "mkv" : ((isServerRemux || (policyTranscode && !looksLikeHls)) ? (forcedContainer || "mkv") : null),
+            playSessionId: (isServerRemux || policyTranscode || dvdSubFileTranscodeActive || interlacedTsTranscodeActive || audioOnlyTranscodeActive || looksLikeHls || ctx.forceServerSeek) ? playSessionId : "",
+            preferredContainer: (dvdSubFileTranscodeActive || interlacedTsTranscodeActive || audioOnlyTranscodeActive) ? "mkv" : ((isServerRemux || (policyTranscode && !looksLikeHls)) ? (forcedContainer || "mkv") : null),
             forceServerSeek: !!ctx.forceServerSeek, forceServerRemux: !!isServerRemux,
             forcePolicyTranscode: !!policyTranscode,
             playbackInfoStartTimeTicks: playbackInfoStartTicks,
             preserveJellyfinTranscodingUrl: !!preserveJellyfinTranscodingUrl,
-            forceServerTranscode: !!(dvdSubFileTranscodeActive || interlacedTsTranscodeActive || trueHd51AudioOnlyTranscodeActive || policyTranscode || (lastUsedTranscoding && !looksLikeHls)),
+            forceServerTranscode: !!(dvdSubFileTranscodeActive || interlacedTsTranscodeActive || audioOnlyTranscodeActive || policyTranscode || (lastUsedTranscoding && !looksLikeHls)),
             lastUsedTranscoding: !!lastUsedTranscoding, audioCodecHint: interlacedTsTranscodeActive
                             ? "ac3" : (dvdSubFileTranscodeActive
-                               ? (dvdAudioCodec || null) : (trueHd51AudioOnlyTranscodeActive
-                                  ? "ac3"
+                               ? (dvdAudioCodec || null) : (audioOnlyTranscodeActive
+                                  ? (audioOnlyTranscodeCodec || "ac3")
                                   : (forceImageBurnIn ? (imageBurnAudioPlan && imageBurnAudioPlan.codec ? imageBurnAudioPlan.codec : "ac3") : (isServerRemux ? remuxAudioCodecLock : (policyTranscode ? policyTranscodeAudioCodecLock : null))))),
-            forceAudioCodecHint: trueHd51AudioOnlyTranscodeActive ? true : (interlacedTsTranscodeActive ? true : (dvdSubFileTranscodeActive ? !!dvdAudioCodec : (forceImageBurnIn ? !!(imageBurnAudioPlan && imageBurnAudioPlan.codec) : (!!remuxAudioCodecLock || !!policyTranscodeAudioCodecLock)))),
+            forceAudioCodecHint: audioOnlyTranscodeActive ? true : (interlacedTsTranscodeActive ? true : (dvdSubFileTranscodeActive ? !!dvdAudioCodec : (forceImageBurnIn ? !!(imageBurnAudioPlan && imageBurnAudioPlan.codec) : (!!remuxAudioCodecLock || !!policyTranscodeAudioCodecLock)))),
             allowRemuxAudioCodecLock: !!remuxAudioCodecLock,
-            videoCodecHint: interlacedTsTranscodeActive ? "h264" : (dvdSubFileTranscodeActive ? "h264" : (forceImageBurnIn ? "h264" : (policyTranscode ? (policyTranscodeVideoCodec || "h264") : ((isServerRemux || trueHd51AudioOnlyTranscodeActive) ? _selectedVideoCodec(src) : null)))),
+            videoCodecHint: interlacedTsTranscodeActive ? "h264" : (dvdSubFileTranscodeActive ? "h264" : (forceImageBurnIn ? "h264" : (policyTranscode ? (policyTranscodeVideoCodec || "h264") : ((isServerRemux || audioOnlyTranscodeActive) ? _selectedVideoCodec(src) : null)))),
             segmentContainer: (forceImageBurnIn || (policyTranscode && looksLikeHls)) ? "ts" : null, transcodeReasons: interlacedTsTranscodeActive
                               ? "VideoProfileNotSupported" : (dvdSubFileTranscodeActive
-                                 ? (dvdSubTranscodeSubtitleIndex >= 0 ? "SubtitleCodecNotSupported" : "ContainerNotSupported") : (trueHd51AudioOnlyTranscodeActive
+                                 ? (dvdSubTranscodeSubtitleIndex >= 0 ? "SubtitleCodecNotSupported" : "ContainerNotSupported") : (audioOnlyTranscodeActive
                                     ? "AudioCodecNotSupported" : (ctx.forceExplicitServerProgressiveSeek === true
                                        ? "ContainerNotSupported" : ((policyTranscode && looksLikeHls) ? "VideoCodecNotSupported" : null)))),
-            copyTimestamps: (dvdSubFileTranscodeActive || interlacedTsTranscodeActive || trueHd51AudioOnlyTranscodeActive) ? false : (ctx.forceExplicitServerProgressiveSeek === true ? true : undefined),
-            context: (dvdSubFileTranscodeActive || interlacedTsTranscodeActive || trueHd51AudioOnlyTranscodeActive || ctx.forceExplicitServerProgressiveSeek === true) ? "Streaming" : null,
+            copyTimestamps: (dvdSubFileTranscodeActive || interlacedTsTranscodeActive || audioOnlyTranscodeActive) ? false : (ctx.forceExplicitServerProgressiveSeek === true ? true : undefined),
+            context: (dvdSubFileTranscodeActive || interlacedTsTranscodeActive || audioOnlyTranscodeActive || ctx.forceExplicitServerProgressiveSeek === true) ? "Streaming" : null,
             forceExplicitServerProgressiveSeek: !!ctx.forceExplicitServerProgressiveSeek,
             requireAvc: (dvdSubFileTranscodeActive || interlacedTsTranscodeActive) ? true : ((policyTranscode && looksLikeHls && (policyTranscodeVideoCodec || "h264") === "h264") ? true : undefined),
             deInterlace: interlacedTsTranscodeActive ? true : undefined, requireNonAnamorphic: interlacedTsTranscodeActive ? true : undefined,
@@ -2319,17 +2626,17 @@ function negotiatePlayback(ctx, onSuccess, onError) {
             h264VideoBitDepth: null, h264RangeType: null,
             h264Deinterlace: undefined, transcodingMaxAudioChannels: interlacedTsTranscodeActive
                                          ? tsAudioChannels : (dvdSubFileTranscodeActive
-                                            ? (dvdAudioChannels || 8) : (trueHd51AudioOnlyTranscodeActive
-                                               ? trueHd51AudioChannels : (forceImageBurnIn && imageBurnAudioPlan
+                                            ? (dvdAudioChannels || _defaultTranscodingMaxAudioChannels(ctx)) : (audioOnlyTranscodeActive
+                                               ? audioOnlyTranscodeChannels : (forceImageBurnIn && imageBurnAudioPlan
                                                   ? imageBurnAudioPlan.channels : (policyTranscodeAudioPlan ? policyTranscodeAudioPlan.channels : null)))),
             audioChannels: interlacedTsTranscodeActive ? tsAudioChannels
                            : (dvdSubFileTranscodeActive ? dvdAudioChannels
-                              : (trueHd51AudioOnlyTranscodeActive ? trueHd51AudioChannels
+                              : (audioOnlyTranscodeActive ? audioOnlyTranscodeChannels
                                  : (forceImageBurnIn && imageBurnAudioPlan ? imageBurnAudioPlan.channels
                                     : (policyTranscodeAudioPlan ? policyTranscodeAudioPlan.channels : null)))), audioBitrate: interlacedTsTranscodeActive
                           ? tsAudioBitrate : (dvdSubFileTranscodeActive
-                             ? dvdAudioBitrate : (trueHd51AudioOnlyTranscodeActive
-                                ? trueHd51AudioBitrate : (forceImageBurnIn && imageBurnAudioPlan
+                             ? dvdAudioBitrate : (audioOnlyTranscodeActive
+                                ? audioOnlyTranscodeBitrate : (forceImageBurnIn && imageBurnAudioPlan
                                    ? imageBurnAudioPlan.bitrate : (policyTranscodeAudioPlan ? policyTranscodeAudioPlan.bitrate : null)))),
             videoBitrate: requestedManualVideoBitrate > 0 && lastUsedTranscoding
                         ? requestedManualVideoBitrate
@@ -2345,20 +2652,20 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                      : (dvdSubFileTranscodeActive && dvdDims ? dvdDims.height
                         : ((forceImageBurnIn || policyTranscode) ? fullTranscodeDims.height : null)),
             maxFramerate: interlacedTsTranscodeActive ? tsMaxFramerate : null,
-            maxStreamingBitrate: (dvdSubFileTranscodeActive || interlacedTsTranscodeActive || trueHd51AudioOnlyTranscodeActive || forceImageBurnIn || policyTranscode) ? REDEFIN_MAX_STREAMING_BITRATE : null,
-            allowAudioStreamCopy: trueHd51AudioOnlyTranscodeActive ? false
+            maxStreamingBitrate: (dvdSubFileTranscodeActive || interlacedTsTranscodeActive || audioOnlyTranscodeActive || forceImageBurnIn || policyTranscode) ? REDEFIN_MAX_STREAMING_BITRATE : null,
+            allowAudioStreamCopy: audioOnlyTranscodeActive ? false
                                   : (interlacedTsTranscodeActive ? false
                                      : (dvdSubFileTranscodeActive ? dvdAudioAllowCopy
                                         : (forceImageBurnIn && imageBurnAudioPlan ? imageBurnAudioPlan.allowCopy
                                            : (policyTranscode ? policyTranscodeAllowAudioCopy : true)))),
-            allowVideoStreamCopy: trueHd51AudioOnlyTranscodeActive ? true : ((dvdSubFileTranscodeActive || interlacedTsTranscodeActive || forceImageBurnIn || policyTranscode) ? false : true),
-            enableAutoStreamCopy: trueHd51AudioOnlyTranscodeActive ? false
+            allowVideoStreamCopy: audioOnlyTranscodeActive ? true : ((dvdSubFileTranscodeActive || interlacedTsTranscodeActive || forceImageBurnIn || policyTranscode) ? false : true),
+            enableAutoStreamCopy: audioOnlyTranscodeActive ? false
                                   : (interlacedTsTranscodeActive ? false
                                      : (dvdSubFileTranscodeActive ? dvdAudioAllowCopy
                                         : (forceImageBurnIn && imageBurnAudioPlan ? imageBurnAudioPlan.allowCopy
                                            : (policyTranscode ? policyTranscodeAllowAudioCopy : true)))),
-            enableDirectStream: trueHd51AudioOnlyTranscodeActive ? false : ((dvdSubFileTranscodeActive || interlacedTsTranscodeActive) ? false : (policyTranscode ? false : ((!looksLikeHls && isServerRemux) ? false : ((forceImageBurnIn || imageSubtitleFullRemux) ? false : true)))),
-            enableTranscoding: trueHd51AudioOnlyTranscodeActive ? true : ((dvdSubFileTranscodeActive || interlacedTsTranscodeActive) ? true : (policyTranscode ? true : ((!looksLikeHls && isServerRemux) ? true : (imageSubtitleFullRemux ? true : ((!looksLikeHls && !forceImageBurnIn) ? false : true)))))
+            enableDirectStream: audioOnlyTranscodeActive ? false : ((dvdSubFileTranscodeActive || interlacedTsTranscodeActive) ? false : (policyTranscode ? false : ((!looksLikeHls && isServerRemux) ? false : ((forceImageBurnIn || imageSubtitleFullRemux) ? false : true)))),
+            enableTranscoding: audioOnlyTranscodeActive ? true : ((dvdSubFileTranscodeActive || interlacedTsTranscodeActive) ? true : (policyTranscode ? true : ((!looksLikeHls && isServerRemux) ? true : (imageSubtitleFullRemux ? true : ((!looksLikeHls && !forceImageBurnIn) ? false : true)))))
         }
         var finalSubMethodForQuery = interlacedTsTranscodeActive ? (tsSubtitleIndex >= 0 ? tsSubtitleMethod : null)
                                    : (dvdSubFileTranscodeActive ? dvdSubTranscodeSubtitleMethod
@@ -2366,10 +2673,47 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                                       : (carrySafeFrenchForcedSubtitle ? "Embed"
                                          : (forceImageBurnIn ? "Encode"
                                                : (looksLikeHls ? (subMethodWanted || "Hls") : subMethodWanted)))))
+        // Verrou final du downmix stéréo, quelle que soit la branche retenue :
+        // aucune copie audio, cible AAC-LC 2.0 et plafond de canaux explicites
+        // dans l'URL réellement ouverte par QtMultimedia. La vidéo garde la
+        // décision de sa branche (copie si elle est compatible).
+        // Le choix 2.0 reste explicite sur tous les chemins serveur.
+        if (stereoDownmixAudio) {
+            ctxForQuery.audioOutputStereoDownmix = true
+            ctxForQuery.audioCodecHint = audioOutputPlan.codec
+            ctxForQuery.forceAudioCodecHint = true
+            ctxForQuery.allowRemuxAudioCodecLock = false
+            ctxForQuery.allowAudioStreamCopy = false
+            ctxForQuery.enableAutoStreamCopy = false
+            ctxForQuery.transcodingMaxAudioChannels = audioOutputPlan.channels
+            ctxForQuery.audioChannels = audioOutputPlan.channels
+            ctxForQuery.audioBitrate = audioOutputPlan.bitrate
+            ctxForQuery.forceServerTranscode = true
+        }
 
-        newUrl = _forceQuery( newUrl,
-            ctxForQuery, finalSubMethodForQuery,
-            includeTicks )
+        // Pour le downmix stéréo Devialet en HLS, PlaybackInfo vient déjà de faire
+        // construire par Jellyfin une TranscodingUrl complète. Ne jamais la
+        // réécrire ensuite : les paramètres HLS (Tag, SegmentContainer, profil,
+        // segmentation, PlaySessionId...) forment ensemble le contrat du job
+        // généré par StreamBuilder. Les anciens correctifs rajoutaient notamment
+        // AudioChannels/StartTimeTicks/EnableAutoStreamCopy après coup, ce qui
+        // pouvait faire ouvrir à QtMultimedia une variante différente du job
+        // préparé et aboutir immédiatement à MediaError.
+        var keepStereoServerHlsVerbatim = !!(stereoDownmixAudio &&
+            preserveJellyfinTranscodingUrl && looksLikeHls)
+        if (keepStereoServerHlsVerbatim) {
+            // Le Player ne sait pas fournir un header d'authentification à la source
+            // média. Hormis la canonicalisation de la clé API, garder STRICTEMENT le
+            // job HLS généré par Jellyfin. Le codec, le bitrate, la segmentation, le
+            // Tag et les paramètres de session ont déjà été décidés par StreamBuilder
+            // à partir du DeviceProfile du POST PlaybackInfo. Les modifier ici peut
+            // désynchroniser master.m3u8 et le job enfant et provoquer MediaError.
+            newUrl = CoreUrl._canonicalizePlaybackAuthOnly(newUrl, ctx.accessToken)
+        } else {
+            newUrl = CoreUrl._forceQuery( newUrl,
+                ctxForQuery, finalSubMethodForQuery,
+                includeTicks )
+        }
 
         // Une URL média complète peut dépasser 512 caractères. Elle doit être
         // validée comme ressource de lecture, pas comme simple URL serveur.
@@ -2379,7 +2723,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
             if (onError) onError("invalid_playback_url")
             return
         }
-        if (!validatePlaybackUrlStrict(newUrl, ctx.serverUrl)) {
+        if (!CoreUrl._transportValidatePlaybackUrlStrict(newUrl, ctx.serverUrl)) {
             delete _inFlightWaiters[key]
 
             if (onError) onError("invalid_playback_url")
@@ -2400,7 +2744,12 @@ function negotiatePlayback(ctx, onSuccess, onError) {
 
         }
 
-        if (looksLikeHls && ctx.forceServerSeek === true && ctx.startMs > 0 && !includeTicks) {
+        // Exception Devialet audio-only : le seek réseau redonne un manifeste HLS
+        // Jellyfin parfaitement lisible tant qu'on ne le modifie pas. On autorise
+        // donc ce manifeste sans StartTimeTicks et on restaure la cible localement
+        // après Loaded/Buffered. Les autres HLS conservent la garde historique.
+        if (looksLikeHls && ctx.forceServerSeek === true && ctx.startMs > 0 && !includeTicks &&
+                !stereoHlsClientSeekAfterOpen) {
 
             delete _inFlightWaiters[key]
 
@@ -2410,8 +2759,8 @@ function negotiatePlayback(ctx, onSuccess, onError) {
         var externalSub = null
         if ((forceLocalOverlay || serverExternalTextSubtitle) && !looksLikeHls && mediaSourceId && typeof ctx.selectedSubtitleStream === "number") {
             externalSub = {
-                urlSrt: _subtitleResultUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, mediaSourceId, ctx.selectedSubtitleStream, "srt"),
-                urlVtt: _subtitleResultUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, mediaSourceId, ctx.selectedSubtitleStream, "vtt"),
+                urlSrt: CoreUrl._subtitleResultUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, mediaSourceId, ctx.selectedSubtitleStream, "srt"),
+                urlVtt: CoreUrl._subtitleResultUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, mediaSourceId, ctx.selectedSubtitleStream, "vtt"),
                 index:  ctx.selectedSubtitleStream, serverExternal: !!serverExternalTextSubtitle
             }
 
@@ -2444,6 +2793,23 @@ function negotiatePlayback(ctx, onSuccess, onError) {
             effectiveSubtitleMode = "directplay"
             effectiveSubtitleReason = "safeFrenchForcedDefault"
         }
+        // En DirectPlay statique, Jellyfin ne porte pas forcément les index de
+        // pistes dans l'URL : QtMultimedia choisit alors directement dans le
+        // conteneur. On expose ce choix natif à l'UI uniquement, sans modifier
+        // la source ni déclencher une nouvelle négociation.
+        var pureStaticDirectPlay = !isServerRemux && !isHls &&
+                !lastUsedTranscoding && !lastUsedDirectStream
+        if (pureStaticDirectPlay) {
+            if (effectiveSubtitleStreamIndex < 0 && ctx.useLocalSubs !== true &&
+                    !forceLocalOverlay && !serverExternalTextSubtitle) {
+                var nativeDpSubtitleIndex = _nativeDirectPlaySubtitleIndex(src)
+                if (nativeDpSubtitleIndex >= 0) {
+                    effectiveSubtitleStreamIndex = nativeDpSubtitleIndex
+                    effectiveSubtitleMode = "directplay"
+                    effectiveSubtitleReason = "nativeDirectPlayFirstInternal"
+                }
+            }
+        }
         // Un forceServerSeek doit toujours prendre le pas sur le cold-start local.
         // Sinon un HLS correctement reconstruit avec StartTimeTicks serait encore
         // marqué pour un seek local après ouverture, ce qui annulerait le bénéfice
@@ -2451,6 +2817,10 @@ function negotiatePlayback(ctx, onSuccess, onError) {
         var policyHlsColdLocalSeek = !!(policyTranscode && isHls && policyTranscodeHlsColdStart &&
                                         ctx.startMs > 0 && ctx.forceServerSeek !== true)
         var hasServerTimeBase = !!(includeTicks && ctx.startMs > 0); var serverTimed = hasServerTimeBase && !policyHlsColdLocalSeek && (isHls || lastUsedDirectStream || lastUsedTranscoding || ctx.forceServerSeek === true || isServerRemux)
+        // Pour le DirectStream audio-only HLS Devialet, le manifeste est volontairement
+        // non server-timed : QtMultimedia ouvre le job Jellyfin verbatim puis applique
+        // la cible en local. C'est le seul chemin HLS où cette stratégie est activée.
+        if (stereoHlsClientSeekAfterOpen) serverTimed = false
         var initialLocalSeek = policyHlsColdLocalSeek ? Math.floor(ctx.startMs) : (serverTimed ? 0 : ((ctx.startMs > 0) ? Math.floor(ctx.startMs) : -1))
         var result = {
             url: newUrl, playSessionId: playSessionId,
@@ -2488,12 +2858,15 @@ function negotiatePlayback(ctx, onSuccess, onError) {
             dvdSubMaxHeight: dvdDims ? dvdDims.height : 0, policyTranscode: !!policyTranscode,
             policyTranscodeUseHls: !!(policyTranscode && looksLikeHls), policyTranscodeHlsColdStart: !!(policyTranscode && looksLikeHls && policyTranscodeHlsColdStart),
             policyTranscodeVideoCodec: policyTranscodeVideoCodec || "", policyTranscodeAudioCodec: policyTranscodeAudioCodecLock || "",
-            policyTranscodeAudioCopy: policyTranscodeAllowAudioCopy, trueHd51AudioOnlyTranscode: !!trueHd51AudioOnlyTranscodeActive,
-            trueHd51AudioStreamIndex: trueHd51AudioOnlyTranscodeActive ? effectiveAudioStreamIndex : -1,
-            trueHd51TargetAudioCodec: trueHd51AudioOnlyTranscodeActive ? "ac3" : "",
-            trueHd51TargetAudioChannels: trueHd51AudioOnlyTranscodeActive ? trueHd51AudioChannels : 0,
-            trueHd51TargetAudioBitrate: trueHd51AudioOnlyTranscodeActive ? trueHd51AudioBitrate : 0,
-            finalUrlKind: isHls ? "hls" : ((dvdSubFileTranscodeActive || interlacedTsTranscodeActive || trueHd51AudioOnlyTranscodeActive || policyTranscode) ? "http-transcode" : (isServerRemux ? "http-remux" : "http-dp")),
+            policyTranscodeAudioCopy: policyTranscodeAllowAudioCopy, trueHd51AudioOnlyTranscode: !!(audioOnlyTranscodeActive && forceTrueHd51AudioTranscode),
+            audioOnlyTranscode: !!audioOnlyTranscodeActive,
+            trueHd51AudioStreamIndex: (audioOnlyTranscodeActive && forceTrueHd51AudioTranscode) ? effectiveAudioStreamIndex : -1,
+            trueHd51TargetAudioCodec: audioOnlyTranscodeActive ? (audioOnlyTranscodeCodec || "ac3") : "",
+            trueHd51TargetAudioChannels: audioOnlyTranscodeActive ? audioOnlyTranscodeChannels : 0,
+            trueHd51TargetAudioBitrate: audioOnlyTranscodeActive ? audioOnlyTranscodeBitrate : 0,
+            audioOutputMode: audioOutputPlan.mode, audioOutputStereoDownmix: !!stereoDownmixAudio,
+            audioOutputSourceChannels: audioOutputPlan.sourceChannels, audioOutputStreamIndex: audioOutputStreamIndex,
+            finalUrlKind: isHls ? "hls" : ((dvdSubFileTranscodeActive || interlacedTsTranscodeActive || audioOnlyTranscodeActive || policyTranscode) ? "http-transcode" : (isServerRemux ? "http-remux" : "http-dp")),
             sourceVideoCodec: _sourceVideoCodec(src), sourceContainer: _s(src && src.Container).toLowerCase(),
             sourceVideoBitrate: _sourceVideoBitrate(src),
             sourceVideoIsHevcMain10: _isHevcMain10Source(src),
@@ -2508,7 +2881,6 @@ function negotiatePlayback(ctx, onSuccess, onError) {
         _lastNegResultKey = key
         _lastNegResultTs = (new Date()).getTime()
         _lastNegResult = _cloneResult(result)
-
 
         onSuccess && onSuccess(result)
         _flushInFlightWaiters(key, result)

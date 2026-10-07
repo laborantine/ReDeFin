@@ -3,7 +3,7 @@
 .pragma library
 
 // ⚙️ Configuration de base (valeurs par défaut)
-var APP_VERSION = "0.9.6";
+var APP_VERSION = "0.9.8";
 var DEVICE_ID_PREFIX = "rdf-";
 var LEGACY_SHARED_DEVICE_ID = "redefin-freebox";
 

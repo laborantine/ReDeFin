@@ -7,11 +7,17 @@
  */
 
 var DEVIALET_POLICY_ID = "devialet"
-var DEVIALET_POLICY_REVISION = 8
+var DEVIALET_POLICY_REVISION = 10
 
 // Devialet : AV1 doit sortir en H.264. Le chemin AV1 -> HEVC/H.265 est moins fiable
 // avec QtMultimedia/Freebox et peut provoquer Loading/Stalled selon les médias.
 var DEVIALET_TRANSCODE_VIDEO_CODEC = "h264"
+// Le TranscodingProfile doit aussi annoncer HEVC afin que Jellyfin puisse
+// conserver une vidéo HEVC compatible en stream-copy lorsqu'il ne transcode
+// que l'audio (downmix 5.1 -> AAC-LC 2.0). AV1/VVC restent volontairement
+// absents : lorsqu'ils sont la source, Jellyfin retombe sur le premier codec
+// de sortie, H.264, et la policy force de toute façon le transcodage vidéo.
+var DEVIALET_TRANSCODE_VIDEO_PROFILE_CODECS = "h264,hevc"
 var DEVIALET_TRANSCODE_CONTAINER_HLS = "ts"
 var DEVIALET_TRANSCODE_CONTAINER_HTTP = "mkv"
 
@@ -181,14 +187,15 @@ function _devialetProfile(mode) {
     }
 
     if (mode === "hls" || mode === "auto") {
-        // AV1 et codecs vidéo impossibles : HLS/TS H.264, pas HEVC.
+        // Profil HLS/TS : H.264 reste la cible des vrais transcodages vidéo, mais HEVC
+        // est aussi annoncé pour permettre le stream-copy lors d’un transcodage audio seul.
         dp.TranscodingProfiles = [
-            { Container: DEVIALET_TRANSCODE_CONTAINER_HLS, Type: "Video", Protocol: "hls", VideoCodec: DEVIALET_TRANSCODE_VIDEO_CODEC, AudioCodec: audioHlsSafe }
+            { Container: DEVIALET_TRANSCODE_CONTAINER_HLS, Type: "Video", Protocol: "hls", VideoCodec: DEVIALET_TRANSCODE_VIDEO_PROFILE_CODECS, AudioCodec: audioHlsSafe }
         ]
     } else {
         // Fallback HTTP pour les cas hors HLS.
         dp.TranscodingProfiles = [
-            { Container: DEVIALET_TRANSCODE_CONTAINER_HTTP, Type: "Video", Protocol: "http", VideoCodec: DEVIALET_TRANSCODE_VIDEO_CODEC, AudioCodec: audioAll }
+            { Container: DEVIALET_TRANSCODE_CONTAINER_HTTP, Type: "Video", Protocol: "http", VideoCodec: DEVIALET_TRANSCODE_VIDEO_PROFILE_CODECS, AudioCodec: audioAll }
         ]
     }
 
@@ -219,21 +226,29 @@ function _devialetPreferredContainer(ctx, src) {
 }
 
 function _devialetForceTranscode(ctx, src) {
-    if (!src) return false
+    if (!src) {  return false }
 
     // Ne force plus un vrai transcodage vidéo uniquement parce que l'audio est exotique.
     // Si le DeviceProfile refuse l'audio en DirectPlay, Jellyfin/Core peut remuxer ou
     // transcoder l'audio sans envoyer inutilement la vidéo au transcodeur.
-    return _videoNeedsRealTranscode(src)
+    var force = _videoNeedsRealTranscode(src)
+    return force
 }
 
 function _needsStrictPlaybackInfo(ctx) {
     var src = _ctxMediaSource(ctx)
 
-    // Le Core peut ne pas encore avoir injecté la MediaSource au moment du clone ctx.
-    // Dans ce cas, on garde le comportement strict historique pour éviter que Jellyfin
-    // prépare une session AV1 en copy vidéo avant l'analyse complète.
-    if (!src) return true
+    // Ne jamais assimiler « MediaSource pas encore injectée » à « vidéo incompatible ».
+    // PlaybackInfo reçoit déjà le DeviceProfile Devialet, qui n'annonce ni AV1 ni VVC
+    // en DirectPlay/DirectStream. Après la réponse serveur, le Core récupère la vraie
+    // MediaSource et réévalue shouldForceTranscode()/requiresHardVideoTranscode avec
+    // le codec, la profondeur et les dimensions réels.
+    //
+    // Forcer H.264 ici avant de connaître la source transforme à tort un HEVC Main10
+    // 1080p compatible Devialet en transcodage vidéo complet, notamment lors d'un
+    // downmix AAC-LC 2.0. Source inconnue => laisser Jellyfin/Core décider, sans
+    // désactiver le stream-copy vidéo par anticipation.
+    if (!src) return false
 
     return _videoNeedsRealTranscode(src)
 }
@@ -251,6 +266,34 @@ function _cloneCtxForDevialet(ctx) {
     }
 
     var strictVideoTranscode = _needsStrictPlaybackInfo(out)
+    // Pendant une bascule 5.1 -> 2.0 sur une lecture déjà active, le Core connaît
+    // déjà que la vidéo courante n'est pas transcodée par policy. L'absence de
+    // MediaSource dans le petit contexte UI ne doit donc pas déclencher le repli
+    // conservateur Devialet (HLS + AllowVideoStreamCopy=false), sinon Jellyfin
+    // réencode inutilement une H.264 pourtant compatible.
+    var activeStereoAudioOnly = !(_ctxMediaSource(out)) &&
+        String(out.audioOutputMode || "") === "stereo" &&
+        out.trackSwitchRebase === true &&
+        out.currentPlaybackVideoTranscodeByPolicy !== true
+    if (activeStereoAudioOnly) {
+        strictVideoTranscode = false
+        out.forceVideoStreamCopyInPlaybackInfo = true
+        out.forceDirectStreamInPlaybackInfo = true
+        // QtMultimedia Devialet refuse le MKV progressif live observé dans les logs.
+        // HLS/TS reste stable et Jellyfin peut y copier la vidéo H.264 telle quelle.
+        out.forceHlsProfileInPlaybackInfo = true
+        out.preferStereoAudioOnlyHls = true
+        out.forcePlaybackInfoColdStart = false
+        out.forcePlaybackInfoVideoCodec = ""
+    }
+
+    // Les retries après une erreur ne portent plus forcément trackSwitchRebase.
+    // Garder le même protocole tant que le mode stéréo reste demandé ; cela évite
+    // l'oscillation HTTP -> HLS -> HTTP vue dans les traces.
+    if (String(out.audioOutputMode || "") === "stereo" &&
+            out.currentPlaybackVideoTranscodeByPolicy !== true) {
+        out.preferStereoAudioOnlyHls = true
+    }
 
     // Nécessaire avec JellyfinPlaybackCore actuel : sans ce flag, forceTranscodeByPolicy
     // peut empêcher le DirectPlay sans pour autant prendre le TranscodingUrl Jellyfin,
@@ -259,8 +302,8 @@ function _cloneCtxForDevialet(ctx) {
         out.forceAllowTranscoding = true
 
     if (strictVideoTranscode) {
-        // PlaybackInfo strict seulement pour les vidéos qui doivent réellement sortir
-        // du serveur en transcodage vidéo. Le fallback source inconnue reste strict.
+        // PlaybackInfo strict seulement pour les vidéos dont la MediaSource connue
+        // prouve qu’elles doivent réellement sortir du serveur en transcodage vidéo.
         if (out.forceVideoStreamCopyInPlaybackInfo !== true)
             out.forceVideoStreamCopyInPlaybackInfo = false
         if (out.forceDirectStreamInPlaybackInfo !== true)
@@ -363,10 +406,8 @@ function negotiatePlayback(ctx, onSuccess, onError) {
     var cloned = _cloneCtxForDevialet(ctx)
 
     return Core.negotiatePlayback(cloned, function(res){
-
         if (onSuccess) onSuccess(res)
     }, function(err){
-
         if (onError) onError(err)
     })
 }
