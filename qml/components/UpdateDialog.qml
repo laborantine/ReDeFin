@@ -257,7 +257,6 @@ FocusScope {
         }
 
         Rectangle {
-            id: notesFrame
 
             visible: root.hasNotes
 
@@ -335,7 +334,6 @@ FocusScope {
 
             // Rail de l'ascenseur.
             Rectangle {
-                id: scrollTrack
 
                 visible: root.notesScrollable
 
@@ -353,7 +351,6 @@ FocusScope {
                 color: "#292929"
 
                 Rectangle {
-                    id: scrollThumb
 
                     width: parent.width
                     radius: parent.radius

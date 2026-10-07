@@ -4,6 +4,7 @@
 // Props externes utiles: versionText, panelWidthRatio, showClock (bool)
 
 import QtQuick 2.15
+import QtGraphicalEffects 1.15
 import "." as Components
 import "../js/clientId.js" as ClientId
 
@@ -36,6 +37,8 @@ FocusScope {
 
     /* === Option: Mode de lecture (Original / Intelligent) === */
     property string playbackMode: "smart"
+    /* === Option: pilotage depuis les autres clients Jellyfin === */
+    property bool remoteControlEnabled: true
 
     // Télécommande Freebox : la touche « i / Infos » du Player est remontée
     // par le runtime Freebox comme Qt.Key_Help (0x01000058 / 16777304).
@@ -79,6 +82,31 @@ FocusScope {
 
     function _togglePlaybackMode() {
         _setPlaybackMode(panel.playbackMode === "directplay" ? "smart" : "directplay");
+    }
+
+    function _syncRemoteControlFromSettings() {
+        var on = true;
+        try {
+            if (Components.AppSettings
+                    && Components.AppSettings.remoteControlEnabled !== undefined)
+                on = Components.AppSettings.remoteControlEnabled !== false;
+        } catch (e) {}
+        if (panel.remoteControlEnabled !== on)
+            panel.remoteControlEnabled = on;
+    }
+
+    function _setRemoteControl(value) {
+        var on = !!value;
+        if (panel.remoteControlEnabled !== on)
+            panel.remoteControlEnabled = on;
+        try {
+            if (Components.AppSettings) {
+                if (typeof Components.AppSettings.set === "function")
+                    Components.AppSettings.set("remoteControlEnabled", on);
+                if (Components.AppSettings.remoteControlEnabled !== on)
+                    Components.AppSettings.remoteControlEnabled = on;
+            }
+        } catch (e) {}
     }
 
     function _openPlaybackInfo() {
@@ -130,6 +158,7 @@ FocusScope {
     /* === Ouverture / fermeture === */
     function open() {
         _syncPlaybackModeFromSettings();
+        _syncRemoteControlFromSettings();
         _playbackInfoOpen = false;
         _playbackInfoKeyHeld = false;
         _open = true;
@@ -305,7 +334,6 @@ FocusScope {
 
                         // Bouton
                         Rectangle {
-                            id: knob
                             width: 24; height: 24
                             radius: height / 2
                             anchors.verticalCenter: parent.verticalCenter
@@ -366,7 +394,6 @@ FocusScope {
                 }
 
                 Rectangle {
-                    id: playbackInfoBadge
                     width: 18
                     height: 18
                     y: Math.round((parent.height - height) / 2)
@@ -438,7 +465,6 @@ FocusScope {
                         }
 
                         Rectangle {
-                            id: playbackModeKnob
                             width: 24
                             height: 24
                             radius: height / 2
@@ -483,7 +509,7 @@ FocusScope {
                         clockRow.forceActiveFocus();
                         event.accepted = true;
                     } else if (event.key === Qt.Key_Down) {
-                        aboutTitle.forceActiveFocus();
+                        remoteControlRow.forceActiveFocus();
                         event.accepted = true;
                     }
                 }
@@ -506,14 +532,340 @@ FocusScope {
 
             Rectangle { width: parent.width; height: 2; color: "#e0d200" }
 
+            /* ===== Section: Télécommande ===== */
+            Text {
+                text: "Télécommande"
+                color: "#cfd6ff"
+                font.pixelSize: 16
+                font.bold: true
+            }
+
+            FocusScope {
+                id: remoteControlRow
+                width: parent.width
+                height: 52
+
+                Rectangle {
+                    anchors.fill: parent
+                    anchors.margins: 6
+                    radius: 12
+                    color: remoteControlRow.activeFocus ? "#1b2142" : "transparent"
+                    opacity: remoteControlRow.activeFocus ? 1.0 : 0.0
+                    Behavior on opacity { NumberAnimation { duration: 120 } }
+                }
+
+                Item {
+                    anchors.fill: parent
+                    anchors.leftMargin: 14
+                    anchors.rightMargin: 14
+
+                    Item {
+                        id: remoteLabelBox
+                        anchors.left: parent.left
+                        anchors.right: remoteToggleWrap.left
+                        anchors.rightMargin: 12
+                        anchors.top: parent.top
+                        anchors.bottom: parent.bottom
+                        clip: false
+
+                        readonly property bool allowMarquee:
+                            remoteControlRow.activeFocus
+                            && panel.visible
+                            && visible
+                        readonly property bool marqueeNeeded:
+                            remoteLabelText.paintedWidth > width + 1
+                        readonly property real marqueeOverflow:
+                            Math.max(0, remoteLabelText.paintedWidth - width)
+                        readonly property int marqueeGap: 44
+                        readonly property real marqueeTravel:
+                            marqueeNeeded
+                            ? Math.max(0, remoteLabelText.paintedWidth + marqueeGap)
+                            : 0
+                        readonly property real marqueeExitX:
+                            marqueeTravel > 0 ? -marqueeTravel : 0
+                        readonly property int marqueeScrollMs:
+                            marqueeTravel > 0
+                            ? Math.max(3200, Math.min(
+                                  14000,
+                                  Math.round((marqueeTravel / 56.0) * 1000)))
+                            : 0
+                        readonly property int marqueeFadeW:
+                            Math.min(42, Math.max(22, Math.round(width * 0.12)))
+
+                        property bool marqueeMoving: false
+
+                        readonly property bool maskActive:
+                            marqueeNeeded
+                            && allowMarquee
+                            && marqueeMoving
+                            && width > 0
+                            && height > 0
+                        readonly property bool leftFadeActive:
+                            maskActive && remoteLabelText.x < -2
+                        readonly property bool rightFadeActive:
+                            maskActive
+                            && remoteLabelText.x > -marqueeOverflow + 2
+
+                        onAllowMarqueeChanged: updateMarquee()
+                        onWidthChanged: updateMarquee()
+                        onVisibleChanged: updateMarquee()
+                        onMarqueeNeededChanged: updateMarquee()
+
+                        Connections {
+                            target: remoteControlRow
+                            function onActiveFocusChanged() {
+                                remoteLabelBox.updateMarquee()
+                            }
+                        }
+
+                        Item {
+                            id: remoteLabelSource
+                            anchors.fill: parent
+                            clip: true
+                            visible: !remoteLabelBox.maskActive
+
+                            Text {
+                                id: remoteLabelText
+                                x: 0
+                                y: Math.round((parent.height - height) / 2)
+                                text: "Piloter depuis l’appli Jellyfin"
+                                color: remoteControlRow.activeFocus
+                                       ? "#FFFFFF" : "#cfd6ff"
+                                font.pixelSize: 16
+                                wrapMode: Text.NoWrap
+                                textFormat: Text.PlainText
+                                elide: remoteLabelBox.allowMarquee
+                                       ? Text.ElideNone : Text.ElideRight
+                                onTextChanged: remoteLabelBox.updateMarquee()
+                                onPaintedWidthChanged:
+                                    remoteLabelBox.updateMarquee()
+                            }
+                        }
+
+                        OpacityMask {
+                            anchors.fill: parent
+                            visible: remoteLabelBox.maskActive
+                            enabled: remoteLabelBox.maskActive
+                            source: remoteLabelSource
+                            maskSource: remoteLabelFadeMask
+                            cached: false
+                        }
+
+                        Item {
+                            id: remoteLabelFadeMask
+                            visible: remoteLabelBox.maskActive
+                            x: -10000
+                            y: -10000
+                            width: remoteLabelBox.width
+                            height: remoteLabelBox.height
+
+                            readonly property int leftW:
+                                remoteLabelBox.leftFadeActive
+                                ? remoteLabelBox.marqueeFadeW : 0
+                            readonly property int rightW:
+                                remoteLabelBox.rightFadeActive
+                                ? remoteLabelBox.marqueeFadeW : 0
+
+                            Rectangle {
+                                visible: remoteLabelFadeMask.leftW > 0
+                                x: 0
+                                y: 0
+                                width: remoteLabelFadeMask.leftW
+                                height: parent.height
+                                gradient: Gradient {
+                                    orientation: Gradient.Horizontal
+                                    GradientStop {
+                                        position: 0.0
+                                        color: "#00FFFFFF"
+                                    }
+                                    GradientStop {
+                                        position: 1.0
+                                        color: "#FFFFFFFF"
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                x: remoteLabelFadeMask.leftW
+                                y: 0
+                                width: Math.max(
+                                    0,
+                                    parent.width
+                                    - remoteLabelFadeMask.leftW
+                                    - remoteLabelFadeMask.rightW)
+                                height: parent.height
+                                color: "#FFFFFFFF"
+                            }
+
+                            Rectangle {
+                                visible: remoteLabelFadeMask.rightW > 0
+                                x: parent.width - remoteLabelFadeMask.rightW
+                                y: 0
+                                width: remoteLabelFadeMask.rightW
+                                height: parent.height
+                                gradient: Gradient {
+                                    orientation: Gradient.Horizontal
+                                    GradientStop {
+                                        position: 0.0
+                                        color: "#FFFFFFFF"
+                                    }
+                                    GradientStop {
+                                        position: 1.0
+                                        color: "#00FFFFFF"
+                                    }
+                                }
+                            }
+                        }
+
+                        SequentialAnimation {
+                            id: remoteLabelMarquee
+                            running: false
+                            loops: Animation.Infinite
+
+                            ScriptAction {
+                                script: {
+                                    remoteLabelBox.marqueeMoving = false
+                                    remoteLabelText.x = 0
+                                    remoteLabelText.opacity = 1.0
+                                }
+                            }
+                            PauseAnimation { duration: 700 }
+                            ScriptAction {
+                                script: remoteLabelBox.marqueeMoving = true
+                            }
+                            NumberAnimation {
+                                target: remoteLabelText
+                                property: "x"
+                                from: 0
+                                to: remoteLabelBox.marqueeExitX
+                                duration: remoteLabelBox.marqueeScrollMs
+                                easing.type: Easing.Linear
+                            }
+                            ScriptAction {
+                                script: remoteLabelBox.marqueeMoving = false
+                            }
+                            PauseAnimation { duration: 180 }
+                            ScriptAction {
+                                script: {
+                                    remoteLabelText.x = 0
+                                    remoteLabelText.opacity = 1.0
+                                    remoteLabelBox.marqueeMoving = false
+                                }
+                            }
+                            PauseAnimation { duration: 260 }
+
+                            onRunningChanged: {
+                                if (!running) {
+                                    remoteLabelBox.marqueeMoving = false
+                                    remoteLabelText.x = 0
+                                    remoteLabelText.opacity = 1.0
+                                }
+                            }
+                        }
+
+                        function updateMarquee() {
+                            remoteLabelMarquee.stop()
+                            marqueeMoving = false
+                            remoteLabelText.x = 0
+                            remoteLabelText.opacity = 1.0
+
+                            if (marqueeNeeded
+                                    && allowMarquee
+                                    && marqueeScrollMs > 0) {
+                                Qt.callLater(function() {
+                                    if (remoteLabelBox.marqueeNeeded
+                                            && remoteLabelBox.allowMarquee
+                                            && remoteLabelBox.visible
+                                            && remoteLabelBox.marqueeScrollMs > 0)
+                                        remoteLabelMarquee.start()
+                                })
+                            }
+                        }
+                    }
+
+                    Item {
+                        id: remoteToggleWrap
+                        width: 68
+                        height: 30
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+
+                        Rectangle {
+                            anchors.fill: parent
+                            radius: height / 2
+                            border.width: 1
+                            border.color: panel.remoteControlEnabled ? "#E6EEFF" : "#4B5685"
+                            gradient: Gradient {
+                                GradientStop {
+                                    position: 0.0
+                                    color: panel.remoteControlEnabled ? "#2F7CFF" : "#2A3152"
+                                }
+                                GradientStop {
+                                    position: 1.0
+                                    color: panel.remoteControlEnabled ? "#7EC4FF" : "#1C2342"
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            width: 24
+                            height: 24
+                            radius: height / 2
+                            anchors.verticalCenter: parent.verticalCenter
+                            x: panel.remoteControlEnabled
+                               ? (remoteToggleWrap.width - width - 3) : 3
+                            color: panel.remoteControlEnabled ? "#FFFFFF" : "#D4D9F1"
+                            border.color: panel.remoteControlEnabled ? "#FFFFFF" : "#C7CCE6"
+                            border.width: 1
+                            Behavior on x {
+                                NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
+                            }
+                        }
+                    }
+                }
+
+                Keys.onPressed: {
+                    if (event.key === Qt.Key_Left) {
+                        panel._setRemoteControl(false);
+                        event.accepted = true;
+                    } else if (event.key === Qt.Key_Right) {
+                        panel._setRemoteControl(true);
+                        event.accepted = true;
+                    } else if (event.key === Qt.Key_Return
+                               || event.key === Qt.Key_Enter
+                               || event.key === Qt.Key_Select) {
+                        panel._setRemoteControl(!panel.remoteControlEnabled);
+                        event.accepted = true;
+                    } else if (event.key === Qt.Key_Up) {
+                        playbackModeRow.forceActiveFocus();
+                        event.accepted = true;
+                    } else if (event.key === Qt.Key_Down) {
+                        aboutTitle.forceActiveFocus();
+                        event.accepted = true;
+                    }
+                }
+
+                MouseArea {
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    onEntered: remoteControlRow.forceActiveFocus()
+                    onClicked: {
+                        panel._setRemoteControl(!panel.remoteControlEnabled);
+                        mouse.accepted = true;
+                    }
+                }
+            }
+
+            Rectangle { width: parent.width; height: 2; color: "#e0d200" }
+
             /* ===== À propos ===== */
             FocusScope {
                 id: aboutTitle
                 width: parent.width
                 height: 28
                 Keys.onPressed: {
-                    if (event.key === Qt.Key_Up)  { playbackModeRow.forceActiveFocus(); event.accepted = true }
-                    else if (event.key === Qt.Key_Down) { playbackModeRow.forceActiveFocus(); event.accepted = true }
+                    if (event.key === Qt.Key_Up)  { remoteControlRow.forceActiveFocus(); event.accepted = true }
+                    else if (event.key === Qt.Key_Down) { remoteControlRow.forceActiveFocus(); event.accepted = true }
                 }
                 Text { text: "À propos"; color: "#cfd6ff"; font.pixelSize: 16; font.bold: true }
             }
@@ -555,7 +907,6 @@ FocusScope {
         }
 
         Rectangle {
-            id: playbackInfoCard
             width: Math.min(760, Math.max(620, panel.width * 0.44))
             height: 430
             anchors.centerIn: parent
@@ -650,7 +1001,6 @@ FocusScope {
                 }
 
                 Text {
-                    id: originalModeDescription
                     anchors.left: parent.left
                     anchors.right: parent.right
                     anchors.top: originalModeTitle.bottom

@@ -9,10 +9,11 @@
 // TWEAK 2: gate animation sur opacité (hud.opacity > threshold) -> pas de decode GIF quand HUD quasi invisible
 
 import QtQuick 2.15
+import "../js/NavigationContext.js" as NavContext
 import QtGraphicalEffects 1.15
 import "../components" as Components
 import "../js/UserStore.js" as Store
-import "../js/jellyfinBridge.js" as Jellyfin
+import "../js/JellyfinHttpTransport.js" as HttpTransport
 
 Item {
     id: hud
@@ -154,13 +155,12 @@ Item {
 
     function _storeServerNavContext() {
         try {
-            var api = shared && shared.__redefinNavApi ? shared.__redefinNavApi : null
-            return api && api.storeValues ? api.storeValues({
+            return NavContext.storeValues(shared, {
                 serverUrl: serverUrl || "",
                 userName: userName || "",
                 userImageTag: userImageTag || "",
                 fbx: fbx || null
-            }) : false
+            })
         } catch(e) { return false }
     }
 
@@ -209,7 +209,7 @@ Item {
         // URL canonique avatar animé: on supprime les tokens et variantes statiques,
         // mais on ne force jamais format=jpg/fillWidth/fillHeight afin de préserver
         // les GIF animés Jellyfin avec leur boucle native.
-        var u = Jellyfin.stripAuthQueryFromUrl(raw)
+        var u = HttpTransport.stripAuthQueryFromUrl(raw)
         u = _avatarRemoveParams(u, [
             "fbx" + "loop", "format", "fillwidth", "fillheight",
             "maxwidth", "maxheight", "quality", "_v"
@@ -270,7 +270,6 @@ Item {
         anchors.verticalCenter: parent.verticalCenter
 
         Column {
-            id: avatarColumn
             visible: !!hud.showAvatar
             spacing: hud.userNameTopMargin
             width: Math.max(hud.avatarSize,
@@ -374,7 +373,7 @@ Item {
                 function _avatarBaseClean() {
                     // On conserve le tag Jellyfin, mais on retire tout ce qui peut se dupliquer
                     // ou provoquer des logs d'URL sales pendant les rafraîchissements.
-                    return hud._avatarRemoveParams(Jellyfin.stripAuthQueryFromUrl(baseUrl), [
+                    return hud._avatarRemoveParams(HttpTransport.stripAuthQueryFromUrl(baseUrl), [
                         "fbx" + "loop", "format", "fillwidth", "fillheight",
                         "maxwidth", "maxheight", "quality", "_v"
                     ])
@@ -402,7 +401,7 @@ Item {
                             return Store.staticAvatarUrl(hud.serverUrl, hud.userId, hud.userImageTag)
                     } catch (e) {}
 
-                    var u = hud._avatarRemoveParams(Jellyfin.stripAuthQueryFromUrl(_displayBaseUrl()), [
+                    var u = hud._avatarRemoveParams(HttpTransport.stripAuthQueryFromUrl(_displayBaseUrl()), [
                         "fbx" + "loop", "format", "fillwidth", "fillheight",
                         "maxwidth", "maxheight", "quality", "_v"
                     ])
@@ -438,7 +437,7 @@ Item {
                     // Chemin animé stable : pas de conversion JPG, pas de cache-buster,
                     // pas de resize forcé. C'est volontaire pour conserver les GIF animés
                     // Jellyfin tels que les clients officiels les lisent.
-                    u = hud._avatarRemoveParams(Jellyfin.stripAuthQueryFromUrl(String(u || "")), [
+                    u = hud._avatarRemoveParams(HttpTransport.stripAuthQueryFromUrl(String(u || "")), [
                         "fbx" + "loop", "format", "_v", "maxwidth", "maxheight",
                         "fillwidth", "fillheight", "quality"
                     ])
@@ -660,7 +659,6 @@ Item {
                         visible: !!(avatarWrap.baseUrl && avatarWrap.baseUrl.length)
 
                         Image {
-                            id: avatarStill
                             anchors.fill: parent
                             // AnimatedImage reste chargée même lorsqu'elle est
                             // momentanément arrêtée. Le pipeline statique n'est
@@ -754,7 +752,6 @@ Item {
 
                 // ===== watchdog (NO frameCount gate) =====
                 Timer {
-                    id: loopWatchdog
                     interval: Math.max(260, hud.avatarLoopCheckMs)
                     repeat: true
                     running: !!(hud.visible && hud.active && hud.avatarForceLoop

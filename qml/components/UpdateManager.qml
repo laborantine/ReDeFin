@@ -19,7 +19,7 @@ Item {
 
     // Version réellement exposée par le runtime Freebox / FreeStore.
     // Formats tolérés :
-    // 0.49.true / 0.49-beta / 0.49 / 0.50 / 0.51 / 1.0
+    // 0.49.true / 0.49-beta / 0.49 / 0.50 / 0.51 / 1.0 / 0.9.7.1
     property string currentVersion:
         Qt.application.version ? String(Qt.application.version) : "dev"
 
@@ -113,7 +113,9 @@ Item {
 
         var parts = value.split(".")
 
-        if (parts.length < 2 || parts.length > 3)
+        // Quatre composantes au plus : « 0.9.7.1 » numérote la révision d'un
+        // fork au-dessus d'une version officielle à trois composantes.
+        if (parts.length < 2 || parts.length > 4)
             return null
 
         var numbers = []
@@ -130,7 +132,7 @@ Item {
             numbers.push(parsed)
         }
 
-        while (numbers.length < 3)
+        while (numbers.length < 4)
             numbers.push(0)
 
         if (!channelExplicit)
@@ -140,6 +142,7 @@ Item {
             major: numbers[0],
             minor: numbers[1],
             patch: numbers[2],
+            revision: numbers[3],
             beta: beta,
             channelExplicit: channelExplicit
         }
@@ -157,6 +160,11 @@ Item {
 
         if (a.patch !== b.patch)
             return a.patch > b.patch ? 1 : -1
+
+        var aRevision = a.revision || 0
+        var bRevision = b.revision || 0
+        if (aRevision !== bRevision)
+            return aRevision > bRevision ? 1 : -1
 
         // À numéro identique : stable > bêta.
         if (a.beta !== b.beta)

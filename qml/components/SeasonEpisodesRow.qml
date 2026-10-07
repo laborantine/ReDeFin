@@ -4,9 +4,10 @@
 // reste responsable du rendu, du focus D-Pad, du poster gating et du marquee.
 
 import QtQuick 2.15
+import "../js/MediaCatalog.js" as MediaCatalog
 import QtGraphicalEffects 1.15
 import "../js/jellyfinBridge.js" as Jellyfin
-import "../js/SeasonUtils.js" as SeasonUtils
+import "../js/JellyfinHttpTransport.js" as HttpTransport
 
 FocusScope {
     id: root
@@ -83,6 +84,8 @@ FocusScope {
     enabled: true
 
     readonly property bool isScrolling: !!(list && (list.moving || list.dragging || list.flicking))
+    readonly property bool currentDelegateReady: !!(list && list.currentItem)
+    readonly property bool currentDelegateVisualReady: !!(list && list.currentItem && list.currentItem.posterVisualReady === true)
     readonly property bool allowAnims: !!(root.visible && root.active && root.showFocus && !root.isScrolling)
 
     // -------------------- Label helpers (SxEy + 1-liner) --------------------
@@ -95,8 +98,8 @@ FocusScope {
         s = (s | 0)
         e = (e | 0)
 
-        if (s > 0 && e > 0) return "S" + String(s) + "E" + SeasonUtils.pad2(e)
-        if (e > 0) return "E" + SeasonUtils.pad2(e)
+        if (s > 0 && e > 0) return "S" + String(s) + "E" + MediaCatalog.pad2(e)
+        if (e > 0) return "E" + MediaCatalog.pad2(e)
         return ""
     }
 
@@ -305,8 +308,8 @@ FocusScope {
         // Ce wrapper reste volontairement local car il protège aussi les URL de
         // fallback/retry fournies par les delegates, pas seulement itemImageUrl().
         try {
-            if (Jellyfin && typeof Jellyfin.stripAuthQueryFromUrl === "function")
-                return Jellyfin.stripAuthQueryFromUrl(url)
+            if (HttpTransport && typeof HttpTransport.stripAuthQueryFromUrl === "function")
+                return HttpTransport.stripAuthQueryFromUrl(url)
         } catch (e) {}
         return String(url || "")
     }
@@ -589,6 +592,9 @@ FocusScope {
             readonly property int hqReqH: Math.max(140, Math.round(root.cardH * root.posterHqRequestScale))
 
             readonly property bool inNearWindow: (Math.abs(index - list.currentIndex) <= root._nearEff)
+            readonly property bool posterVisualReady: !wantPoster || !src || !src.length
+                                                     || posterImg.status === Image.Ready
+                                                     || (posterImg.status === Image.Error && stage >= 2)
             readonly property bool wantPoster: {
                 if (!root.active) return false
                 if (selected) return true
@@ -794,7 +800,6 @@ FocusScope {
                 }
 
                 Item {
-                    id: posterSlot
                     width: root.cardW
                     height: root.cardH
                     clip: false
@@ -823,7 +828,6 @@ FocusScope {
                         }
 
                         Item {
-                            id: posterShell
                             anchors.fill: parent
                             clip: true
                             opacity: card.missingEpisode ? 0.90 : 1.0
@@ -902,7 +906,6 @@ FocusScope {
                             }
 
                             Item {
-                                id: missingRibbonWrap
                                 visible: card.missingEpisode
                                 anchors.top: parent.top
                                 anchors.right: parent.right
@@ -1045,7 +1048,6 @@ FocusScope {
                     }
 
                     OpacityMask {
-                        id: labelMaskedLine
                         anchors.fill: labelSourceViewport
                         source: labelLineTexture
                         maskSource: labelLineFadeMask

@@ -619,7 +619,6 @@ Item {
 
   NumberAnimation { id: tintAnim; target: root; property: "_tintProgress"; duration: animDuration; easing.type: Easing.OutCubic }
   Timer {
-    id: tintPaintTimer
     interval: 33
     repeat: true
     running: tintAnim.running
