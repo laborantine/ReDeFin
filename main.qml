@@ -248,10 +248,6 @@ Application {
                     if (usersSessionVaultJson !== "{}")
                         usersSessionVaultJson = "{}"
                 } catch (eVaultMigration) {}
-                try {
-                    if (lastAccessToken)
-                        lastAccessToken = ""
-                } catch (eLegacyTokenMigration) {}
             }
 
             try {
@@ -264,9 +260,9 @@ Application {
                     JellyfinBridge.setClientIdentity(ClientId.info())
             } catch (eIdentity) {}
 
-            // Migration sécurité : supprime toute ancienne copie de token de session.
-            if (lastAccessToken)
-                lastAccessToken = ""
+            // Migration sécurité centralisée : retire les anciennes copies de token
+            // de Settings/usersJson sans dupliquer ici les règles de UserStore.
+            fbx._purgePersistedSessionTokens()
 
             // Le mode sécurité maximale interdit le coffre persistant.
             if (maximumSessionSecurity === true) {
@@ -276,11 +272,6 @@ Application {
                     usersSessionVaultJson = "{}"
             }
 
-            // Migration immédiate : tous les anciens accessToken sont retirés de
-            // usersJson, mais la métadonnée non secrète `remember` est conservée.
-            var safeUsersJson = UserStore.sanitizeUsersJsonForStorage(usersJson || "[]", maximumSessionSecurity === true)
-            if (String(usersJson || "[]") !== String(safeUsersJson))
-                usersJson = safeUsersJson
 
             // Si ShellPage est déjà chargée, on lui pousse la restauration
             if (mainLoader.item && typeof mainLoader.item.restoreFromSettings === "function") {
