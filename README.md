@@ -117,18 +117,18 @@ Travaux principaux (avril 2025 - maintenant) :
 <!-- GETTING STARTED -->
 ## Introduction
 
-![Places bêta](https://img.shields.io/badge/Places-102%20occup%C3%A9es%20sur%20160%20%E2%80%94%2058%20restantes-orange?style=for-the-badge)
+![Places bêta](https://img.shields.io/badge/Places-110%20occup%C3%A9es%20sur%20160%20%E2%80%94%2058%20restantes-orange?style=for-the-badge)
 
 Le projet est actuellement en phase bêta fermé.
 
 Disponibilité des places pour candidater en tant que beta-testeur sur la Freebox Devialet :
 
-![Bêta Devialet](https://img.shields.io/badge/Devialet-71%2F80%20occup%C3%A9es-DC2626?style=for-the-badge)
+![Bêta Devialet](https://img.shields.io/badge/Devialet-75%2F80%20occup%C3%A9es-DC2626?style=for-the-badge)
 
 Disponibilité des places pour candidater en tant que beta-testeur sur la Freebox Revolution :
 
 
-![Bêta Révolution](https://img.shields.io/badge/R%C3%A9volution-31%2F80%20occup%C3%A9es-brightgreen?style=for-the-badge)
+![Bêta Révolution](https://img.shields.io/badge/R%C3%A9volution-35%2F80%20occup%C3%A9es-brightgreen?style=for-the-badge)
 
 
 Pour candidater en tant que bêta-testeur, il faut vous munir de votre n° d'abonné Freebox (commençant la plupart du temps par fbxXXX) que vous retrouvez sur votre espace client Freebox. Une fois que vous avez cette information, veuillez envoyer un mail en précisant êgalement la Freebox que vous avez et envoyez le tout à : application.redefin@proton.me. 
