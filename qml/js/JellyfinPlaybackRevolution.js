@@ -8,7 +8,7 @@
  */
 
 var REVOLUTION_POLICY_ID = "revolution";
-var REVOLUTION_POLICY_REVISION = 12;
+var REVOLUTION_POLICY_REVISION = 13;
 
 // Sorties serveur privilégiées sur Révolution : le progressif HTTP reste utilisé
 // pour préserver StartTimeTicks/seek, mais le conteneur passe en MKV afin de
@@ -43,21 +43,57 @@ function _audioChannelsSafe(stream) {
     return Math.max(explicitChannels, layoutChannels);
 }
 
+function _revCanonicalAudioCodec(codec) {
+    var c = _codec(codec);
+    if (c === "dts" || c === "dca" || c === "dts,dca" || c === "a_dts") return "dts";
+    if (c === "eac3" || c === "ddp" || c === "dolby_digital_plus") return "eac3";
+    if (c === "aac" || c === "mp4a") return "aac";
+    return c;
+}
+
 function _selectedAudioCodecSafe(src, audioIndex) {
     var coreCodec = Core._selectedAudioCodec(src, audioIndex);
-    if (coreCodec) return _codec(coreCodec);
+    if (coreCodec) return _revCanonicalAudioCodec(coreCodec);
     var first = Core._firstStream(src, "Audio");
-    return _codec(first && first.Codec);
+    return _revCanonicalAudioCodec(first && first.Codec);
 }
 
+// Matrice native théorique annoncée pour le Player Révolution : AAC, Dolby
+// Digital, Dolby Digital Plus, DTS core, FLAC, MP1, MP2, MP3 et Vorbis.
 function _revAudioCopySafe(codec) {
-    var c = _codec(codec);
-    return c === "aac" || c === "ac3" || c === "mp3" || c === "mp2";
+    var c = _revCanonicalAudioCodec(codec);
+    return c === "aac" || c === "ac3" || c === "eac3" || c === "dts" ||
+           c === "flac" || c === "mp1" || c === "mp2" || c === "mp3" || c === "vorbis";
 }
 
+function _revTsAudioCopySafe(codec) {
+    var c = _revCanonicalAudioCodec(codec);
+    return c === "aac" || c === "ac3" || c === "eac3" || c === "dts" ||
+           c === "mp1" || c === "mp2" || c === "mp3";
+}
+
+function _revDtsCoreOnly(stream) {
+    if (!stream || _revCanonicalAudioCodec(stream.Codec) !== "dts") return true;
+    var info = _codec([stream.Profile || "", stream.DisplayTitle || "", stream.Title || ""].join(" "));
+    // Free documente DTS core. Une piste explicitement DTS-HD/MA/HRA reste hors
+    // whitelist native afin d'éviter de confondre extension HD et core DTS.
+    return info.indexOf("dts-hd") < 0 && info.indexOf("dts hd") < 0 &&
+           info.indexOf("master audio") < 0 && info.indexOf("dts-ma") < 0 &&
+           info.indexOf("high resolution") < 0 && info.indexOf("dts-hra") < 0;
+}
+
+function _revAudioStreamCopySafe(stream) {
+    if (!stream) return false;
+    if (!_revAudioCopySafe(stream.Codec)) return false;
+    return _revDtsCoreOnly(stream);
+}
+
+// Matrice vidéo théorique annoncée : H.264, MPEG-1, MPEG-2, MPEG-4 ASP,
+// MS-MPEG4 v3/DivX 3 et VC-1/WMV9.
 function _revVideoCopySafe(codec) {
     var c = _codec(codec);
-    return c === "h264" || c === "mpeg4" || c === "mpeg2video" || c === "msmpeg4v3";
+    return c === "h264" || c === "mpeg1video" || c === "mpeg2video" ||
+           c === "mpeg4" || c === "msmpeg4v3" || c === "vc1" || c === "wmv3";
 }
 
 function _subtitleStreamByIndexSafe(src, streamIndex) {
@@ -119,10 +155,9 @@ function _revPgsRemuxEligible(ctx, src) {
     var selectedAudioIndex = (ctx && typeof ctx.selectedAudioStream === "number" && ctx.selectedAudioStream >= 0)
                            ? ctx.selectedAudioStream : -1;
     var a = _audioStreamByIndexSafe(src, selectedAudioIndex);
-    var audioCodec = _codec(a && a.Codec);
     var channels = _audioChannelsSafe(a);
 
-    if (!_revAudioCopySafe(audioCodec)) return false;
+    if (!_revAudioStreamCopySafe(a)) return false;
     if (channels > 6) return false;
 
     return true;
@@ -165,44 +200,6 @@ function _containerOf(src) {
     return Core._extFrom(src && src.Path);
 }
 
-function _isRiskyVideoCodec(c) {
-    c = _codec(c);
-    return (
-        c === "hevc"   ||
-        c === "h265"   ||
-        c === "vp9"    ||
-        c === "av1"    ||
-        c === "vp8"    ||
-        c === "vc1"    ||
-        c === "wmv3"   ||
-        c === "theora" ||
-        c === "dirac"  ||
-        c === "rv30"   ||
-        c === "rv40"
-    );
-}
-
-function _isRiskyAudioCodec(c) {
-    c = _codec(c);
-    return (
-        c === "dts"       ||
-        c === "dca"       ||
-        c === "truehd"    ||
-        c === "eac3"      ||
-        c === "flac"      ||
-        c === "opus"      ||
-        c === "vorbis"    ||
-        c === "alac"      ||
-        c === "ape"       ||
-        c === "wavpack"   ||
-        c === "tta"       ||
-        c === "pcm_s24le" ||
-        c === "pcm_s32le" ||
-        c === "pcm_f32le" ||
-        c === "pcm_f64le"
-    );
-}
-
 /* ================== DeviceProfile Revolution ================== */
 function _revProfile(mode) {
     var dp = {
@@ -212,18 +209,40 @@ function _revProfile(mode) {
         MaxAudioChannels: 6,
 
         DirectPlayProfiles: [
-            { Container: "mp4,m4v,mov",      Type: "Video", VideoCodec: "h264,mpeg4",            AudioCodec: "aac,ac3,mp3,mp2" },
-            { Container: "ts,m2ts,mpg,mpeg", Type: "Video", VideoCodec: "h264,mpeg2video",       AudioCodec: "aac,ac3,mp3,mp2" },
-            { Container: "avi",              Type: "Video", VideoCodec: "mpeg4,msmpeg4v3,h264",  AudioCodec: "mp3,mp2,aac,ac3" }
+            // Conteneurs et codecs annoncés nativement par le Player Révolution.
+            // Les associations restent limitées à des couples de conteneurs
+            // réellement usuels afin de ne pas fabriquer de compatibilité fictive.
+            { Container: "mp4,m4v,mov", Type: "Video", VideoCodec: "h264,mpeg4", AudioCodec: "aac,ac3,eac3,mp3,mp2" },
+            { Container: "mkv,matroska", Type: "Video", VideoCodec: "h264,mpeg1video,mpeg2video,mpeg4,msmpeg4v3,vc1,wmv3", AudioCodec: "aac,ac3,eac3,dts,flac,mp1,mp2,mp3,vorbis" },
+            { Container: "ts,m2ts,mpegts", Type: "Video", VideoCodec: "h264,mpeg1video,mpeg2video,vc1,wmv3", AudioCodec: "aac,ac3,eac3,dts,mp1,mp2,mp3" },
+            { Container: "mpg,mpeg,mpegps", Type: "Video", VideoCodec: "mpeg1video,mpeg2video", AudioCodec: "mp1,mp2,mp3,ac3,dts" },
+            { Container: "avi", Type: "Video", VideoCodec: "mpeg1video,mpeg2video,mpeg4,msmpeg4v3,h264,vc1,wmv3", AudioCodec: "mp1,mp2,mp3,aac,ac3,dts" },
+            { Container: "flv", Type: "Video", VideoCodec: "h264,mpeg4", AudioCodec: "aac,mp3" },
+            { Container: "ogg,ogv,ogm", Type: "Video", VideoCodec: "mpeg1video,mpeg2video,mpeg4,msmpeg4v3", AudioCodec: "vorbis,mp1,mp2,mp3,aac,ac3" },
+
+            // Audio autonome : codecs explicitement annoncés en décodage natif.
+            { Container: "aac,m4a,mp4,mov", Type: "Audio", AudioCodec: "aac" },
+            { Container: "ac3", Type: "Audio", AudioCodec: "ac3" },
+            { Container: "eac3,ec3", Type: "Audio", AudioCodec: "eac3" },
+            { Container: "dts", Type: "Audio", AudioCodec: "dts" },
+            { Container: "flac", Type: "Audio", AudioCodec: "flac" },
+            { Container: "mp1", Type: "Audio", AudioCodec: "mp1" },
+            { Container: "mp2,mpa", Type: "Audio", AudioCodec: "mp2" },
+            { Container: "mp3", Type: "Audio", AudioCodec: "mp3" },
+            { Container: "ogg,oga", Type: "Audio", AudioCodec: "vorbis" },
+            // AU/WAV figurent également dans la matrice de formats Free. Le PCM
+            // est déclaré uniquement pour la lecture audio autonome, pas comme
+            // codec audio vidéo générique.
+            { Container: "wav", Type: "Audio", AudioCodec: "pcm_s16le,pcm_s24le,pcm_u8" },
+            { Container: "au", Type: "Audio", AudioCodec: "pcm_s16be,pcm_mulaw,pcm_alaw" }
         ],
 
         DirectStreamProfiles: [
-            // MKV est le conteneur de remux/progressif privilégié côté serveur.
-            // On ne l'ajoute pas au DirectPlay ici afin de ne pas élargir les
-            // chemins statiques historiques de la Révolution.
-            { Container: "mkv", Type: "Video", VideoCodec: "h264,mpeg4,mpeg2video,msmpeg4v3", AudioCodec: "aac,ac3,mp3,mp2" },
-            { Container: "mp4", Type: "Video", VideoCodec: "h264,mpeg4",       AudioCodec: "aac,ac3,mp3,mp2" },
-            { Container: "ts",  Type: "Video", VideoCodec: "h264,mpeg2video",  AudioCodec: "aac,ac3,mp3,mp2" }
+            // MKV reste le conteneur serveur universel pour tous les codecs
+            // natifs de la Révolution lorsque le conteneur source doit changer.
+            { Container: "mkv", Type: "Video", VideoCodec: "h264,mpeg1video,mpeg2video,mpeg4,msmpeg4v3,vc1,wmv3", AudioCodec: "aac,ac3,eac3,dts,flac,mp1,mp2,mp3,vorbis" },
+            { Container: "mp4", Type: "Video", VideoCodec: "h264,mpeg4", AudioCodec: "aac,ac3,eac3,mp3,mp2" },
+            { Container: "ts", Type: "Video", VideoCodec: "h264,mpeg1video,mpeg2video,vc1,wmv3", AudioCodec: "aac,ac3,eac3,dts,mp1,mp2,mp3" }
         ],
 
         TranscodingProfiles: [],
@@ -273,7 +292,6 @@ function _revProfile(mode) {
             { Format: "ssa", Method: "Embed" },
             { Format: "vtt", Method: "Embed" },
             { Format: "webvtt", Method: "Embed" },
-
             // PGS sélectionné : la Révolution reçoit la piste bitmap dans un
             // remux lorsque vidéo/audio sont déjà compatibles. Si un vrai
             // transcodage est nécessaire, shouldForceSubtitleEncode() bascule
@@ -290,11 +308,11 @@ function _revProfile(mode) {
     // et le force à reconstruire l'URL finale avec MaxWidth/MaxHeight 1080p.
     if (mode === "hls" || mode === "auto") {
         dp.TranscodingProfiles = [
-            { Container: REVOLUTION_TRANSCODE_CONTAINER_HLS, Type: "Video", Protocol: "hls", VideoCodec: REVOLUTION_TRANSCODE_VIDEO_CODEC, AudioCodec: "ac3,aac" }
+            { Container: REVOLUTION_TRANSCODE_CONTAINER_HLS, Type: "Video", Protocol: "hls", VideoCodec: REVOLUTION_TRANSCODE_VIDEO_CODEC, AudioCodec: "ac3,eac3,aac,mp2,mp3,dts" }
         ];
     } else {
         dp.TranscodingProfiles = [
-            { Container: REVOLUTION_TRANSCODE_CONTAINER_HTTP, Type: "Video", Protocol: "http", VideoCodec: REVOLUTION_TRANSCODE_VIDEO_CODEC, AudioCodec: "ac3,aac" }
+            { Container: REVOLUTION_TRANSCODE_CONTAINER_HTTP, Type: "Video", Protocol: "http", VideoCodec: REVOLUTION_TRANSCODE_VIDEO_CODEC, AudioCodec: "ac3,eac3,aac,dts,flac,mp2,mp3,vorbis" }
         ];
     }
 
@@ -304,7 +322,6 @@ function _revProfile(mode) {
 /* ================== Container préféré ================== */
 function _revPreferredContainer(ctx, src) {
     if (!ctx) return null;
-
     var needServerSelect =
         (typeof ctx.selectedAudioStream === "number" && ctx.selectedAudioStream >= 0) ||
         (!ctx.useLocalSubs && typeof ctx.selectedSubtitleStream === "number" && ctx.selectedSubtitleStream >= 0) ||
@@ -353,23 +370,27 @@ function _revPreferredTranscodeVideoCodec(ctx, src) {
 
 function _revPreferredTranscodeAudioCodec(ctx, src, audioIndex, useHls) {
     var sourceCodec = _selectedAudioCodecSafe(src, audioIndex);
+    var a = Core._audioStreamByIndex(src, audioIndex);
+    if (!a) a = Core._firstStream(src, "Audio");
 
-    // AC3/AAC/MP3/MP2 déjà compatibles : conserver le flux en stream-copy.
-    if (_revAudioCopySafe(sourceCodec))
+    if (_revAudioStreamCopySafe(a)) {
+        if (useHls === true && !_revTsAudioCopySafe(sourceCodec))
+            return "ac3";
         return sourceCodec;
+    }
 
-    // E-AC3/DD+, DTS, TrueHD et autres codecs non sûrs pour la Révolution :
-    // conversion AC3. Le Core conserve jusqu'à 6 canaux et demande 640 kb/s en 5.1.
+    // Codec hors matrice native (TrueHD, Opus, ALAC, etc.) : conversion AC3.
     return "ac3";
 }
 
 function _revAllowTranscodeAudioStreamCopy(ctx, src, audioIndex, useHls) {
-    var sourceCodec = _selectedAudioCodecSafe(src, audioIndex);
-    if (!_revAudioCopySafe(sourceCodec)) return false;
-
     var a = Core._audioStreamByIndex(src, audioIndex);
     if (!a) a = Core._firstStream(src, "Audio");
-    return _num(a && a.Channels) <= 6;
+    if (!_revAudioStreamCopySafe(a)) return false;
+
+    var sourceCodec = _selectedAudioCodecSafe(src, audioIndex);
+    if (useHls === true && !_revTsAudioCopySafe(sourceCodec)) return false;
+    return _audioChannelsSafe(a) <= 6;
 }
 
 function _revPreferredTranscodeDimensions(ctx, src) {
@@ -403,7 +424,7 @@ function _revRequiresHardVideoTranscode(ctx, src) {
     if (width > 1920 || height > 1080) return true;
     if (bitDepth > 8) return true;
     if (frameRate > 60) return true;
-    if (_isRiskyVideoCodec(videoCodec)) return true;
+    if (!_revVideoCopySafe(videoCodec)) return true;
     return false;
 }
 
@@ -428,7 +449,6 @@ function _revForceTranscode(ctx, src) {
     var channels  = _audioChannelsSafe(a);
 
     var videoCodec = _codec(v && v.Codec);
-    var audioCodec = _codec(a && a.Codec);
     var container  = _containerOf(src);
     var downmix = ctx && ctx.audioOutputMode === "stereo" && channels > 2;
 
@@ -436,8 +456,8 @@ function _revForceTranscode(ctx, src) {
     if (bitDepth > 8) {  return true; }
     if (frameRate > 60) {  return true; }
 
-    if (_isRiskyVideoCodec(videoCodec)) {  return true; }
-    if (_isRiskyAudioCodec(audioCodec) && !downmix) {  return true; }
+    if (!_revVideoCopySafe(videoCodec)) {  return true; }
+    if (!_revAudioStreamCopySafe(a) && !downmix) {  return true; }
 
     if (channels > 6 && !downmix) {  return true; }
 
@@ -449,7 +469,7 @@ function _revForceTranscode(ctx, src) {
     // MKV n'est plus une raison de réencoder la vidéo : c'est désormais le
     // conteneur serveur privilégié pour le remux/progressif Révolution. Les
     // conteneurs réellement non sûrs conservent le transcodage de policy.
-    if (container === "webm" || container === "flv" || container === "ogv") {
+    if (container === "webm") {
         return true;
     }
 

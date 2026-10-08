@@ -2179,6 +2179,7 @@ function tickFrozenPlaybackWatch(root, mp, watchTimer, guardTimer) {
 
 function recoverFromMediaError(root, mp, watchTimer, guardTimer) {
     if (root._mediaErrorRecoveryArmed) return;
+
     // Un MediaError HLS stéréo ne prouve pas que le codec demandé est fautif.
     // Le profil 2.0 cible désormais AAC-LC dès la première négociation ; on
     // reconstruit UNE fois le même pipeline depuis PlaybackInfo à la position

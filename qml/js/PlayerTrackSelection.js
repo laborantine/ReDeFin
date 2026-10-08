@@ -60,7 +60,6 @@ function makeNegotiationContext(core, state, startMs, reneg) {
         preferExternalTextSubtitlesInRemux: reneg.preferExternalTextSubtitlesInRemux === true,
         forceTextSubtitleServerBurnIn: reneg.forceTextSubtitleServerBurnIn === true,
         preferServerSubtitleBurnInOnVideoTranscode: reneg.preferServerSubtitleBurnInOnVideoTranscode === true,
-        allowLocalSubtitleOverlay: reneg.allowLocalSubtitleOverlay === true,
         forceHevcMain10Remux: !!reneg.forceHevcMain10Remux,
         forceAllowTranscoding: !!reneg.forceAllowTranscoding,
         forceVideoTranscodeCodec: reneg.forceVideoTranscodeCodec || null,
@@ -215,10 +214,11 @@ function _looksTextSubtitleLabel(label) {
         s.indexOf("texte") >= 0 || s.indexOf("text") >= 0;
 }
 
-function _normalizeSubtitleTables(labels, map, isText) {
+function _normalizeSubtitleTables(labels, map, isText, codecs) {
     labels = labels && typeof labels.length === "number" ? labels.slice(0) : [];
     map = map && typeof map.length === "number" ? map.slice(0) : [];
     isText = isText && typeof isText.length === "number" ? isText.slice(0) : [];
+    codecs = codecs && typeof codecs.length === "number" ? codecs.slice(0) : [];
     // Contrat ReDeFin côté PlayerOverlay :
     // - subtitleStreamIndexMap contient toujours l'entrée 0 = -1 pour « Aucun » ;
     // - subtitleIsTextMap est aligné sur subtitleStreamIndexMap ;
@@ -241,10 +241,27 @@ function _normalizeSubtitleTables(labels, map, isText) {
         isText = isText.slice(0, map.length);
     while (labels.length > Math.max(0, map.length - 1))
         labels.pop();
+    // Le codec partage le même index que le stream et le type :
+    // case 0 = « Aucun ». Sans cela, la piste MOV_TEXT suivante
+    // pourrait être associée à un mauvais codec après normalisation.
+    if (codecs.length === map.length - 1)
+        codecs.unshift("");
+    if (codecs.length === 0)
+        codecs.push("");
+    while (codecs.length < map.length)
+        codecs.push("");
+    if (codecs.length > map.length)
+        codecs.length = map.length;
+    codecs[0] = "";
+    for (var ci = 1; ci < codecs.length; ++ci) {
+        var normalizedCodec = _s(codecs[ci]).toLowerCase();
+        codecs[ci] = normalizedCodec === "tx3g" ? "mov_text" : normalizedCodec;
+    }
     return {
         labels: labels,
         map: map,
-        isText: isText
+        isText: isText,
+        codecs: codecs
     };
 }
 
@@ -293,10 +310,12 @@ function refreshStreams(root, router, done) {
         root.audioCodecMap = res.audioCodecMap && res.audioCodecMap.length ? res.audioCodecMap : [];
         root.audioChannelMap = res.audioChannelMap && res.audioChannelMap.length ? res.audioChannelMap : [];
         root.audioBitrateMap = res.audioBitrateMap && res.audioBitrateMap.length ? res.audioBitrateMap : [];
-        var subTables = _normalizeSubtitleTables(res.subtitleLabels || [], res.subtitleMap || [], res.subtitleIsText || []);
+        var subTables = _normalizeSubtitleTables(res.subtitleLabels || [], res.subtitleMap || [],
+            res.subtitleIsText || [], res.subtitleCodecMap || []);
         root.subtitleTracks = subTables.labels;
         root.subtitleStreamIndexMap = subTables.map;
         root.subtitleIsTextMap = subTables.isText;
+        root.subtitleCodecMap = subTables.codecs;
         root.firstAudioStreamIndex =
             (typeof res.firstAudioStreamIndex === "number") ?
             res.firstAudioStreamIndex : -1;
@@ -398,8 +417,7 @@ function _manualRemuxExtra(root) {
         disableDefaultSubtitleRemux: true,
         forceTextSubtitleServerBurnIn: false,
         preferServerSubtitleBurnInOnVideoTranscode: false,
-        preferExternalTextSubtitlesInRemux: false,
-        allowLocalSubtitleOverlay: false
+        preferExternalTextSubtitlesInRemux: false
     }
 }
 
@@ -696,7 +714,6 @@ function prefetchDeferredReload(root, router, requestSeq) {
             forceTextSubtitleServerBurnIn: false,
             preferServerSubtitleBurnInOnVideoTranscode: false,
             preferExternalTextSubtitlesInRemux: false,
-            allowLocalSubtitleOverlay: false,
             preferImageSubtitleRemux: type === "image",
             forceFullRemuxForImageSubtitles: false,
             disableDefaultSubtitleRemux: true,
@@ -1137,6 +1154,13 @@ function switchServerSubtitleStable(root, reason, streamIdx, listIdx) {
     root._autoLocalizeSubStream = -1
     root.subtitleIndex = Math.max(0, listIdx | 0)
     root.selectedSubtitleStream = typeof streamIdx === "number" ? streamIdx : -1
+    // Nouvelle sélection explicite = nouveau contrat média. Réinitialiser le
+    // budget de recovery afin qu'un échec précédent MOV_TEXT ne bloque pas une
+    // piste différente, tout en laissant PlayerSession borner les retries du
+    // contrat courant.
+    root._mediaErrorRecoveryArmed = false
+    root._mediaErrorRecoveryInProgress = false
+    root._mediaErrorRecoveryCount = 0
     // Une piste gérée par Jellyfin quitte nécessairement le DirectPlay manuel.
     // Conserver ce marqueur après un PGS/DVDSub rendait le menu Qualité faux :
     // Vitesse voyait bien le remux réel, tandis que Qualité restait sur DP.
@@ -1165,7 +1189,6 @@ function switchServerSubtitleStable(root, reason, streamIdx, listIdx) {
         forceTextSubtitleServerBurnIn: false,
         preferServerSubtitleBurnInOnVideoTranscode: false,
         preferExternalTextSubtitlesInRemux: false,
-        allowLocalSubtitleOverlay: false,
         preferImageSubtitleRemux: isImage,
         forceFullRemuxForImageSubtitles: false,
         disableDefaultSubtitleRemux: true,
@@ -1176,7 +1199,13 @@ function switchServerSubtitleStable(root, reason, streamIdx, listIdx) {
 }
 
 function handleSubsOff(root) {
-    if (!root.isDsLike()) {
+    // Un overlay QML seul peut fonctionner pendant un Remux ou une lecture HLS.
+    // Son arrêt ne doit pas changer l'URL vidéo. Conserver la voie serveur si
+    // une piste serveur est encore effectivement sélectionnée.
+    var localOverlayOnly = root.useLocalSubs === true &&
+        root.localSubStreamIndex >= 0 &&
+        root.selectedSubtitleStream < 0 && root.effectiveSubtitleStream < 0;
+    if (localOverlayOnly || !root.isDsLike()) {
         // Coupure purement locale : instantanée, même en pause. Elle rend
         // caduque une éventuelle attente de sous-titre serveur.
         cancelDeferredReload(root, _K_SUBTITLE, "subs-off-local");
@@ -1196,17 +1225,25 @@ function handleSubsOff(root) {
 }
 
 function handleSubsText(root, item, streamIdx, listIdx) {
-    // Contrat ReDeFin :
-    //   - DirectPlay pur => overlay local QML
-    if (!PlaybackRouter.isPureDirectPlay(root)) {
-        switchServerSubtitleStable(root, "subsTextServer", streamIdx, listIdx);
-        return;
+    // Les sous-titres texte utilisent l'overlay local lorsqu'ils sont déjà
+    // compatibles avec cette voie. MOV_TEXT/TX3G est TOUJOURS local : Jellyfin
+    // expose la piste via /Subtitles/.../Stream.vtt, puis ReDeFin garde la vidéo
+    // dans son pipeline courant (DirectPlay/remux/transcodage) sans remux MP4.
+    var forceLocalMovText = isMovTextSubtitleStream(root, streamIdx)
+    var useLocalOverlay = forceLocalMovText || PlaybackRouter.isPureDirectPlay(root)
+    if (!useLocalOverlay) {
+        switchServerSubtitleStable(root, "subsTextServer", streamIdx, listIdx)
+        return
     }
-    // Overlay texte local en DirectPlay pur : aucune négociation, donc aucun
-    // report en pause. L'attente serveur éventuelle est annulée.
-    cancelDeferredReload(root, _K_SUBTITLE, "subs-text-local");
-    if (root.hasOwnProperty("disableAutoVoFrenchFullSubtitle")) root.disableAutoVoFrenchFullSubtitle = false;
-    var seq = ++root._localSubtitlePickSeq;
+
+    cancelDeferredReload(root, _K_SUBTITLE, "subs-text-local")
+    if (root.hasOwnProperty("disableAutoVoFrenchFullSubtitle"))
+        root.disableAutoVoFrenchFullSubtitle = false
+
+    var hadServerSubtitle = root.useLocalSubs !== true &&
+        (((typeof root.selectedSubtitleStream === "number") && root.selectedSubtitleStream >= 0) ||
+         ((typeof root.effectiveSubtitleStream === "number") && root.effectiveSubtitleStream >= 0))
+    var seq = ++root._localSubtitlePickSeq
     var old = {
         index: root.subtitleIndex,
         selected: root.selectedSubtitleStream,
@@ -1215,47 +1252,71 @@ function handleSubsText(root, item, streamIdx, listIdx) {
         cues: root.localCues,
         format: root.localSubFormat,
         stream: root.localSubStreamIndex
-    };
-    root.subMenuVisible = false;
-    root._pendingSubStream = -1;
-    root._pendingSubIndex = -1;
-    root._autoLocalizeSubStream = -1;
-    root.loadLocalSubtitleByStreamIndex(streamIdx, function(ok) {
-        if (seq !== root._localSubtitlePickSeq) return;
-        if (ok) {
-            root.subtitleIndex = listIdx;
-            root.selectedSubtitleStream = -1;
-            root.effectiveSubtitleStream = -1;
-            root._autoLocalizeSubStream = -1;
-            root._lastSubsUiPushMs = -1;
-            if (item) {
-                item.cues = root.localCues;
-                item.enabled = root.localCues.length > 0;
-                item.gateArmed = root._gateArmed;
-            }
-            root._pushLocalSubsUiMs(root.uiPositionMs(), true);
-            root._syncTrackMenuIndexes("subs-text-local-success");
-        } else {
-            root.subtitleIndex = old.index;
-            root.selectedSubtitleStream = old.selected;
-            root.effectiveSubtitleStream = old.effective;
-            root.useLocalSubs = old.local;
-            root.localCues = old.cues;
-            root.localSubFormat = old.format;
-            root.localSubStreamIndex = old.stream;
-            root._lastSubsUiPushMs = -1;
-            if (item) {
-                item.cues = old.cues;
-                item.enabled = old.local && old.cues && old.cues.length > 0;
-                item.gateArmed = root._gateArmed;
-            }
-            root._syncTrackMenuIndexes("subs-text-local-restore");
-        }
-        root.updateClocksFromPlaybackThrottled(true);
-        root.resetControlsTimer();
-    }, true);
-}
+    }
 
+    root.subMenuVisible = false
+    root._pendingSubStream = -1
+    root._pendingSubIndex = -1
+    root._autoLocalizeSubStream = -1
+
+    root.loadLocalSubtitleByStreamIndex(streamIdx, function(ok) {
+        if (seq !== root._localSubtitlePickSeq) return
+
+        if (ok) {
+            root.subtitleIndex = listIdx
+            // Le serveur ne sélectionne aucune piste : l'overlay QML est la
+            // source de vérité pour l'affichage et évite tout double rendu.
+            root.selectedSubtitleStream = -1
+            root.effectiveSubtitleStream = -1
+            root._autoLocalizeSubStream = -1
+            root._lastSubsUiPushMs = -1
+
+            if (item) {
+                item.cues = root.localCues
+                item.enabled = root.localCues.length > 0
+                item.gateArmed = root._gateArmed
+            }
+            root._pushLocalSubsUiMs(root.uiPositionMs(), true)
+            root._syncTrackMenuIndexes(forceLocalMovText
+                ? "subs-movtext-local-success"
+                : "subs-text-local-success")
+
+            // Si une ancienne piste serveur était réellement embarquée, il faut
+            // la retirer une fois les cues locales prêtes. On conserve le type de
+            // pipeline courant : HLS reste HLS, remux reste progressif.
+            if (hadServerSubtitle) {
+                var target = root._beginTrackSwitchRebase(
+                    forceLocalMovText ? "subsMovTextLocalRebase" : "subsTextLocalRebase",
+                    false)
+                var keepHls = root.isHls === true
+                root.negotiatePlayback(target, keepHls, true, false, false, {
+                    trackSwitchRebase: true,
+                    forceRetry: true,
+                    forceServerRemux: !keepHls && !PlaybackRouter.isPureDirectPlay(root),
+                    forceServerSeek: false,
+                    disableDefaultSubtitleRemux: true
+                })
+            }
+        } else {
+            root.subtitleIndex = old.index
+            root.selectedSubtitleStream = old.selected
+            root.effectiveSubtitleStream = old.effective
+            root.useLocalSubs = old.local
+            root.localCues = old.cues
+            root.localSubFormat = old.format
+            root.localSubStreamIndex = old.stream
+            root._lastSubsUiPushMs = -1
+            if (item) {
+                item.cues = old.cues
+                item.enabled = old.local && old.cues && old.cues.length > 0
+                item.gateArmed = root._gateArmed
+            }
+            root._syncTrackMenuIndexes("subs-text-local-restore")
+        }
+        root.updateClocksFromPlaybackThrottled(true)
+        root.resetControlsTimer()
+    }, true)
+}
 function handleSubsImage(root, streamIdx, listIdx) {
     // PGS/VobSub sont bitmap. L'overlay QML actuel accepte uniquement des cues
     // texte SRT/VTT : la piste reste donc gérée par Jellyfin. La policy de la
@@ -1279,6 +1340,22 @@ function subtitleTypeForStream(root, streamIdx) {
         if (Number(map[i]) === Number(streamIdx))
             return textMap[i] === true ? "text" : "image";
     return "unknown";
+}
+
+function subtitleCodecForStream(root, streamIdx) {
+    var map = root && root.subtitleStreamIndexMap ? root.subtitleStreamIndexMap : [];
+    var codecs = root && root.subtitleCodecMap ? root.subtitleCodecMap : [];
+    for (var i = 0; i < map.length; i++) {
+        if (Number(map[i]) !== Number(streamIdx)) continue;
+        var c = i < codecs.length ? _s(codecs[i]).toLowerCase() : "";
+        return c === "tx3g" ? "mov_text" : c;
+    }
+    return "";
+}
+
+function isMovTextSubtitleStream(root, streamIdx) {
+    var c = subtitleCodecForStream(root, streamIdx);
+    return c === "mov_text" || c === "tx3g";
 }
 
 function restoreAudioSwitchTransaction(root, extra) {
@@ -1378,7 +1455,6 @@ function applyStickyManualRemux(root, ctx) {
     ctx.disableDefaultFrenchAudioOrderRemux = true
     ctx.disableImageSubtitleRiskRemux = true
     ctx.disableHevcMain10MkvRemux = true
-    ctx.allowLocalSubtitleOverlay = false
     ctx.preferExternalTextSubtitlesInRemux = false
     ctx.forceTextSubtitleServerBurnIn = false
     ctx.preferServerSubtitleBurnInOnVideoTranscode = false

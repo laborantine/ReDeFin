@@ -282,7 +282,6 @@ function _joinUrl(base, params) {
 
 function _subtitleProfiles(encodeImages) {
     var text = ["srt", "subrip", "vtt", "webvtt", "ass", "ssa", "dvbtxt"]
-    var embedOnly = ["mov_text", "tx3g"]
     var image = ["pgssub", "pgs", "hdmv_pgs_subtitle", "dvdsub", "dvd_subtitle", "vobsub", "dvbsub", "dvb_subtitle", "xsub"]
     var out = []
     for (var i = 0; i < text.length; i++) {
@@ -291,8 +290,6 @@ function _subtitleProfiles(encodeImages) {
         if (encodeImages)
             out.push({ Format: text[i], Method: "Encode" })
     }
-    for (var e = 0; e < embedOnly.length; e++)
-        out.push({ Format: embedOnly[e], Method: "Embed" })
     for (var im = 0; im < image.length; im++)
         out.push({ Format: image[im], Method: encodeImages ? "Encode" : "Embed" })
     return out
@@ -308,6 +305,13 @@ function buildDeviceProfile(mode) {
     var audioAll = "ac3,eac3,dts,dca,truehd,flac,opus,vorbis,aac,mp3,mp2"
     var audioMp4 = "ac3,eac3,aac,mp3"
     var hlsMode = (mode === "hls" || mode === "hls-encode")
+    var directStreamProfiles = [
+        { Container: "mkv", Type: "Video", VideoCodec: videoAll, AudioCodec: audioAll },
+        { Container: "ts", Type: "Video", VideoCodec: "h264,mpeg2video", AudioCodec: audioAll },
+        { Container: "mp4", Type: "Video", VideoCodec: videoAll, AudioCodec: audioMp4 },
+        { Container: "avi", Type: "Video", VideoCodec: "mpeg4,mpeg2video,h264", AudioCodec: audioAll },
+        { Container: "webm", Type: "Video", VideoCodec: videoWebm, AudioCodec: "vorbis,opus" }
+    ]
     return {
         Name: "Freebox-Qt5",
         MaxStreamingBitrate: 200000000,
@@ -320,13 +324,7 @@ function buildDeviceProfile(mode) {
             { Container: "ts,m2ts,mpg,mpeg", Type: "Video", VideoCodec: "h264,mpeg2video", AudioCodec: audioAll },
             { Container: "webm", Type: "Video", VideoCodec: videoWebm, AudioCodec: "vorbis,opus" }
         ],
-        DirectStreamProfiles: [
-            { Container: "mkv", Type: "Video", VideoCodec: videoAll, AudioCodec: audioAll },
-            { Container: "ts", Type: "Video", VideoCodec: "h264,mpeg2video", AudioCodec: audioAll },
-            { Container: "mp4", Type: "Video", VideoCodec: videoAll, AudioCodec: audioMp4 },
-            { Container: "avi", Type: "Video", VideoCodec: "mpeg4,mpeg2video,h264", AudioCodec: audioAll },
-            { Container: "webm", Type: "Video", VideoCodec: videoWebm, AudioCodec: "vorbis,opus" }
-        ],
+        DirectStreamProfiles: directStreamProfiles,
         TranscodingProfiles: [
             hlsMode
                 ? { Container: "ts", Type: "Video", Protocol: "hls", VideoCodec: "h264", AudioCodec: "ac3,eac3,aac,mp3" }
@@ -417,13 +415,6 @@ function _normalizeAudioCodecHint(s) {
     if (c === "aac" || c === "mp4a") return "aac"
     return c
 }
-function _isTx3gSelected(src, subIndex) {
-    var st = _subtitleStreamByIndex(src, subIndex)
-    if (!st) return false
-    var c = _s(st.Codec).toLowerCase()
-    var tag = _s(st.CodecTag).toLowerCase()
-    return (c === "mov_text" || c === "tx3g" || tag === "tx3g")
-}
 var _forceQueryCleanKeys = [
     "static", "Static", "AudioStreamIndex", "SubtitleStreamIndex", "SubtitleMethod",
     "StartTimeTicks", "PlaySessionId", "ApiKey", "api_key", "apikey", "Container",
@@ -494,9 +485,6 @@ function _canonicalizePlaybackAuthOnly(url, accessToken) {
     _setQuery(p, "ApiKey", accessToken || "")
     return _joinUrl(sp.base, p)
 }
-
-// La TranscodingUrl HLS issue de PlaybackInfo doit rester verbatim sur Devialet.
-// La reprise audio-only est désormais effectuée localement après ouverture du manifeste.
 
 function _preserveJellyfinTranscodingQuery(url, ctx, includeTicks) {
     if (!url) return ""
@@ -909,6 +897,10 @@ function _transportFetchStreams(serverUrl, accessToken, itemId, onSuccess, onErr
         var sLabels = []
         var sMap = [-1]
         var sIsText = [false]
+        // Aligné sur sMap : l'entrée 0 représente « Aucun ». Conserver le codec
+        // exact permet au Player de distinguer MOV_TEXT/TX3G des autres textes et
+        // de sélectionner leur affichage par l’overlay QML sans remux MP4.
+        var sCodecMap = [""]
         var defaultAudioStreamIndex = -1
         var defaultSubtitleStreamIndex = -1
         var firstAudioStreamIndex = -1
@@ -973,6 +965,9 @@ function _transportFetchStreams(serverUrl, accessToken, itemId, onSuccess, onErr
                 sLabels.push(lab)
                 sMap.push(subIdx)
                 var codec = _s(st.Codec).toLowerCase()
+                var codecTag = _s(st.CodecTag).toLowerCase()
+                var normalizedSubtitleCodec = (codec === "tx3g" || codecTag === "tx3g") ? "mov_text" : codec
+                sCodecMap.push(normalizedSubtitleCodec)
                 var textish = (st.IsTextSubtitleStream === true) || _isTextSubtitleCodec(codec)
                 sIsText.push(!!textish)
 
@@ -1105,6 +1100,7 @@ function _transportFetchStreams(serverUrl, accessToken, itemId, onSuccess, onErr
             audioBitrateMap: aBitrateMap,
             subtitleMap: sMap,
             subtitleIsText: sIsText,
+            subtitleCodecMap: sCodecMap,
             defaultAudioStreamIndex: defaultAudioStreamIndex,
             defaultSubtitleStreamIndex: defaultSubtitleStreamIndex,
             firstAudioStreamIndex: firstAudioStreamIndex,

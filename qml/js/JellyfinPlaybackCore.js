@@ -4,7 +4,7 @@
 .import "AudioOutputPolicy.js" as AudioOutput
 .import "ForcedSubtitlePolicy.js" as ForcedSubs
 // ReDeFin playback policy: VFF priority, dormant subtitle safety, VO + French full auto-remux, TrueHD 5.1 audio-only transcoding and global high-quality DVDSub transcoding.
-// Text subtitles: local QML overlay is reserved for pure DirectPlay. Server-side modes use server-managed Embed by default; burn-in remains an explicit fallback.
+// Text subtitles: local QML overlay is used for pure DirectPlay and for explicitly chosen MOV_TEXT/TX3G, including Remux/HLS. Other server-side subtitles follow Embed/Burn-in policy.
 // Any internal DVDSub/VobSub forces a progressive H.264 transcode only in Smart mode; global Original and manual DirectPlay bypass this soft safety rule.
 // Image subtitles require IsForced=true, except one first French PGS "Forced" structurally paired with a later French PGS full track.
 // Legacy audio/subtitle tracks may infer French from bounded raw title tokens such as FR/VFF/VFI/VFQ.
@@ -1356,7 +1356,7 @@ var _CORE_URL_REQUIRED = [
     "buildHighQualityProgressiveTranscodeUrl", "buildHlsUrl",
     "getVideoStreamUrl", "_subtitleResultUrl", "buildDeviceProfile",
     "_needsServerTrackSelection_ctx", "_decidePreferredContainerWithSrc",
-    "_buildRemuxProgressiveUrl", "_normalizeAudioCodecHint", "_isTx3gSelected",
+    "_buildRemuxProgressiveUrl", "_normalizeAudioCodecHint",
     "_forceQuery", "_u", "_headersWithToken", "_jsonNormalize", "_sendRequest",
     "_sendPlaybackInfoExact", "_extFrom", "_isProblematicForSeek", "_transportValidateServerUrlStrict",
     "_transportValidatePlaybackUrlStrict", "_transportFetchStreams"
@@ -2024,14 +2024,6 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                                     : (forceTrueHd51AudioTranscode ? "ac3"
                                        : (forcePolicyAudioOnlyTranscode ? _policyTranscodeAudioCodecHint(ctx, src, audioOutputStreamIndex, false) : null))
 
-        var tx3gSelected = CoreUrl._isTx3gSelected(src, ctx.selectedSubtitleStream)
-        // Aucun overlay local ne doit être créé pendant une négociation serveur,
-        // sauf opt-in explicite d'un vrai DirectPlay. Le chemin manuel SRT
-        // DirectPlay ne passe de toute façon pas par cette négociation.
-        var forceLocalOverlay = (ctx.allowLocalSubtitleOverlay === true &&
-            tx3gSelected && !mustHls && !forceImageBurnIn)
-        if (forceLocalOverlay)
-            subMethodWanted = null
         if (forceDvdSubFileTranscode) {
             mustHls = false
             wantsServerSelect = true
@@ -2254,8 +2246,9 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                                                   ? ctx.selectedSubtitleStream : -1))
                 var audioOnlySubtitleMethod = audioOnlySubtitleIndex >= 0 ? (carrySafeFrenchForcedSubtitle ? "Embed" : (subMethodWanted || "Embed"))
                                            : null
-                var audioOnlyContainer = mp4EditListTimestampRisk ? "mkv"
-                                      : (CoreUrl._decidePreferredContainerWithSrc(ctx, src) || "mkv")
+                var audioOnlyContainer = ctx.forceMp4 === true ? "mp4"
+                                      : (mp4EditListTimestampRisk ? "mkv"
+                                         : (CoreUrl._decidePreferredContainerWithSrc(ctx, src) || "mkv"))
 
                 // PlaybackInfo a été négocié avec un profil HTTP/MKV dédié au
                 // downmix. Si Jellyfin fournit une URL progressive, elle est
@@ -2300,8 +2293,9 @@ function negotiatePlayback(ctx, onSuccess, onError) {
             } else if (ctx.forceExplicitServerProgressiveSeek === true && (ctx.startMs || 0) > 0 && !mustHls && !forceTranscodeByPolicy) {
                 remuxAudioCodecLock = dvdFolderMpegRemux ? _dvdMpegAudioCodecLock(src, effectiveAudioStreamIndex)
                                    : _remuxAudioCodecLock(ctx, src, effectiveAudioStreamIndex, true, false, false)
-                var explicitSeekContainer = mp4ContainerTimelineRisk ? "mkv"
-                                          : (dvdFolderMpegRemux ? "mpeg" : (CoreUrl._decidePreferredContainerWithSrc(ctx, src) || (cont || pathExt || "mkv")))
+                var explicitSeekContainer = ctx.forceMp4 === true ? "mp4"
+                                          : (mp4ContainerTimelineRisk ? "mkv"
+                                             : (dvdFolderMpegRemux ? "mpeg" : (CoreUrl._decidePreferredContainerWithSrc(ctx, src) || (cont || pathExt || "mkv"))))
                 var explicitSeekSubMethod = carrySafeFrenchForcedSubtitle ? "Embed"
                                           : ((!ctx.useLocalSubs && typeof ctx.selectedSubtitleStream === "number" && ctx.selectedSubtitleStream >= 0)
                                               ? (subMethodWanted || (preferImageRemux ? "Embed" : null)) : null)
@@ -2341,7 +2335,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                     src, mediaSourceId,
                     playSessionId, effectiveAudioStreamIndex,
                     carrySafeFrenchForcedSubtitle ? "Embed" : null, includeTicks,
-                    "mkv", remuxAudioCodecLock,
+                    ctx.forceMp4 === true ? "mp4" : "mkv", remuxAudioCodecLock,
                     serverExternalTextSubtitle, autoSubtitleEmbedIndex
                 )
                 lastUsedDirectStream = false
@@ -2352,8 +2346,9 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                                    : _remuxAudioCodecLock(ctx, src, effectiveAudioStreamIndex, true, false, false)
 
                 includeTicks = !!(includeTicks || forceTicksForServerRemux || ctx.forceServerSeek)
-                var forcedCont0 = mp4ContainerTimelineRisk ? "mkv"
-                                : (dvdFolderMpegRemux ? "mpeg" : (CoreUrl._decidePreferredContainerWithSrc(ctx, src) || (cont || pathExt || "mkv")))
+                var forcedCont0 = ctx.forceMp4 === true ? "mp4"
+                                : (mp4ContainerTimelineRisk ? "mkv"
+                                   : (dvdFolderMpegRemux ? "mpeg" : (CoreUrl._decidePreferredContainerWithSrc(ctx, src) || (cont || pathExt || "mkv"))))
                 var strictSubMethod = carrySafeFrenchForcedSubtitle ? "Embed"
                                     : ((!ctx.useLocalSubs && typeof ctx.selectedSubtitleStream === "number" && ctx.selectedSubtitleStream >= 0)
                                         ? (subMethodWanted || (preferImageRemux ? "Embed" : null)) : null)
@@ -2556,7 +2551,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                 isServerRemux = true
             }
         }
-        var forcedContainer = mp4ContainerTimelineRisk ? "mkv" : (ctx.preferredContainer || CoreUrl._decidePreferredContainerWithSrc(ctx, src)); var looksLikeHls = (newUrl.indexOf(".m3u8") >= 0) || (newUrl.indexOf("/hls") >= 0)
+        var forcedContainer = ctx.forceMp4 === true ? "mp4" : (mp4ContainerTimelineRisk ? "mkv" : (ctx.preferredContainer || CoreUrl._decidePreferredContainerWithSrc(ctx, src))); var looksLikeHls = (newUrl.indexOf(".m3u8") >= 0) || (newUrl.indexOf("/hls") >= 0)
         var policyTranscode = !!(forceTranscodeByPolicy && lastUsedTranscoding); var dvdSubFileTranscodeActive = !!(forceDvdSubFileTranscode && lastUsedTranscoding && !looksLikeHls)
         var interlacedTsTranscodeActive = !!(forceInterlacedTsTranscode && lastUsedTranscoding && !looksLikeHls)
         // Décision finale de la réinjection du sous-titre forcé : le chemin
@@ -2592,7 +2587,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
             selectedSubtitleStream: interlacedTsTranscodeActive ? tsSubtitleIndex
                                     : (dvdSubFileTranscodeActive ? dvdSubTranscodeSubtitleIndex
                                        : (serverExternalTextSubtitle ? -1 : (carrySafeFrenchForcedSubtitle ? safeFrenchForcedSubIndex : ctx.selectedSubtitleStream))),
-            useLocalSubs: ctx.useLocalSubs || (forceLocalOverlay && !looksLikeHls), startMs: ctx.startMs,
+            useLocalSubs: ctx.useLocalSubs === true, startMs: ctx.startMs,
             playSessionId: (isServerRemux || policyTranscode || dvdSubFileTranscodeActive || interlacedTsTranscodeActive || audioOnlyTranscodeActive || looksLikeHls || ctx.forceServerSeek) ? playSessionId : "",
             preferredContainer: (dvdSubFileTranscodeActive || interlacedTsTranscodeActive || audioOnlyTranscodeActive) ? "mkv" : ((isServerRemux || (policyTranscode && !looksLikeHls)) ? (forcedContainer || "mkv") : null),
             forceServerSeek: !!ctx.forceServerSeek, forceServerRemux: !!isServerRemux,
@@ -2757,7 +2752,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
             return
         }
         var externalSub = null
-        if ((forceLocalOverlay || serverExternalTextSubtitle) && !looksLikeHls && mediaSourceId && typeof ctx.selectedSubtitleStream === "number") {
+        if (serverExternalTextSubtitle && !looksLikeHls && mediaSourceId && typeof ctx.selectedSubtitleStream === "number") {
             externalSub = {
                 urlSrt: CoreUrl._subtitleResultUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, mediaSourceId, ctx.selectedSubtitleStream, "srt"),
                 urlVtt: CoreUrl._subtitleResultUrl(ctx.serverUrl, ctx.accessToken, ctx.itemId, mediaSourceId, ctx.selectedSubtitleStream, "vtt"),
@@ -2781,7 +2776,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
         } else if (!ctx.useLocalSubs && typeof ctx.selectedSubtitleStream === "number" && ctx.selectedSubtitleStream >= 0) {
             effectiveSubtitleStreamIndex = ctx.selectedSubtitleStream
             effectiveSubtitleMode = forceImageBurnIn ? "encode" : (serverExternalTextSubtitle ? "external" :
-                                     ((forceLocalOverlay && !isHls) ? "overlay" : (subMethodWanted ? String(subMethodWanted).toLowerCase() : (isHls ? "hls" : "embed"))))
+                                     (subMethodWanted ? String(subMethodWanted).toLowerCase() : (isHls ? "hls" : "embed")))
             effectiveSubtitleReason = forceTextSubtitleBurnIn ? "videoTranscodeServerBurnIn"
                                       : (autoVoFrenchFullSubtitle ? "voFrenchFullAutoRemux" : "manual")
         } else if (carrySafeFrenchForcedSubtitle && safeFrenchForcedSubIndex >= 0) {
@@ -2801,7 +2796,7 @@ function negotiatePlayback(ctx, onSuccess, onError) {
                 !lastUsedTranscoding && !lastUsedDirectStream
         if (pureStaticDirectPlay) {
             if (effectiveSubtitleStreamIndex < 0 && ctx.useLocalSubs !== true &&
-                    !forceLocalOverlay && !serverExternalTextSubtitle) {
+                    !serverExternalTextSubtitle) {
                 var nativeDpSubtitleIndex = _nativeDirectPlaySubtitleIndex(src)
                 if (nativeDpSubtitleIndex >= 0) {
                     effectiveSubtitleStreamIndex = nativeDpSubtitleIndex
@@ -2831,8 +2826,8 @@ function negotiatePlayback(ctx, onSuccess, onError) {
             serverTimedStream: serverTimed, timeShifted: serverTimed,
             subMethod: interlacedTsTranscodeActive ? (tsSubtitleIndex >= 0 ? "encode" : "none")
                        : (dvdSubFileTranscodeActive ? (dvdSubTranscodeSubtitleMethod ? String(dvdSubTranscodeSubtitleMethod).toLowerCase() : "none")
-                          : (forceImageBurnIn ? "encode" : (serverExternalTextSubtitle ? "external" : ((forceLocalOverlay && !isHls) ? "overlay" : (subMethodWanted ? String(subMethodWanted).toLowerCase() : "none"))))),
-            externalSubtitle: externalSub, forceLocalSubs: (!!(forceLocalOverlay && !isHls)),
+                          : (forceImageBurnIn ? "encode" : (serverExternalTextSubtitle ? "external" : (subMethodWanted ? String(subMethodWanted).toLowerCase() : "none")))),
+            externalSubtitle: externalSub, forceLocalSubs: (ctx.useLocalSubs === true),
             forceServerExternalSubtitle: !!(serverExternalTextSubtitle && !isHls), forcedImageBurnIn: forceImageBurnIn,
             forcedTextBurnIn: forceTextSubtitleBurnIn, forcedServerSubtitleBurnIn: !!(forceImageBurnIn || forceTextSubtitleBurnIn),
             imageSubtitleRemux: preferImageRemux, imageSubtitleFullRemux: imageSubtitleFullRemux,

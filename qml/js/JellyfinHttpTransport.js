@@ -161,8 +161,12 @@ function createPagedRequestController(budgetMs) {
         }
     };
 }
-function sweepHttpWatchdogs(nowMs) {
-    var now = Number(nowMs || nowMs()); var expired = [];
+function sweepHttpWatchdogs(instantMs) {
+    // Ne pas masquer nowMs() par le nom du paramètre : les appels sans argument
+    // doivent également pouvoir réveiller et expirer les requêtes en attente.
+    var now = Number(instantMs);
+    if (!isFinite(now) || now <= 0) now = nowMs();
+    var expired = [];
     for (var key in _httpOperations) {
         if (!Object.prototype.hasOwnProperty.call(_httpOperations, key)) continue;
         var op = _httpOperations[key];
@@ -262,17 +266,35 @@ function _safeResponseHeaders(headers) {
     } catch(e0) {}
     return out;
 }
-function _makeSafeHttpSuccessPayload(status, rawText, headersObj, jsonParseFn, returnText) {
+function _isJsonResponseHeader(headers) {
+    headers = headers || {};
+    for (var k in headers) {
+        if (!Object.prototype.hasOwnProperty.call(headers, k)) continue;
+        if (_s(k).toLowerCase() !== "content-type") continue;
+        var value = _s(headers[k]).toLowerCase().split(";")[0];
+        return value === "application/json" || /\+json$/.test(value);
+    }
+    return false;
+}
+function _makeSafeHttpSuccessPayload(status, rawText, headersObj, jsonParseFn, returnText, method) {
     var raw = _s(rawText); var maxLen = returnText ? MAX_TEXT_RESPONSE_LEN : MAX_HTTP_TEXT_LEN;
     if (raw.length > maxLen)
         return { tooLarge: true };
     var json = null;
     if (!returnText) {
-        try {
-            json = (typeof jsonParseFn === "function") ? jsonParseFn() : _parseJsonBounded(raw);
-        } catch(e0) {
+        try { if (typeof jsonParseFn === "function") json = jsonParseFn(); }
+        catch(e0) {}
+        // Certains firmwares renvoient null via jsonParse() alors que le corps
+        // contient bien du JSON : conserver le repli borné existant.
+        if (json === null || json === undefined)
             json = _parseJsonBounded(raw);
-        }
+        // Ne jamais mettre une réponse 200 JSON invalide dans le cache API.
+        // Les 204/205 et les réponses non JSON restent inchangées.
+        if ((status | 0) >= 200 && (status | 0) < 300 &&
+                _isJsonResponseHeader(headersObj) &&
+                (json === null || json === undefined) &&
+                (raw.length > 0 || (_s(method).toUpperCase() === "GET" && (status | 0) === 200)))
+            return { invalidResponse: true };
     }
     return {
         tooLarge: false,
@@ -366,10 +388,14 @@ function _xhrSend(method, url, headers, body, onSuccess, onError, timeoutMs) {
                     rawTxt,
                     headersObj,
                     function() { return _parseJsonBounded(rawTxt); },
-                    _shouldReturnTextForRequest(method, url, headers)
+                    _shouldReturnTextForRequest(method, url, headers), method
                 );
                 if (safe.tooLarge) {
                     op.fail({ code: "too_large", message: "too_large" });
+                    return;
+                }
+                if (safe.invalidResponse) {
+                    op.fail({ code: "invalid_response", message: "invalid_response", status: status | 0 });
                     return;
                 }
                 op.succeed(safe.payload);
@@ -407,10 +433,14 @@ function _bindNativeReply(op, promise, method, url, headers) {
             rawText,
             response.headers || {},
             function() { return response.jsonParse ? response.jsonParse() : _parseJsonBounded(rawText); },
-            _shouldReturnTextForRequest(method, url, headers)
+            _shouldReturnTextForRequest(method, url, headers), method
         );
         if (safe.tooLarge) {
             op.fail({ code: "too_large", message: "too_large" });
+            return;
+        }
+        if (safe.invalidResponse) {
+            op.fail({ code: "invalid_response", message: "invalid_response", status: status | 0 });
             return;
         }
         op.succeed(safe.payload);

@@ -402,10 +402,13 @@ function windowCache_computeSignature(items) {
  * Lit une entrée de cache. windowStartIndex est l'index de fenêtre attendu
  * (calculé par moviepage à partir de la cible de restauration courante) :
  * une entrée qui correspond à une autre portion de la bibliothèque est
- * traitée comme absente plutôt que comme périmée, ce n'est pas la même
- * fenêtre. Renvoie { status: "hit"|"miss"|"stale", entry }.
+ * traitée comme absente plutôt que comme périmée, sauf si l'index de focus
+ * explicite est déjà compris dans la fenêtre conservée. Cela évite un GET
+ * lorsqu'un déplacement avait décalé le début de la fenêtre avant le retour.
+ * En l'absence de cible explicite, le début doit correspondre exactement.
+ * Renvoie { status: "hit"|"miss"|"stale", entry }.
  */
-function windowCache_readEntry(bucket, key, nowMs, expectedWindowStart) {
+function windowCache_readEntry(bucket, key, nowMs, expectedWindowStart, restoreGlobalIndex) {
     var entry = (bucket && key) ? bucket[key] : null;
     if (!entry) return { status: "miss", entry: null };
 
@@ -414,7 +417,14 @@ function windowCache_readEntry(bucket, key, nowMs, expectedWindowStart) {
 
     if (expectedWindowStart !== undefined && expectedWindowStart !== null &&
             (Number(entry.windowStartIndex) | 0) !== (Number(expectedWindowStart) | 0)) {
-        return { status: "miss", entry: null };
+        var target = Number(restoreGlobalIndex);
+        var first = Number(entry.windowStartIndex) | 0;
+        var count = entry.rawItems && entry.rawItems.length ? (entry.rawItems.length | 0) : 0;
+        // Pas de supposition sur la pagination en l'absence d'une cible explicite.
+        if (restoreGlobalIndex === undefined || restoreGlobalIndex === null ||
+                !isFinite(target) || target < 0 || count <= 0 ||
+                target < first || target >= first + count)
+            return { status: "miss", entry: null };
     }
 
     return { status: "hit", entry: entry };

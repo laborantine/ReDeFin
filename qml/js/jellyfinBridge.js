@@ -914,7 +914,12 @@ function sendRequest(method, url, headers, body, onSuccess, onError, _state) { /
             controller._finish();
             return;
         }
-        var altHost = _computeAltHost();
+        // Un hôte alternatif ne résout pas une réponse JSON corrompue,
+        // un rejet de sécurité, une annulation ou un dépassement de taille.
+        // Réserver le basculement réseau aux vraies pannes de transport.
+        var canRetryHost = (_errCode(err, "network_error") === "network_error" ||
+                            _errCode(err, "network_error") === "timeout");
+        var altHost = canRetryHost ? _computeAltHost() : "";
         if (!_state.disableAlt && altHost && !_state.usedAlt) {
             _state.usedAlt = true;
             var alt = _safeAltUrlForAuth(url, altHost);

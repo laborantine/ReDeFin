@@ -176,9 +176,6 @@ function _devialetProfile(mode) {
             { Format: "ssa",      Method: "Embed" },
             { Format: "vtt",      Method: "Embed" },
             { Format: "webvtt",   Method: "Embed" },
-            { Format: "mov_text", Method: "Embed" },
-            { Format: "tx3g",     Method: "Embed" },
-
             // Embed image subtitles (remux / directstream)
             { Format: "pgssub", Method: "Embed" },
             { Format: "dvdsub", Method: "Embed" },
@@ -204,7 +201,6 @@ function _devialetProfile(mode) {
 
 function _devialetPreferredContainer(ctx, src) {
     if (!ctx) return null
-
     var needServerSelect =
         (typeof ctx.selectedAudioStream === "number" && ctx.selectedAudioStream >= 0) ||
         (!ctx.useLocalSubs && typeof ctx.selectedSubtitleStream === "number" && ctx.selectedSubtitleStream >= 0) ||

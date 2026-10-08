@@ -624,26 +624,34 @@ function logoUrlFromItem(root, bridge, it) {
     return tag && it.Id ? bridge.itemImageUrl(root.serverUrl, it.Id, "Logo", tag, {}) : "";
 }
 
-function ensureSeriesLogoTag(root, bridge, it) {
-    if (!root.serverUrl || !root.accessToken || !it || hasQueryTag(root.currentItemLogoUrl)) return;
+function ensureSeriesLogoTag(root, bridge, it, onSettled) {
+    // Callback facultatif : terminer la decision d'affichage meme sans logo.
+    function done() { if (typeof onSettled === "function") onSettled(); }
+    if (!root.serverUrl || !root.accessToken || !it || hasQueryTag(root.currentItemLogoUrl)) {
+        done(); return;
+    }
     var t = _s(it.Type);
     var sid = (t === "Episode" || t === "Season") ?
         (it.SeriesId || (it.Series && it.Series.Id) || "") : "";
-    if (!sid) return;
+    if (!sid) { done(); return; }
     var expectedItemId = _s(it.Id || root.itemId || "");
     var expectedSeriesId = _s(sid);
     bridge.fetchItem(root.serverUrl, root.accessToken, expectedSeriesId, function(series) {
-        if (_s(root.itemId || "") !== expectedItemId) return;
-        if (!series || _s(series.Id || "") !== expectedSeriesId) return;
+        if (_s(root.itemId || "") !== expectedItemId ||
+                !series || _s(series.Id || "") !== expectedSeriesId) {
+            done(); return;
+        }
         var tags = series.ImageTags || {},
             tag = tags.Logo || tags.logo || "";
-        if (!tag) return;
-        var u = bridge.itemImageUrl(root.serverUrl, expectedSeriesId, "Logo", tag, {});
-        root.currentItemLogoUrl = u;
-        root.lastGoodLogoUrl = u;
-        root.lastGoodLogoItemId = expectedItemId;
-        root._pushTopBar();
-    }, function() {});
+        if (tag) {
+            var u = bridge.itemImageUrl(root.serverUrl, expectedSeriesId, "Logo", tag, {});
+            root.currentItemLogoUrl = u;
+            root.lastGoodLogoUrl = u;
+            root.lastGoodLogoItemId = expectedItemId;
+        }
+        if (typeof onSettled === "function") done();
+        else root._pushTopBar();
+    }, function() { done(); });
 }
 
 function pushLocalSubsUiMs(root, item, pos, force) {
@@ -896,6 +904,7 @@ function negotiateAndApply(root, mp, router, subtitleItem, timers, startMs, forc
     ctx.audioOutputMode = root.audioOutputMode || "multichannel";
     ctx.playbackRouterMode = root.playbackDeviceMode || "";
     ctx.playbackRouterBackend = root.playbackBackendMode || "";
+
     root.lastUiTargetMs = negotiated;
     // L'ouverture initiale garde une raison distincte : elle ne doit pas
     // verrouiller le transport comme un rechargement.
@@ -1016,10 +1025,24 @@ function negotiateAndApply(root, mp, router, subtitleItem, timers, startMs, forc
             timeShifted: root.timeShifted,
             baseOffsetMs: streamBase
         });
-        // Une sidecar externe renvoyée par le Core ne doit être rendue en
-        // QML que si le résultat final est réellement DirectPlay ET que le
-        // Core l'a explicitement demandé. Jamais sur un flux serveur.
-        if (res.forceLocalSubs === true && resultPureDirectPlay &&
+        // MOV_TEXT/TX3G est deja converti en VTT/SRT puis rendu par l'overlay QML.
+        // Une renegociation servant a enlever une ancienne piste serveur ne doit
+        // pas effacer ces cues simplement parce que la video est en remux/HLS.
+        // Garde stricte: selection locale explicite, cues presentes et absence
+        // d'une piste serveur effectivement incrustee/embarquee dans le resultat.
+        var keepMovTextLocalOverlay = root.useLocalSubs === true &&
+            root.localSubStreamIndex >= 0 && root.localCues &&
+            root.localCues.length > 0 && root.selectedSubtitleStream === -1 &&
+            TrackSelection.isMovTextSubtitleStream(root, root.localSubStreamIndex) &&
+            res.forcedServerSubtitleBurnIn !== true &&
+            res.effectiveSubtitleMode !== "encode" &&
+            res.effectiveSubtitleMode !== "embed" &&
+            res.effectiveSubtitleMode !== "hls";
+        // Un sous-titre sidecar propose par le Core hors selection manuelle
+        // conserve ses garde-fous DirectPlay existants.
+        if (keepMovTextLocalOverlay) {
+            // Le chargement et les cues appartiennent deja a PlayerTrackSelection.
+        } else if (res.forceLocalSubs === true && resultPureDirectPlay &&
             res.externalSubtitle && effectiveSub >= 0 && typeof root.loadLocalSubtitleByStreamIndex === "function") {
             root.loadLocalSubtitleByStreamIndex(effectiveSub, function() {}, true);
         } else if (!resultPureDirectPlay ||
