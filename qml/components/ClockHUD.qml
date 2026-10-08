@@ -74,6 +74,9 @@ Item {
     // boucler correctement que si son cache est actif. On garde donc la source
     // chargée et on borne le décodage à la petite taille réellement affichée.
     property bool   avatarAnimateAlways: true
+    // Option de secours pour les appareils ou vues préférant une image fixe.
+    // Le lecteur emploie désormais le GIF animé, gated par ClockHUD.active.
+    property bool   avatarStaticOnly: false
     property bool   avatarAnimateDuringScroll: false
     property bool   avatarLoopOnlyWhenVisible: true
 
@@ -470,10 +473,10 @@ Item {
                     // un GIF, le fallback statique reste prioritaire/visible.
                     _probePending = false
                     avatarStaticReady = true
-                    avatarGifReady = true
+                    avatarGifReady = !hud.avatarStaticOnly
                     recoveryPause = false
                     recoveryAttempts = 0
-                    animMode = 0
+                    animMode = hud.avatarStaticOnly ? -1 : 0
                     stillStatus = Image.Null
                     animStatus = Image.Null
                     _resetWatchdog()
@@ -483,7 +486,7 @@ Item {
                 property int animMode: 0 // 0 unknown, 1 ok, -1 disabled
 
                 readonly property bool wantAnimate: !!(
-                    hud.visible && hud.active
+                    hud.visible && hud.active && !hud.avatarStaticOnly
                     && (hud.opacity > hud.animateOpacityThreshold)    // TWEAK 2
                     && avatarWrap.visible && avatarWrap.enabled
                     && (hud.avatarAnimateDuringScroll || !hud._scrollingEff)
@@ -585,6 +588,7 @@ Item {
                         if (hud.active && avatarWrap.wantAnimate) avatarWrap._restartGif()
                     }
                     function onAccessTokenChanged() { avatarWrap._startAvatarProbe() }
+                    function onAvatarStaticOnlyChanged() { avatarWrap._startAvatarProbe() }
                     function onUserImageTagChanged() { avatarWrap._startAvatarProbe() }
                     function onUserIdChanged() { avatarWrap._startAvatarProbe() }
                     function onServerUrlChanged() { avatarWrap._startAvatarProbe() }
@@ -670,6 +674,8 @@ Item {
                             cache: true
                             smooth: false
                             mipmap: false
+                            sourceSize.width: Math.max(72, hud.avatarSize)
+                            sourceSize.height: Math.max(72, hud.avatarSize)
                             fillMode: Image.PreserveAspectCrop
                             onStatusChanged: {
                                 avatarWrap.stillStatus = status
