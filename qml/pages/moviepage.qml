@@ -777,12 +777,18 @@ Item {
     function _tryServeFromWindowCache() {
         var bucket = _windowCacheBucket()
         var key = _windowCacheKey()
-        var res = MediaBrowser.windowCache_readEntry(bucket, key, Date.now(), folderWindowStartIndex)
+        // Une fenêtre décalée reste valide si elle contient le focus à restaurer.
+        // Les BoxSet filtrés gardent l'égalité stricte des bornes de pagination.
+        var target = !collectionsMode ? folderRestoreVisualTargetIndex : -1
+        var res = MediaBrowser.windowCache_readEntry(bucket, key, Date.now(),
+                                                      folderWindowStartIndex, target)
         if (res.status !== "hit") {
             return false
         }
         var entry = res.entry
         if (entry.revision !== Jellyfin.libraryWindowRevision()) return false
+        // Restaurer les coordonnées réelles du cache avant de recalculer la grille.
+        folderWindowStartIndex = entry.windowStartIndex | 0
         _rawFolderItems = entry.rawItems || []
         folderPageNextStart = entry.nextStart | 0
         folderPageHasMore = !!entry.hasMore

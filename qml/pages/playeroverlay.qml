@@ -184,6 +184,8 @@ FocusScope {
     property var _streamsWaiters: []
     property string accessToken: ""
     property string userId: ""
+    property string userName: ""
+    property string userImageTag: ""
     property string serverUrl: ""
     property string itemId: ""
     property string itemTitle: ""
@@ -211,6 +213,10 @@ FocusScope {
     readonly property bool currentItemIsEpisode:
         String(currentItemType || "").toLowerCase() === "episode"
     property bool _topBarLogoReadyForCurrent: false
+    // Le titre attend la resolution du logo (item et, pour un episode, serie).
+    // La lecture video et les autres controles ne sont jamais retardes.
+    property bool _topBarMetadataPending: false
+    property int _topBarMetadataSeq: 0
     property var    fbx
     property var    shared: null
     property string playbackDeviceMode: ""
@@ -627,6 +633,15 @@ FocusScope {
     function _handleSettingsFocusKey(event){ var w=_settingsOverlay(); return !!(w&&w.handlePlayerFocusKey&&w.handlePlayerFocusKey(event,w.focusedControl,controlsFocus===cF_CONTROLS,getControlsButtonIndex())) }
     function _handleSideFocusKey(event){
         if (!event || _chaptersPanelOpen() || _qualityPanelOpen() || _trackPanelOpen()) return false
+        // Sous les boutons latéraux, il n'y a aucune commande : Bas ne change pas le focus.
+        // Les menus ouverts restent gérés par leurs propres handlers pour préserver la navigation interne.
+        if (event.key === Qt.Key_Down && !audioMenuVisible && !subMenuVisible &&
+            (controlsFocus === cF_ZOOM || controlsFocus === cF_SPEED ||
+             controlsFocus === cF_CHAPTERS || controlsFocus === cF_QUALITY ||
+             controlsFocus === cF_MENU)) {
+            event.accepted = true
+            return true
+        }
         if (controlsFocus === cF_CHAPTERS) {
             if (event.key === Qt.Key_Up) { _focusProgressBarSilent("chapters-up"); event.accepted=true; return true }
             if (event.key === Qt.Key_Left) { controlsFocus=cF_SPEED; root.forceActiveFocus(); event.accepted=true; return true }
@@ -726,6 +741,7 @@ FocusScope {
     property var subtitleTracks: []
     property var subtitleStreamIndexMap: []
     property var subtitleIsTextMap: []
+    property var subtitleCodecMap: []
     // Décision auto calculée à partir des vraies pistes Jellyfin. Vrai uniquement quand l'audio effectivement choisi par défaut est français et que la piste interne active est un sous-titre texte français forcé sûr.
     property int firstAudioStreamIndex: -1
     property int bestFrenchAudioStreamIndex: -1
@@ -896,6 +912,10 @@ FocusScope {
                 topBarLoader.item.serverUrl = root.serverUrl
                 topBarLoader.item.userId    = root.userId
                 topBarLoader.item.showClock   = Qt.binding(function(){ return root.topbarShowClock })
+                // Même position que les pages de détail; GIF seulement si chrome visible.
+                topBarLoader.item.clockHudActive = Qt.binding(function(){
+                    return root.uiChromeOpacity > 0.08 && topBarLoader.visible
+                })
                 if (topBarLoader.item.hasOwnProperty("safeMarginRight"))
                     topBarLoader.item.safeMarginRight = Qt.binding(function(){ return Math.max(28, root.tvSafeMargin) })
                 if (topBarLoader.item.hasOwnProperty("safeMarginLeft"))
@@ -908,11 +928,11 @@ FocusScope {
                 _lastPushedTitle = _pendingTitle
             }
             var norm = _normalizeUrl(_pendingLogo)
-            if (!(norm.length===0 && _lastPushedLogoNorm.length>0)) {
-                if (norm !== _lastPushedLogoNorm) {
-                    try { topBarLoader.item.itemLogoUrl = _pendingLogo } catch(e){}
-                    _lastPushedLogoNorm = norm
-                }
+            // Ne jamais conserver le logo de l'episode precedent quand le
+            // nouvel item n'en possede pas : le vide est une vraie decision.
+            if (norm !== _lastPushedLogoNorm) {
+                try { topBarLoader.item.itemLogoUrl = _pendingLogo } catch(e){}
+                _lastPushedLogoNorm = norm
             }
             _topBarDirty = false
         }
@@ -1119,9 +1139,19 @@ FocusScope {
         manualRemuxMode = false
         return TrackSelection.applyManualBitrateQuality(root, mp, requested)
     }
+    function _topBarTitleMustWait(){
+        if (_topBarMetadataPending) return true
+        var wanted = _normalizeUrl(_pendingLogo || "")
+        var bar = topBarLoader.item
+        if (!bar) return wanted.length > 0
+        // Y compris sans logo : attendre que l'ancienne image ait ete effacee.
+        if (_normalizeUrl(String(bar.itemLogoUrl || "")) !== wanted) return true
+        return bar.logoResolutionComplete !== true
+    }
     function _effectiveTopBarTitle(){
-        // Tant que le logo n'est pas réellement prêt, le titre conserve son fallback centré. Dès qu'un logo est confirmé Ready, le TopBar central se libère. Pour un épisode, le titre est alors rendu juste sous le logo par episodeLogoTitle ci-dessous.
-        return _topBarLogoReadyForCurrent ? "" : (currentItemTitle || "")
+        // Aucune apparition centree provisoire : choix final avant le premier rendu.
+        if (_topBarTitleMustWait() || _topBarLogoReadyForCurrent) return ""
+        return currentItemTitle || ""
     }
     function _syncTopBarLogoReadyState(){
         var candidateNorm = _normalizeUrl(_pendingLogo || "")
@@ -1133,15 +1163,21 @@ FocusScope {
                 ready = candidateNorm.length > 0 && readyNorm === candidateNorm
             }
         } catch(e0) {}
-        if (_topBarLogoReadyForCurrent !== ready) {
+        if (_topBarLogoReadyForCurrent !== ready)
             _topBarLogoReadyForCurrent = ready
-            _pendingTitle = _effectiveTopBarTitle()
+        // La fin d'un probe sans logo ne change pas logoReady : elle doit
+        // neanmoins liberer le titre centre, une seule fois et sans deplacement.
+        var wantedTitle = _effectiveTopBarTitle()
+        if (_pendingTitle !== wantedTitle) {
+            _pendingTitle = wantedTitle
             _queueTopBarPush()
         }
         return ready
     }
     function refreshCurrentItemTitle(){
+        var seq = ++_topBarMetadataSeq
         if (!serverUrl || !accessToken || !itemId) {
+            _topBarMetadataPending = false
             currentItemType = ""
             currentItemTitle = ""
             currentItemLogoUrl = ""
@@ -1150,9 +1186,12 @@ FocusScope {
             return
         }
         var expectedItemId = String(itemId || "")
+        var expectedServer = String(serverUrl || "")
+        _topBarMetadataPending = true
+        _pushTopBar()
         JFB.fetchItem(serverUrl, accessToken, expectedItemId, function(it){
-            if (expectedItemId !== String(root.itemId || ""))
-                return
+            if (seq !== root._topBarMetadataSeq || expectedItemId !== String(root.itemId || "") ||
+                    expectedServer !== String(root.serverUrl || "")) return
             currentItemType = String(it && it.Type || "")
             currentItemTitle = H.labelForItem(it, itemTitle || "")
             currentItemLogoUrl = H.logoUrlFromItem(root, JFB, it)
@@ -1161,17 +1200,28 @@ FocusScope {
                 lastGoodLogoItemId = (it && it.Id) ? String(it.Id) : expectedItemId
             }
             _topBarLogoReadyForCurrent = false
-            _pushTopBar()
             PlayerSession.ensureAutoEpisodePlaylistWithItem(root, JFB, it)
             var typ = String(it && it.Type || "")
             if (!H.hasQueryTag(currentItemLogoUrl) &&
-                    (typ === "Episode" || typ === "Season"))
-                H.ensureSeriesLogoTag(root, JFB, it)
+                    (typ === "Episode" || typ === "Season")) {
+                // Le logo appartient generalement a la serie, pas a l'episode.
+                // Ne pas exposer le fallback titre entre ces deux requetes.
+                _pushTopBar()
+                H.ensureSeriesLogoTag(root, JFB, it, function(){
+                    if (seq !== root._topBarMetadataSeq ||
+                            expectedItemId !== String(root.itemId || "")) return
+                    root._topBarMetadataPending = false
+                    root._pushTopBar()
+                })
+            } else {
+                _topBarMetadataPending = false
+                _pushTopBar()
+            }
         }, function(){
-            if (expectedItemId !== String(root.itemId || ""))
-                return
+            if (seq !== root._topBarMetadataSeq || expectedItemId !== String(root.itemId || "")) return
+            _topBarMetadataPending = false
             currentItemType = ""
-            currentItemTitle = ""
+            currentItemTitle = itemTitle || ""
             currentItemLogoUrl = ""
             _topBarLogoReadyForCurrent = false
             _pushTopBar()
@@ -1307,8 +1357,10 @@ FocusScope {
     function loadLocalSubtitleByStreamIndex(streamIdx, cb, preserveOnFailure){
         return TrackSelection.loadLocalSubtitleForOverlay(root, JFB, subsLoader.item, streamIdx, function(){
             if (typeof cb === "function") {
+                // Une exception dans le callback ne doit jamais le rejouer :
+                // il peut déjà avoir modifié les pistes ou lancé une négociation.
                 try { cb.apply(null, arguments) } catch(e0) {
-                    try { cb(arguments.length ? arguments[0] : false, arguments.length > 1 ? arguments[1] : "callback-error") } catch(e1) {}
+                    console.warn("ReDeFin: erreur dans le callback de sous-titres locaux")
                 }
             }
         }, preserveOnFailure)
@@ -1847,7 +1899,14 @@ FocusScope {
                 item.fbx       = root.fbx
                 item.serverUrl = root.serverUrl
                 item.userId    = root.userId
+                item.userName = Qt.binding(function(){ return root.userName })
+                item.userImageTag = Qt.binding(function(){ return root.userImageTag })
+                // Un nouveau media ne doit pas reutiliser le logo de l'ancien.
+                item.stickyLogo = false
                 item.showClock   = Qt.binding(function(){ return root.topbarShowClock })
+                item.clockHudActive = Qt.binding(function(){
+                    return root.uiChromeOpacity > 0.08 && topBarLoader.visible
+                })
                 if (item.hasOwnProperty("safeMarginRight"))
                     item.safeMarginRight = Qt.binding(function(){ return Math.max(28, root.tvSafeMargin) })
                 if (item.hasOwnProperty("safeMarginLeft"))
@@ -1864,18 +1923,27 @@ FocusScope {
         ignoreUnknownSignals: true
         function onLogoReadyChanged() { root._syncTopBarLogoReadyState() }
         function onReadyLogoUrlChanged() { root._syncTopBarLogoReadyState() }
+        function onLogoResolutionCompleteChanged() { root._syncTopBarLogoReadyState() }
     }
     Text {
         id: episodeLogoTitle
         z: 501
         anchors.left: parent.left
-        anchors.leftMargin: Math.max(28, root.tvSafeMargin)
+        // Meme origine horizontale que le logo dans TopBar.
+        anchors.leftMargin: topBarLoader.item
+                            ? topBarLoader.item.mediaLeftInset
+                            : Math.max(28, root.tvSafeMargin - 16)
         anchors.top: parent.top
-        anchors.topMargin: 63
-        width: Math.min(760, Math.max(240, root.width - Math.max(28, root.tvSafeMargin) - 420))
+        // Le titre suit le bas REEL du logo : jamais de chevauchement sur
+        // un visuel carre/vertical, ni d'espace superflu sur un logo tres large.
+        anchors.topMargin: Math.max(63, topBarLoader.item
+                                   ? Math.ceil(topBarLoader.item.logoBottomY + 10) : 63)
+        width: Math.min(760, Math.max(240, root.width - anchors.leftMargin - 420))
         visible: topBarLoader.visible
                  && root.uiChromeRenderVisible
                  && root.currentItemIsEpisode
+                 && !root._topBarMetadataPending
+                 && !root._topBarTitleMustWait()
                  && root._topBarLogoReadyForCurrent
                  && root.currentItemTitle.length > 0
         text: root.currentItemTitle
@@ -2777,6 +2845,13 @@ FocusScope {
         _syncNextOverlayContext()
     }
     onItemIdChanged: {
+        ++_topBarMetadataSeq
+        _topBarMetadataPending = true
+        // Effacer immediatement l'ancien titre, sans attendre le push differe.
+        if (topBarLoader.item) {
+            try { topBarLoader.item.itemTitle = "" } catch(e0) {}
+        }
+        _lastPushedTitle = ""
         try { TrackSelection.cancelLocalSubtitleRequest(root, "item-changed") } catch(eCancelSub) {}
         currentItemType = ""
         _topBarLogoReadyForCurrent = false

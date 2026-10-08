@@ -213,7 +213,19 @@ FocusScope {
     property double _pageCurtainReadySinceMs: 0
     property int _pageCurtainStableTicks: 0
     property bool _pageSawLoading: false
-    on_PageReportedLoadingChanged: { if (_pageReportedLoading) _pageSawLoading = true }
+    // Attente événementielle : un écran qui charge explicitement ne doit pas
+    // réveiller le timer 60 ms en continu. Son passage à prêt le réarme.
+    on_PageReportedLoadingChanged: {
+        if (_pageReportedLoading) {
+            _pageSawLoading = true
+            _pageCurtainStableTicks = 0
+            pageCurtainReleaseTimer.stop()
+        } else if (_pageLoadCurtainHold && pageLoader &&
+                   pageLoader.status === Loader.Ready && pageLoader.item &&
+                   _pageCurtainReadySinceMs > 0) {
+            _schedulePageCurtainRelease(_pageLoadCurtainSeq)
+        }
+    }
     readonly property int pageCurtainReadyMinHoldMs: 180
     readonly property int pageCurtainStableTicksRequired: 2
 
@@ -240,6 +252,14 @@ FocusScope {
             _pageCurtainReadySinceMs = Date.now()
         _pageCurtainStableTicks = 0
         pageCurtainReleaseTimer.curtainSeq = seq
+        if (_pageReportedLoading) {
+            _pageSawLoading = true
+            pageCurtainReleaseTimer.stop()
+            return
+        }
+        // Après un vrai chargement déclaré terminé, une trame suffit ; les
+        // pages sans contrat explicite gardent la sécurité des deux sondages.
+        pageCurtainReleaseTimer.interval = _pageSawLoading ? 16 : 60
         if (!pageCurtainReleaseTimer.running)
             pageCurtainReleaseTimer.start()
     }
@@ -267,6 +287,7 @@ FocusScope {
             if (shell._pageReportedLoading) {
                 shell._pageSawLoading = true
                 shell._pageCurtainStableTicks = 0
+                stop() // repris par on_PageReportedLoadingChanged, pas de polling
                 return
             }
 
@@ -2463,6 +2484,8 @@ FocusScope {
 
         property string accessToken: shell.sessionAccessToken || shell.playerAccessToken
         property string userId:      shell.sessionUserId      || shell.playerUserId
+        property string userName:    shell.sessionUserName || ""
+        property string userImageTag: shell.sessionUserImageTag || ""
         property string serverUrl:   shell.sessionServerUrl   || shell.playerServerUrl
         property string itemId:      shell.playerItemId
         property string itemTitle:   shell.playerItemTitle
@@ -2522,6 +2545,8 @@ FocusScope {
             if (item.hasOwnProperty("forcePlaylistStartAtZero")) item.forcePlaylistStartAtZero = playlistStartAtZero
             if (item.hasOwnProperty("accessToken")) item.accessToken = accessToken
             if (item.hasOwnProperty("userId"))      item.userId      = userId
+            if (item.hasOwnProperty("userName"))    item.userName    = Qt.binding(function(){ return playerOverlayLoader.userName })
+            if (item.hasOwnProperty("userImageTag")) item.userImageTag = Qt.binding(function(){ return playerOverlayLoader.userImageTag })
             if (item.hasOwnProperty("serverUrl"))   item.serverUrl   = serverUrl
             if (item.hasOwnProperty("itemId"))      item.itemId      = itemId
             if (item.hasOwnProperty("itemTitle"))   item.itemTitle   = itemTitle

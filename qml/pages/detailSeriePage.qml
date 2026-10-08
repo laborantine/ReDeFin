@@ -1267,7 +1267,6 @@ FocusScope {
     function hasSeasons(){ return (seasons && seasons.length>0 && seasonsLoader.item && (seasonsLoader.item.forceFirstFocus || (seasonsLoader.item.grid && seasonsLoader.item.grid.forceFirstFocus))); }
     function hasCast(){ return (castPeople.length>0 && castPageLoader.item && (castPageLoader.item.restoreLastActorFocus || castPageLoader.item.focusFirstActor || castPageLoader.item.forceFirstActorFocus)); }
     function hasSimilarContent(){ return (similarLoader.status===Loader.Ready && similarLoader.item && similarLoader.item.hasContent===true); }
-    function similarReadyNoContent(){ return (similarLoader.status===Loader.Ready && similarLoader.item && similarLoader.item.hasContent===false); }
     function _restoreSimilarFocusIfAny(){
         if(!similarLoader.item) return;
         Qt.callLater(function(){
@@ -2629,25 +2628,6 @@ FocusScope {
                             wireCastLoader(); _updateExtendedSectionGates()
                             if (_castViewportRestorePending && !castViewportRestoreTimer.running)
                                 castViewportRestoreTimer.restart()
-                        }
-                    }
-                }
-                Item {
-                    width: parent.width
-                    implicitHeight: (hasItem && !similarReadyNoContent()) ? (24 + Math.max(0, tuneSimilarShiftY)) : 0
-                    height: implicitHeight
-                    visible: implicitHeight > 0
-                    Item {
-                        width: parent.width
-                        height: 24
-                        y: tuneSimilarShiftY
-                        Text { textFormat: Text.PlainText;
-                            text:"Plus comme ceci"
-                            color:"#FFFFFF"
-                            font.pixelSize:19
-                            font.bold:true
-                            anchors.left: parent.left
-                            anchors.leftMargin: 28
                         }
                     }
                 }

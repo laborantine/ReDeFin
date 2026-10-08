@@ -32,17 +32,38 @@ Item {
     property string baseUrl: ""            // pour les URLs relatives éventuelles
     property bool   stickyLogo: true
 
+    // Taille adaptative au ratio reel du logo (large, carre ou vertical).
+    // Boite bornee : une seule texture jusqu'a 600 x 144 px en RAM/GPU.
+    readonly property real logoMaxWidth: Math.min(500, Math.max(250, root.width * 0.31))
+    readonly property real logoMaxHeight: 98
+    readonly property real logoTopMargin: 12
+    readonly property real logoAspectRatio: (logo.status === Image.Ready &&
+            logo.implicitWidth > 0 && logo.implicitHeight > 0)
+            ? logo.implicitWidth / logo.implicitHeight : 3.0
+    // Position du bord inferieur du dessin, pour le titre de l'episode.
+    readonly property real logoBottomY: logoReady ? (logo.y + logo.paintedHeight) : 0
+
     // Safe-area pour TV (antisaut d’horloge hors-écran)
     property int safeMarginLeft: 28
     property int safeMarginRight: 28
+    // Recul discret de 16 px, sans passer sous les 28 px anti-overscan.
+    // Egalement utilise par le titre de l'episode dans PlayerOverlay.
+    readonly property int mediaLeftInset: Math.max(28, safeMarginLeft - 16)
 
     // Horloge
     property bool showClock: true
     readonly property bool clockVisible: showClock
+    property bool showUserProfile: true
+    // Même ancrage que detailMoviePage/detailSeriePage/seasonpage.
+    property int clockHudTopMargin: 20
+    property int clockHudRightMargin: 24
+    // Le lecteur stoppe uniquement le décodage GIF lorsque le chrome est masqué.
+    property bool clockHudActive: true
 
     // Contexte optionnel pour ClockHUD
     property var    fbx
     property string userId: ""
+    property string userName: ""
     property string userImageTag: ""
     property string avatarUrl: ""
 
@@ -144,6 +165,9 @@ Item {
     property var    _logoReadyMemo: ({})
     property var    _logoFailureMemo: ({})
     readonly property int _logoMemoLimit: 128
+    // True lorsque le logo est pret OU definitivement absent/echec pour l'item.
+    // Le Player ne montre le titre qu'apres cette decision, sans titre provisoire.
+    property bool logoResolutionComplete: false
     readonly property bool logoReady: logo.status === Image.Ready && _currentUrl.length > 0
     readonly property string readyLogoUrl: logoReady ? _lastGoodUrl : ""
 
@@ -162,10 +186,31 @@ Item {
         repeat: false
         onTriggered: root._applyLogo()
     }
+    // Un logo lent ou une image bloquee ne peut cacher le titre indefiniment.
+    // Au dela de cette borne, on fige le fallback texte sans deplacement tardif.
+    Timer {
+        id: logoDecisionDeadline
+        interval: 5000
+        repeat: false
+        onTriggered: {
+            ++root._logoProbeSeq
+            root._logoProbePendingKey = ""
+            root._currentUrl = ""
+            root._clearLogoSourceIfNeeded()
+            logo.opacity = 0.0
+            leftSlot.width = 0
+            root.logoResolutionComplete = true
+        }
+    }
 
     function _scheduleApply(reason){
         _lastReason = reason || "";
         _applyPending = true;
+        // Invalider les anciens probes avant meme l'expiration du debounce.
+        ++_logoProbeSeq;
+        _logoProbePendingKey = "";
+        logoResolutionComplete = false;
+        logoDecisionDeadline.stop();
         debounceTimer.restart();
     }
 
@@ -196,7 +241,7 @@ Item {
             if(!_wantedLogoKnownMissing && stickyLogo && _lastGoodUrl.length) return _lastGoodUrl;
             return "";
         }
-        if(_lastGoodUrl && hasTag(_lastGoodUrl) && !hasTag(wanted)){
+        if(stickyLogo && _lastGoodUrl && hasTag(_lastGoodUrl) && !hasTag(wanted)){
             return _lastGoodUrl;
         }
         return wanted;
@@ -250,14 +295,24 @@ Item {
             _clearLogoSourceIfNeeded();
             logo.opacity = 0.0;
             leftSlot.width = 0;
+            logoDecisionDeadline.stop();
+            logoResolutionComplete = true;
             return;
         }
         if(src === _currentUrl){
-            if(logo.status === Image.Ready) logo.opacity = 0.95;
+            if(logo.status === Image.Ready) {
+                logo.opacity = 0.95;
+                logoDecisionDeadline.stop();
+                logoResolutionComplete = true;
+            }
             return;
         }
         _currentUrl = src;
         _setLogoSourceIfChanged(_currentUrl);
+        if(logo.status === Image.Ready) {
+            logoDecisionDeadline.stop();
+            logoResolutionComplete = true;
+        }
     }
 
     function _probeLogoThenAssign(eff){
@@ -265,6 +320,8 @@ Item {
         var memoKey = _logoMemoKey(probeUrl);
         if(!probeUrl || !probeUrl.length || !memoKey.length){
             leftSlot.width = 0;
+            logoDecisionDeadline.stop();
+            logoResolutionComplete = true;
             return;
         }
 
@@ -273,6 +330,8 @@ Item {
             _clearLogoSourceIfNeeded();
             logo.opacity = 0.0;
             leftSlot.width = 0;
+            logoDecisionDeadline.stop();
+            logoResolutionComplete = true;
             return;
         }
 
@@ -293,6 +352,8 @@ Item {
             _clearLogoSourceIfNeeded();
             logo.opacity = 0.0;
             leftSlot.width = 0;
+            logoDecisionDeadline.stop();
+            logoResolutionComplete = true;
         }
 
         if(!Jellyfin || typeof Jellyfin.probeResource !== "function"){
@@ -315,15 +376,19 @@ Item {
         _applyPending = false;
 
         var eff = _chooseEffectiveUrl();
+        logoDecisionDeadline.stop();
+        if(eff.length) logoDecisionDeadline.start();
         var wantLogo = eff.length > 0;
 
-        var reserved = ((_lastGoodUrl.length > 0) || (_currentUrl.length > 0) || wantLogo);
+        var reserved = ((stickyLogo && _lastGoodUrl.length > 0) || (_currentUrl.length > 0) || wantLogo);
         leftSlot.width = reserved ? Math.max(120, logo.width) : 0;
 
         if(!wantLogo){
             _currentUrl = "";
             _clearLogoSourceIfNeeded();
             logo.opacity = 0.0;
+            leftSlot.width = 0;
+            logoResolutionComplete = true;
             return;
         }
 
@@ -355,32 +420,44 @@ Item {
     }
 
     /* ====== DROITE : ClockHUD ====== */
-    Row {
-        id: rightRow
+    // Avatar, nom et heure gardent exactement la géométrie des pages de détail.
+    // Ne pas centrer ce bloc dans la TopBar de 70 px : le HUD serait décalé
+    // vers le haut et sa position varierait avec la présence du nom.
+    Item {
+        id: clockHudSlot
+        anchors.top: parent.top
+        anchors.topMargin: root.clockHudTopMargin
         anchors.right: parent.right
-        anchors.rightMargin: root.safeMarginRight   // ← safe-area
-        anchors.verticalCenter: parent.verticalCenter
-        spacing: 16
+        anchors.rightMargin: root.clockHudRightMargin
+        visible: root.clockVisible || (root.showUserProfile && root.userId.length > 0)
+        width: clockHud.implicitWidth
+        height: clockHud.implicitHeight
 
-        // Wrapper: respecte la visibilité interne de ClockHUD ET permet
-        // au TopBar de masquer l’ensemble sans écraser son binding interne.
-        Item {
-            anchors.verticalCenter: parent.verticalCenter
-            visible: root.clockVisible
-
-            Components.ClockHUD {
-                id: clockHud
-                anchors.verticalCenter: parent.verticalCenter
-                fontPx: 20
-                fbx:       root.fbx
-                serverUrl: root.serverUrl
-                userId:    root.userId
-                userImageTag: root.userImageTag
-                avatarUrl: root.avatarUrl
-                avatarForceLoop: true
-                avatarAnimateAlways: true
-                // pas de "visible:" ici → la logique interne du composant reste maîtresse
-            }
+        Components.ClockHUD {
+            id: clockHud
+            anchors.fill: parent
+            fontPx: 22
+            fbx: root.fbx
+            serverUrl: root.serverUrl
+            userId: root.userId
+            userName: root.userName
+            userImageTag: root.userImageTag
+            avatarUrl: root.avatarUrl
+            clockEnabled: root.showClock
+            showAvatar: root.showUserProfile && root.userId.length > 0
+            showUserName: true
+            avatarSize: 52
+            userNameFontPx: 12
+            userNameMaxWidth: 96
+            avatarInteractive: false
+            // AnimatedImage et watchdog existants : GIF animé en boucle,
+            // sans modifier l'URL ni lancer de nouveaux chargements périodiques.
+            avatarStaticOnly: false
+            avatarForceLoop: true
+            avatarAnimateAlways: true
+            active: root.clockHudActive
+            fadeWithScroll: false
+            // La visibilité interne du composant reste sous son contrôle.
         }
     }
 
@@ -388,28 +465,38 @@ Item {
     Item {
         id: leftSlot
         anchors.left: parent.left
-        anchors.leftMargin: root.safeMarginLeft     // ← safe-area
+        anchors.leftMargin: root.mediaLeftInset
         anchors.verticalCenter: parent.verticalCenter
         height: parent.height
         width: 0
 
         Image {
             id: logo
-            anchors.verticalCenter: parent.verticalCenter
+            // Ne jamais etirer le logo ni reserver de faux espace horizontal.
+            anchors.top: parent.top
+            anchors.topMargin: root.logoTopMargin
             visible: true
             asynchronous: true
             cache: true
-            // Logo topbar fixe: pas de mipmap, sourceSize suffit et allège GPU/RAM Freebox.
             mipmap: false
             smooth: true
             fillMode: Image.PreserveAspectFit
-            sourceSize.height: 44
-            height: 44
-
-            // Largeur bornée ; implicitWidth peut valoir 0 avant Ready
+            // Decodage plafonne, plus detaille que l'ancienne hauteur 44 px.
+            // Conserver les DEUX dimensions fixes evite de charger en RAM
+            // une immense texture pour un logo panoramique ou vertical.
+            sourceSize.width: 600
+            sourceSize.height: 144
             width: status === Image.Ready
-                   ? Math.min(280, Math.max(implicitWidth > 0 ? implicitWidth : 120, 120))
-                   : 120
+                   ? Math.min(root.logoMaxWidth, root.logoMaxHeight * root.logoAspectRatio)
+                   : 140
+            height: status === Image.Ready
+                    ? Math.min(root.logoMaxHeight, root.logoMaxWidth / root.logoAspectRatio)
+                    : root.logoMaxHeight
+
+            onWidthChanged: {
+                if (status === Image.Ready && root._currentUrl.length > 0)
+                    leftSlot.width = Math.ceil(width)
+            }
 
             opacity: 0.0
             Behavior on opacity { NumberAnimation { duration: 150 } }
@@ -420,8 +507,13 @@ Item {
                 if (status === Image.Ready) {
                     if (_currentUrl && _currentUrl.length) {
                         _lastGoodUrl = _currentUrl;
+                        leftSlot.width = Math.ceil(width);
+                        logoDecisionDeadline.stop();
+                        root.logoResolutionComplete = true;
+                        opacity = 0.95;
+                    } else {
+                        opacity = 0.0;
                     }
-                    opacity = 0.95;
                 } else if (status === Image.Error) {
                     var failedLogo = (_currentUrl && _currentUrl.indexOf("/Images/Logo") !== -1);
                     if (failedLogo) {
@@ -435,6 +527,8 @@ Item {
                     root._clearLogoSourceIfNeeded();
                     opacity = 0.0;
                     leftSlot.width = 0;
+                    logoDecisionDeadline.stop();
+                    root.logoResolutionComplete = true;
                 } else if (status === Image.Loading) {
                     if (opacity > 0.0) opacity = 0.6;
                 }
