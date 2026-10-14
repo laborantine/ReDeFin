@@ -184,7 +184,8 @@ Item {
         if (idx < 0 && _pendingViewerGlobalIndex >= folderWindowStartIndex
                 && _pendingViewerGlobalIndex < _windowKnownEnd())
             idx = _pendingViewerGlobalIndex - folderWindowStartIndex
-        if (idx >= 0 && idx < folderItems.length) {
+        if (idx >= 0 && idx < folderItems.length &&
+                (isPhotoItem(folderItems[idx]) || isVideoItem(folderItems[idx]))) {
             _pendingViewerOpen = false
             _entrySearchPending = false
             _restoreRequestedGlobalIndex = -1
@@ -296,6 +297,14 @@ Item {
         return !!(it && String(it.Type || "").toLowerCase() === "photo")
     }
     function _viewerClampIndex(idx){ var n = folderItems ? folderItems.length : 0; return n > 0 ? Math.max(0, Math.min(n - 1, Number(idx) | 0)) : 0; }
+    function _nextViewerMediaIndex(from, delta) {
+        // Les dossiers figurent dans la grille mais ne sont pas des slides.
+        var step = delta < 0 ? -1 : 1
+        for (var i = from + step; folderItems && i >= 0 && i < folderItems.length; i += step) {
+            if (isPhotoItem(folderItems[i]) || isVideoItem(folderItems[i])) return i
+        }
+        return -1
+    }
     function _viewerItem(){ return (folderItems && viewerIndex >= 0 && viewerIndex < folderItems.length) ? folderItems[viewerIndex] : null; }
     function _viewerImageTag(it, kind) {
         try {
@@ -447,6 +456,9 @@ Item {
     }
     function openViewer(index) {
         if (!folderItems || !folderItems.length) return false
+        index = _viewerClampIndex(index)
+        if (!isPhotoItem(folderItems[index]) && !isVideoItem(folderItems[index]))
+            return false
         _pendingViewerOpen = false
         _entrySearchPending = false
         _pendingViewerId = ""
@@ -480,8 +492,8 @@ Item {
     function viewerGo(delta) {
         if (!viewerOpen || viewerSlideLocked || !folderItems || !folderItems.length) return
         delta = delta < 0 ? -1 : 1
-        var target = _viewerClampIndex(viewerIndex + delta)
-        if (target === viewerIndex) {
+        var target = _nextViewerMediaIndex(viewerIndex, delta)
+        if (target < 0) {
             if ((delta > 0 && folderPageHasMore) || (delta < 0 && folderPageHasPrevious)) {
                 var it = _viewerItem()
                 _viewerAnchorId = it && it.Id ? String(it.Id) : ""
@@ -547,11 +559,18 @@ Item {
                 readonly property bool nearCurrent: Math.abs(index - personalMediaPage.viewerIndex) <= personalMediaPage.viewerPreloadRadius
                 readonly property bool current: index === personalMediaPage.viewerIndex
                 readonly property bool video: personalMediaPage.isVideoItem(mediaData)
+                property bool highResolutionWasReady: false
+                onMediaDataChanged: highResolutionWasReady = false
                 Rectangle { anchors.fill: parent; color: "#000000" }
                 Image {
                     id: viewerImage
                     anchors.fill: parent
-                    source: viewerCard.nearCurrent ? personalMediaPage.viewerImageUrl(viewerCard.mediaData, false) : ""
+                    // T2 : pas de décodage photo lorsque la visionneuse est fermée.
+                    // T5 : libérer le Full HD uniquement une fois le HQ prêt.
+                    source: (personalMediaPage.viewerOpen && viewerCard.nearCurrent
+                             && !(viewerCard.current && personalMediaPage._photoHighResArmed
+                                  && viewerHighImage.status === Image.Ready))
+                            ? personalMediaPage.viewerImageUrl(viewerCard.mediaData, false) : ""
                     asynchronous: true; cache: false; mipmap: false
                     smooth: viewerCard.current
                     fillMode: Image.PreserveAspectFit
@@ -569,12 +588,21 @@ Item {
                     Behavior on opacity { NumberAnimation { duration: 110; easing.type: Easing.OutCubic } }
                 }
                 Image {
+                    id: viewerHighImage
                     anchors.fill: parent
-                    source: (viewerCard.current
+                    // Garder le HQ durant le rechargement Full HD au dézoom.
+                    // Sinon la libération du Full HD entraînerait un flash noir.
+                    source: (personalMediaPage.viewerOpen && viewerCard.current
                              && !viewerCard.video
-                             && personalMediaPage._photoHighResArmed
-                             && String(viewerImage.source || "") !== "")
+                             && (personalMediaPage._photoHighResArmed
+                                 || (viewerCard.highResolutionWasReady
+                                     && viewerImage.status !== Image.Ready)))
                             ? personalMediaPage.viewerImageUrl(viewerCard.mediaData, true) : ""
+                    onStatusChanged: {
+                        if (status === Image.Ready) viewerCard.highResolutionWasReady = true
+                        else if (!personalMediaPage.viewerOpen)
+                            viewerCard.highResolutionWasReady = false
+                    }
                     asynchronous: true; cache: false; mipmap: false; smooth: true
                     fillMode: Image.PreserveAspectFit
                     transformOrigin: Item.Center
@@ -609,9 +637,17 @@ Item {
                     anchors.centerIn: parent
                     width: Math.min(parent.width - 120, 760)
                     spacing: 10
-                    visible: viewerCard.nearCurrent
+                    // Le zoom libere volontairement la source Full HD lorsque le HQ
+                    // est pret : cela ne doit pas afficher un faux message d'erreur
+                    // par-dessus l'image haute resolution. Attendre un echec reel
+                    // des deux chemins (ou l'absence de leurs URL).
+                    visible: viewerCard.current
+                             && viewerImage.status !== Image.Ready
+                             && viewerHighImage.status !== Image.Ready
                              && (String(viewerImage.source || "") === ""
                                  || viewerImage.status === Image.Error)
+                             && (String(viewerHighImage.source || "") === ""
+                                 || viewerHighImage.status === Image.Error)
                     Text { width: parent.width; text: viewerCard.mediaData && viewerCard.mediaData.Name ? String(viewerCard.mediaData.Name) : "Média indisponible"; color: "#FFFFFF"; font.pixelSize: 28; font.bold: true; horizontalAlignment: Text.AlignHCenter; elide: Text.ElideRight; textFormat: Text.PlainText }
                     Text { width: parent.width; text: "Aperçu indisponible"; color: "#AEB5CF"; font.pixelSize: 18; horizontalAlignment: Text.AlignHCenter; textFormat: Text.PlainText }
                 }

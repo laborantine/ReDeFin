@@ -144,6 +144,10 @@ FocusScope {
     readonly property real frameWidth: _effectiveFrameWidth
     readonly property string imageSource: useImageSourceOverride ? imageSourceOverride : ""
     readonly property string hqImageSource: hqImageSourceOverride
+    readonly property int decodePosterW: Math.max(1, Math.round(tileWidth * 1.20))
+    readonly property int decodePosterH: Math.max(1, Math.round(tileHeight * 1.20))
+    readonly property int decodeHqPosterW: Math.max(1, Math.round(tileWidth * 1.50))
+    readonly property int decodeHqPosterH: Math.max(1, Math.round(tileHeight * 1.50))
     readonly property int titleFontPx: _effectiveTitleFontPx
     readonly property int subtitleFontPx: _effectiveSubtitleFontPx
             readonly property bool _focusVisualActive: gridActiveFocus && selected && !suppressFocusTransform
@@ -545,6 +549,7 @@ FocusScope {
                     id: posterImg
                     anchors.fill: parent
                     fillMode: cardRoot.imageFillModeOverride
+                    sourceSize: Qt.size(cardRoot.decodePosterW, cardRoot.decodePosterH)
                     asynchronous: true
                     cache: cardRoot.imageCache
                     mipmap: false
@@ -570,6 +575,7 @@ FocusScope {
                         Image {
                             anchors.fill: parent
                             fillMode: cardRoot.imageFillModeOverride
+                            sourceSize: Qt.size(cardRoot.decodeHqPosterW, cardRoot.decodeHqPosterH)
                             asynchronous: true
                             cache: false
                             mipmap: false

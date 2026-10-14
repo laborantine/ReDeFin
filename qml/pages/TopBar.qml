@@ -157,9 +157,7 @@ Item {
     /* ====== État interne ====== */
     property string _lastGoodUrl: ""
     property string _currentUrl: ""
-    property bool   _applyPending: false
     property bool   _wantedLogoKnownMissing: false
-    property string _lastReason: ""
     property int    _logoProbeSeq: 0
     property string _logoProbePendingKey: ""
     property var    _logoReadyMemo: ({})
@@ -203,9 +201,7 @@ Item {
         }
     }
 
-    function _scheduleApply(reason){
-        _lastReason = reason || "";
-        _applyPending = true;
+    function _scheduleApply(){
         // Invalider les anciens probes avant meme l'expiration du debounce.
         ++_logoProbeSeq;
         _logoProbePendingKey = "";
@@ -373,7 +369,6 @@ Item {
     }
 
     function _applyLogo(){
-        _applyPending = false;
 
         var eff = _chooseEffectiveUrl();
         logoDecisionDeadline.stop();
@@ -401,12 +396,12 @@ Item {
     }
 
     /* ====== Hooks ====== */
-    onItemLogoUrlChanged:     _scheduleApply("itemLogoUrlChanged")
-    onShowLogoFirstChanged:   _scheduleApply("showLogoFirstChanged")
-    onCurrentItemChanged:     _scheduleApply("currentItemChanged")
+    onItemLogoUrlChanged:     _scheduleApply()
+    onShowLogoFirstChanged:   _scheduleApply()
+    onCurrentItemChanged:     _scheduleApply()
 
     Component.onCompleted: {
-        _scheduleApply("onCompleted")
+        _scheduleApply()
     }
 
     /* ====== Fond ====== */
@@ -540,8 +535,10 @@ Item {
     Item {
         anchors.left: leftSlot.right
         anchors.leftMargin: 16
-        anchors.right: rightRow.left
-        anchors.rightMargin: 16
+        // rightRow n'existe plus depuis l'integration de ClockHUD.
+        // Sans horloge/profil, liberer la place tout en gardant l'overscan TV.
+        anchors.right: clockHudSlot.visible ? clockHudSlot.left : parent.right
+        anchors.rightMargin: clockHudSlot.visible ? 16 : root.safeMarginRight
         anchors.verticalCenter: parent.verticalCenter
         height: parent.height
 

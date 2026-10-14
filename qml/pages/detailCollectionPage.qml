@@ -1,10 +1,12 @@
 import QtQuick 2.15
+import "../js/MediaBrowser.js" as MediaBrowser
 import "../js/NavigationContext.js" as NavContext
 import QtGraphicalEffects 1.15
 import "." as Pages
 import "../components" as Components
 import "../js/jellyfinBridge.js" as Jellyfin
 import "../js/MediaCatalog.js" as MediaCatalog
+import "../js/MediaRailLayout.js" as MediaRailLayout
 import "../js/SafeLog.js" as SafeLog
 FocusScope {
     id: detailCollectionPage
@@ -20,6 +22,7 @@ FocusScope {
     property var    fbx
     property var    shared: null
     property string returnFolderId
+    property string returnLibraryMode: "collections"
     property int    returnIndex: -1
     property int    returnY: -1
     /* Présentation collection : calculs purs centralisés dans MediaCatalog. */
@@ -147,7 +150,9 @@ FocusScope {
     readonly property real frameWidth: 2.0
     readonly property real frameInsetPx: 0.0
     readonly property real frameInnerEpsilon: 0.2
-    function frameMargin(){ return frameInsetPx + frameWidth/2 + frameInnerEpsilon }
+    function frameMargin() {
+        return MediaRailLayout.frameMargin(frameInsetPx, frameWidth, frameInnerEpsilon)
+    }
     function railFocusTopPad(cardHeight, scaleValue, liftValue) {
         // Un scale centré agrandit de moitié vers le haut et de moitié vers le
         // bas. Réserver l'agrandissement total gaspillait inutilement la hauteur.
@@ -393,15 +398,12 @@ FocusScope {
         return NavContext.route(shared, detailCollectionPage, page, params)
     }
     function _goBack(){
-        if (returnFolderId && returnFolderId.length && typeof requestNavigation === "function") {
-            requestNavigation(_navRoute("moviepage.qml", {
-                folderId: returnFolderId, libraryMode: "collections",
-                restoreIndex: returnIndex, restoreY: returnY
-            }))
-        } else if (typeof requestBackToMenu === "function") {
-            _storeSensitiveNavContext()
-            requestBackToMenu()
-        }
+        // Le retour est un POP de l'historique Shell, jamais une navigation
+        // vers MoviePage : cette dernière empilerait à nouveau la fiche et
+        // provoquerait la boucle CollectionPage <-> DetailCollectionPage.
+        // Les informations returnIndex/returnY sont reprises par Shell lors du POP.
+        _storeSensitiveNavContext()
+        requestBackToMenu()
     }
     property int currentFocus: 0
 
@@ -514,7 +516,7 @@ FocusScope {
         })
     }
     function _appendCollectionChildrenPage(arr, pageStart, limit, direction){
-        var windowState = MediaCatalog.appendCatalogPageWindow(
+        var windowState = MediaBrowser.appendCatalogPageWindow(
                     _collectionChildrenPages, arr || [], pageStart, limit,
                     direction, collectionChildrenWindowMaxItems)
         _collectionChildrenPages = windowState.pages
@@ -533,12 +535,12 @@ FocusScope {
         var start = 0, limit = Math.max(40, _collectionChildrenActivePageSize | 0)
         if (direction === "backward") {
             if (!collectionChildrenHasMoreBefore) return false
-            var first = MediaCatalog.catalogPageWindowStart(_collectionChildrenPages)
+            var first = MediaBrowser.catalogPageWindowStart(_collectionChildrenPages)
             start = Math.max(0, first - limit)
             limit = Math.max(40, first - start)
         } else {
             if (!collectionChildrenHasMoreAfter) return false
-            start = MediaCatalog.catalogPageWindowEnd(_collectionChildrenPages)
+            start = MediaBrowser.catalogPageWindowEnd(_collectionChildrenPages)
         }
         _collectionChildrenDeadlineAt = Date.now() + 14000
         _fetchCollectionChildrenPage(_fetchSeq, _childrenSeq, effectiveBoxSetId, start,
@@ -2863,6 +2865,10 @@ FocusScope {
         if (!it || !it.Id || typeof requestNavigation !== "function") return
         var t = (it.Type || it.CollectionType || "").toLowerCase()
         var isSeries = (t === "series" || t === "tvshow" || t === "tvshows" || t === "season" || t === "episode")
+        if (t === "boxset") {
+            requestNavigation(_navRoute("detailCollectionPage.qml", { boxSetId: it.Id }))
+            return
+        }
         var page = isSeries ? "detailSeriePage.qml" : "detailMoviePage.qml"
         requestNavigation(_navRoute(page, { itemId: it.Id }))
     }

@@ -1313,38 +1313,49 @@ FocusScope {
                         }
                     }
 
-                    ShaderEffectSource {
-                        id: actorNameTexture
-                        sourceItem: actorNameSourceViewport
-                        hideSource: actorNameViewport.marqueeMoving
-                        live: actorNameViewport.marqueeMoving
-                        recursive: false
-                        visible: false
-                    }
+                    // Effet graphique instancié seulement sur le marquee focalisé.
+                    Loader {
+                        id: actorNameEffectsLoader
+                        anchors.fill: parent
+                        active: actorNameViewport.marqueeOn
+                        sourceComponent: Component {
+                            Item {
+                                anchors.fill: parent
+                                ShaderEffectSource {
+                                    id: actorNameTexture
+                                    sourceItem: actorNameSourceViewport
+                                    hideSource: actorNameViewport.marqueeMoving
+                                    live: actorNameViewport.marqueeMoving
+                                    recursive: false
+                                    visible: false
+                                }
 
-                    Item {
-                        id: actorNameFadeMask
-                        anchors.fill: actorNameSourceViewport
-                        visible: false
+                                Item {
+                                    id: actorNameFadeMask
+                                    anchors.fill: parent
+                                    visible: false
 
-                        Rectangle {
-                            anchors.fill: parent
-                            gradient: Gradient {
-                                orientation: Gradient.Horizontal
-                                GradientStop { position: 0.00; color: actorNameViewport.atStart ? "#ff000000" : "#00000000" }
-                                GradientStop { position: 0.10; color: "#ff000000" }
-                                GradientStop { position: 0.90; color: "#ff000000" }
-                                GradientStop { position: 1.00; color: actorNameViewport.atEnd ? "#ff000000" : "#00000000" }
+                                    Rectangle {
+                                        anchors.fill: parent
+                                        gradient: Gradient {
+                                            orientation: Gradient.Horizontal
+                                            GradientStop { position: 0.00; color: actorNameViewport.atStart ? "#ff000000" : "#00000000" }
+                                            GradientStop { position: 0.10; color: "#ff000000" }
+                                            GradientStop { position: 0.90; color: "#ff000000" }
+                                            GradientStop { position: 1.00; color: actorNameViewport.atEnd ? "#ff000000" : "#00000000" }
+                                        }
+                                    }
+                                }
+
+                                OpacityMask {
+                                    anchors.fill: parent
+                                    source: actorNameTexture
+                                    maskSource: actorNameFadeMask
+                                    visible: actorNameViewport.marqueeMoving
+                                    cached: false
+                                }
                             }
                         }
-                    }
-
-                    OpacityMask {
-                        anchors.fill: actorNameSourceViewport
-                        source: actorNameTexture
-                        maskSource: actorNameFadeMask
-                        visible: actorNameViewport.marqueeMoving
-                        cached: false
                     }
 
                     SequentialAnimation {
@@ -1418,38 +1429,49 @@ FocusScope {
                         }
                     }
 
-                    ShaderEffectSource {
-                        id: characterNameTexture
-                        sourceItem: characterNameSourceViewport
-                        hideSource: characterNameViewport.marqueeMoving
-                        live: characterNameViewport.marqueeMoving
-                        recursive: false
-                        visible: false
-                    }
+                    // Effet graphique instancié seulement sur le marquee focalisé.
+                    Loader {
+                        id: characterNameEffectsLoader
+                        anchors.fill: parent
+                        active: characterNameViewport.marqueeOn
+                        sourceComponent: Component {
+                            Item {
+                                anchors.fill: parent
+                                ShaderEffectSource {
+                                    id: characterNameTexture
+                                    sourceItem: characterNameSourceViewport
+                                    hideSource: characterNameViewport.marqueeMoving
+                                    live: characterNameViewport.marqueeMoving
+                                    recursive: false
+                                    visible: false
+                                }
 
-                    Item {
-                        id: characterNameFadeMask
-                        anchors.fill: characterNameSourceViewport
-                        visible: false
+                                Item {
+                                    id: characterNameFadeMask
+                                    anchors.fill: parent
+                                    visible: false
 
-                        Rectangle {
-                            anchors.fill: parent
-                            gradient: Gradient {
-                                orientation: Gradient.Horizontal
-                                GradientStop { position: 0.00; color: characterNameViewport.atStart ? "#ff000000" : "#00000000" }
-                                GradientStop { position: 0.10; color: "#ff000000" }
-                                GradientStop { position: 0.90; color: "#ff000000" }
-                                GradientStop { position: 1.00; color: characterNameViewport.atEnd ? "#ff000000" : "#00000000" }
+                                    Rectangle {
+                                        anchors.fill: parent
+                                        gradient: Gradient {
+                                            orientation: Gradient.Horizontal
+                                            GradientStop { position: 0.00; color: characterNameViewport.atStart ? "#ff000000" : "#00000000" }
+                                            GradientStop { position: 0.10; color: "#ff000000" }
+                                            GradientStop { position: 0.90; color: "#ff000000" }
+                                            GradientStop { position: 1.00; color: characterNameViewport.atEnd ? "#ff000000" : "#00000000" }
+                                        }
+                                    }
+                                }
+
+                                OpacityMask {
+                                    anchors.fill: parent
+                                    source: characterNameTexture
+                                    maskSource: characterNameFadeMask
+                                    visible: characterNameViewport.marqueeMoving
+                                    cached: false
+                                }
                             }
                         }
-                    }
-
-                    OpacityMask {
-                        anchors.fill: characterNameSourceViewport
-                        source: characterNameTexture
-                        maskSource: characterNameFadeMask
-                        visible: characterNameViewport.marqueeMoving
-                        cached: false
                     }
 
                     SequentialAnimation {

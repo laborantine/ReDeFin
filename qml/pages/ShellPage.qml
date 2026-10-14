@@ -517,7 +517,8 @@ FocusScope {
 
     function _tokenTransportAllowed(url) {
         var normalized = _normalizeSessionServerUrl(url)
-        return !!normalized && !_isWanHttpServerUrl(normalized)
+        return !!normalized && (!_isWanHttpServerUrl(normalized)
+                || (JellyfinBridge.hasWanHttpConsent && JellyfinBridge.hasWanHttpConsent(normalized)))
     }
     function _clearApiCaches(cancelInflightLeaders) {
         try {
@@ -576,6 +577,11 @@ FocusScope {
     function securityIsTrustedLanHost(value) { return _isTrustedLanHostInAnyRegistry(value) }
     function securityTrustLanHost(value) { _restoreTrustedLanHost(value) }
     function securityRotateForServer(value) {
+        // Un nouveau serveur LAN/HTTPS révoque l'ancien consentement WAN HTTP.
+        try {
+            if (!JellyfinBridge.hasWanHttpConsent(value))
+                JellyfinBridge.clearWanHttpConsent()
+        } catch(eConsent) {}
         var keep = value && _isTrustedLanHostInAnyRegistry(value)
         _clearTrustedLanHosts()
         if (keep) _restoreTrustedLanHost(value)
@@ -671,11 +677,13 @@ FocusScope {
             if (ctx.remember !== undefined && ctx.remember !== null) { sessionRemember = (ctx.remember === true); changed = true }
 
             // Un contexte mémoire forgé ou restauré ne doit jamais propager un token vers HTTP WAN.
-            if (!_isBadParam(sessionAccessToken) && _isWanHttpServerUrl(sessionServerUrl)) {
+            if (!_isBadParam(sessionAccessToken) && !_tokenTransportAllowed(sessionServerUrl)) {
                 sessionAccessToken = ""
                 sessionRemember = false
                 changed = true
             }
+            if (_isWanHttpServerUrl(sessionServerUrl))
+                sessionRemember = false // HTTP externe : jamais de session persistante.
 
             return changed
         } catch(e) {
@@ -786,6 +794,28 @@ FocusScope {
         var idx = _recallFocus(targetUrl)
         if (idx >= 0)
             return NavContext.withParam(targetUrl, "startIndex", idx)
+        return targetUrl
+    }
+
+    // Restaurer la position exacte lors d'un POP DetailCollection -> MoviePage.
+    // On valide l'identité de la bibliothèque afin de ne jamais restaurer un
+    // index/scroll de collection dans une autre grille (films, séries, etc.).
+    function _withCollectionReturnState(targetUrl, detailUrl) {
+        if (NavContext.baseOf(detailUrl).toLowerCase() !== "detailcollectionpage.qml"
+                || NavContext.baseOf(targetUrl).toLowerCase() !== "moviepage.qml")
+            return targetUrl
+        var folderId = NavContext.param("returnFolderId", detailUrl)
+        if (!folderId || folderId !== NavContext.param("folderId", targetUrl))
+            return targetUrl
+        var mode = String(NavContext.param("returnLibraryMode", detailUrl) || "collections").toLowerCase()
+        var targetMode = String(NavContext.param("libraryMode", targetUrl) || "movies").toLowerCase()
+        if (mode !== targetMode) return targetUrl
+        var index = NavContext.param("returnIndex", detailUrl)
+        if (/^[0-9]+$/.test(index))
+            targetUrl = NavContext.withParam(targetUrl, "restoreIndex", Number(index))
+        var y = NavContext.param("returnY", detailUrl)
+        if (/^[0-9]+(?:\.[0-9]+)?$/.test(y))
+            targetUrl = NavContext.withParam(targetUrl, "restoreY", Number(y))
         return targetUrl
     }
 
@@ -1349,6 +1379,8 @@ FocusScope {
     }
 
     function _resetSessionContext() {
+        // Logout / oubli : révoquer aussi le consentement HTTP WAN éphémère.
+        try { if (JellyfinBridge.clearWanHttpConsent) JellyfinBridge.clearWanHttpConsent() } catch(eConsent) {}
         _clearRemotePendingTracks()
         try { remoteMessageOverlay.clearAll() } catch(eRemoteMessage) {}
         // Purge aussi lorsque la session est déjà vide mais qu'un cache public ou
@@ -1655,6 +1687,10 @@ FocusScope {
 
     function _syncPlaybackDeviceMode() {
         playbackDeviceMode = _detectPlaybackDeviceMode()
+        try {
+            if (JellyfinBridge && JellyfinBridge.configureApiCacheBudget)
+                JellyfinBridge.configureApiCacheBudget(playbackDeviceMode)
+        } catch(eCacheBudget) {}
     }
 
     /* ============ INIT IDENTITÉ CLIENT (Jellyfin) ================= */
@@ -1923,8 +1959,10 @@ FocusScope {
             var prevBase = NavContext.baseOf(prev).toLowerCase()
             if (prevBase === "homepage.qml")
                 _requestFastHomeReturn(currentBase)
-            if (prevBase === "moviepage.qml")
+            if (prevBase === "moviepage.qml") {
                 prev = _withStartIndexIfReturningFromDetails(prev, currentBase)
+                prev = _withCollectionReturnState(prev, currentPage)
+            }
             _updateAppSettingsContext()
             _prepareDetailCurtainBeforeNavigation(prev)
             currentPage = prev
@@ -2052,7 +2090,9 @@ FocusScope {
             // MoviePage universel : le mode ne doit pas être perdu par ShellPage.
             libraryMode: NavContext.param("libraryMode", safeCurrentPage),
             browserTitle: NavContext.param("browserTitle", safeCurrentPage),
-            ageMax: NavContext.param("ageMax", safeCurrentPage)
+            ageMax: NavContext.param("ageMax", safeCurrentPage),
+            returnFolderId: NavContext.param("returnFolderId", safeCurrentPage),
+            returnLibraryMode: NavContext.param("returnLibraryMode", safeCurrentPage)
         }
     }
 
@@ -2094,6 +2134,17 @@ FocusScope {
         if (startIndexRaw !== "" && pageItem.hasOwnProperty("startIndex")) {
             var startIndex = parseInt(startIndexRaw)
             if (!isNaN(startIndex)) pageItem.startIndex = startIndex
+        }
+
+        var returnIndexRaw = NavContext.param("returnIndex", shell.currentPage)
+        if (returnIndexRaw !== "" && pageItem.hasOwnProperty("returnIndex")) {
+            var returnIndex = parseInt(returnIndexRaw, 10)
+            if (!isNaN(returnIndex)) pageItem.returnIndex = returnIndex
+        }
+        var returnYRaw = NavContext.param("returnY", shell.currentPage)
+        if (returnYRaw !== "" && pageItem.hasOwnProperty("returnY")) {
+            var returnY = Number(returnYRaw)
+            if (isFinite(returnY)) pageItem.returnY = returnY
         }
 
         var restoreIndexRaw = NavContext.param("restoreIndex", shell.currentPage)

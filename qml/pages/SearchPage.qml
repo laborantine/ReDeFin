@@ -11,6 +11,7 @@ import "../js/jellyfinBridge.js" as Jellyfin
 import "../js/MediaCatalog.js" as MediaCatalog
 import "../js/MediaRailLayout.js" as MediaRailLayout
 import "../js/SearchEngine.js" as SearchEngine
+import "../js/SafeLog.js" as SafeLog
 FocusScope {
     id: searchPage
     width: 1920
@@ -40,6 +41,31 @@ FocusScope {
     property bool openingItem: false
     property string errorText: ""
     property int requestSequence: 0
+    // Les delegates d'une section peuvent apparaître après le premier frame.
+    // Retenter via un Timer borné : jamais de récursion Qt.callLater illimitée.
+    readonly property int sectionFocusRetryMax: 12
+    property int _sectionFocusRetryRemaining: 0
+    property int _sectionFocusRetryIndex: -1
+    property int _sectionFocusRetryRequest: -1
+    Timer {
+        id: sectionFocusRetryTimer
+        interval: 60
+        repeat: false
+        onTriggered: {
+            if (!searchPage.resultsFocusActive || !searchPage.hasSections
+                    || searchPage._sectionFocusRetryRequest !== searchPage.requestSequence
+                    || searchPage._sectionFocusRetryIndex !== searchPage.activeSectionIndex) {
+                searchPage._cancelSectionFocusRetry()
+                return
+            }
+            if (searchPage._sectionFocusRetryRemaining <= 0) {
+                searchPage.focusSearchField()
+                return
+            }
+            searchPage._sectionFocusRetryRemaining--
+            searchPage.focusSection(searchPage._sectionFocusRetryIndex, true)
+        }
+    }
     property int resultLimit: 40
     property int minimumQueryLength: 2
     property int searchBudgetMs: 12000
@@ -108,6 +134,7 @@ FocusScope {
     signal requestMoviePage(string folderId)
     signal requestSeriesPage(string folderId)
     signal requestCollectionPage(string folderId)
+    signal requestDetailCollection(string boxSetId)
     signal requestSeasonPage(string seriesId, string seasonId, string preselectEpisodeId)
 
     function _hqPosterCandidateIdNow() {
@@ -359,9 +386,13 @@ FocusScope {
                 : -1
         resultsFocusActive = keepResultsFocus && sections.length > 0
         if (resultsFocusActive) {
+            var focusRequest = requestSequence
+            var focusIndex = activeSectionIndex
             Qt.callLater(function() {
-                if (searchPage && searchPage.resultsFocusActive && searchPage.hasSections)
-                    searchPage.focusSection(searchPage.activeSectionIndex)
+                if (searchPage && searchPage.resultsFocusActive && searchPage.hasSections
+                        && searchPage.requestSequence === focusRequest
+                        && searchPage.activeSectionIndex === focusIndex)
+                    searchPage.focusSection(focusIndex)
             })
         }
 
@@ -496,14 +527,26 @@ FocusScope {
             Qt.callLater(apply)
     }
 
+    function _cancelSectionFocusRetry() {
+        sectionFocusRetryTimer.stop()
+        _sectionFocusRetryRemaining = 0
+        _sectionFocusRetryIndex = -1
+        _sectionFocusRetryRequest = -1
+    }
+
     function focusSearchField() {
+        _cancelSectionFocusRetry()
         resultsFocusActive = false
         Qt.inputMethod.hide()
         searchFieldHit.forceActiveFocus()
     }
 
-    function focusSection(sectionIndex) {
-        Qt.inputMethod.hide()
+    // retry=true est réservé au timer : un nouvel appui D-Pad annule l'ancienne cible.
+    function focusSection(sectionIndex, retry) {
+        if (retry !== true) {
+            _cancelSectionFocusRetry()
+            Qt.inputMethod.hide()
+        }
         if (!hasSections) {
             focusSearchField()
             return false
@@ -511,17 +554,26 @@ FocusScope {
         sectionIndex = Math.max(0, Math.min(sectionIndex, resultSections.length - 1))
         resultsFocusActive = true
         activeSectionIndex = sectionIndex
-        if (sectionIndex >= Math.max(0, resultSections.length - 2))
+        if (retry !== true && sectionIndex >= Math.max(0, resultSections.length - 2))
             _requestMoreLibraryResults()
         var sectionItem = _sectionDelegate(sectionIndex)
         if (!sectionItem || !sectionItem.listObj) {
-            Qt.callLater(function() {
-                if (searchPage && searchPage.resultsFocusActive &&
-                        searchPage.activeSectionIndex === sectionIndex)
-                    searchPage.focusSection(sectionIndex)
-            })
+            if (retry !== true) {
+                _sectionFocusRetryRemaining = sectionFocusRetryMax
+                _sectionFocusRetryIndex = sectionIndex
+                _sectionFocusRetryRequest = requestSequence
+            }
+            if (_sectionFocusRetryRemaining > 0 &&
+                    _sectionFocusRetryRequest === requestSequence &&
+                    _sectionFocusRetryIndex === sectionIndex) {
+                sectionFocusRetryTimer.restart()
+            } else {
+                // Loader disparu définitivement : restaurer un focus utilisable.
+                focusSearchField()
+            }
             return false
         }
+        _cancelSectionFocusRetry()
         var list = sectionItem.listObj
         list.forceActiveFocus()
         if (list.selectedIndex >= 0 && list.ensureCurrentItemVisible)
@@ -541,6 +593,7 @@ FocusScope {
     // La page conserve l'affichage progressif et le focus ; SearchEngine porte
     // les requêtes et l'annulation dans un état propre à cette page.
     function clearSearch() {
+        _cancelSectionFocusRetry()
         requestSequence++
         SearchEngine.cancel(_searchEngineState, "cancelled")
         searchDelay.stop()
@@ -748,7 +801,7 @@ FocusScope {
                     activeSectionIndex = -1
                     resultsFocusActive = false
                     totalRecordCount = 0
-                    var c = (code && code.code !== undefined) ? _s(code.code) : _s(code)
+                    var c = SafeLog.safeErrorCode(code, "network_error")
                     if (c === "timeout")
                         errorText = "Le serveur met trop de temps à répondre. [" + c + "]"
                     else if (c === "http_401" || c === "http_403")
@@ -825,7 +878,11 @@ FocusScope {
         if (!item || !item.Id) return
         var t = MediaCatalog.itemTypeLower(item)
         var ct = _collectionTypeLower(item)
-        if (t === "boxset" || ct === "boxsets") {
+        if (t === "boxset") {
+            requestDetailCollection(_s(item.Id))
+            return
+        }
+        if (ct === "boxsets") {
             requestCollectionPage(_s(item.Id))
             return
         }
@@ -882,7 +939,7 @@ FocusScope {
                     })
             }
         } else if (t === "boxset") {
-            requestCollectionPage(_s(item.Id))
+            requestDetailCollection(_s(item.Id))
         } else if (_isFolderType(t) || item.IsFolder === true) {
             openFolder(item)
         }
@@ -1567,6 +1624,9 @@ FocusScope {
                                 property int cardSidePad: Math.max(0, Number(cardData && cardData._searchSidePad || 0))
                                 property int cardTopPad: Math.max(0, Number(cardData && cardData._searchTopPad || 0))
 
+                                property bool cardPooled: false
+                                ListView.onPooled: cardPooled = true
+                                ListView.onReused: cardPooled = false
                                 source: searchPage.posterGridCardSource
                                 onLoaded: if (item) item.homeLoader = searchCardLoader
 
@@ -1666,6 +1726,7 @@ FocusScope {
 
     Component.onDestruction: {
 
+        _cancelSectionFocusRetry()
         requestSequence++
         searchDelay.stop()
         searchBudget.stop()

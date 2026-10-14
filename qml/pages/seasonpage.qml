@@ -532,7 +532,7 @@ FocusScope {
     function _rememberEpisodeDetails(details){
         if (!details || !details.Id) return;
         var id = String(details.Id), order = _detailsCacheOrder || [], idx = order.indexOf(id);
-        detailsCache[id] = MediaCatalog.compactEpisodeDetails(details);
+        detailsCache[id] = SeasonUtils.compactEpisodeDetails(details);
         if (idx >= 0) order.splice(idx, 1);
         order.push(id);
         while (order.length > Math.max(1, _detailsCacheMax | 0)) {
@@ -1207,7 +1207,7 @@ FocusScope {
     }
     function requestBgUpdate(){
         if (disposed || !serverUrl) return;
-        _bgWantedUrl = MediaCatalog.seasonBackdropUrl(Jellyfin, seasonpage);
+        _bgWantedUrl = SeasonUtils.seasonBackdropUrl(Jellyfin, seasonpage);
         bgDebounceTimer.restart();
     }
     onBgBlurChanged: requestBgUpdate()
@@ -1457,7 +1457,7 @@ FocusScope {
 
                             Text { textFormat: Text.PlainText;
                                 id: headerTitle
-                                text: selectedEpisode ? MediaCatalog.episodeDisplayTitle(selectedEpisode)
+                                text: selectedEpisode ? SeasonUtils.episodeDisplayTitle(selectedEpisode)
                                                       : ((seasonItem && seasonItem.Name) ? seasonItem.Name : "")
                                 width: parent.width
                                 color: "#ffffff"
@@ -1633,7 +1633,7 @@ FocusScope {
                                         }
                                     }
                                 }
-                                Text { textFormat: Text.PlainText; text: MediaCatalog.episodeCode(selectedEpisode, seasonItem); color: "#ffffff"; font.pixelSize: 20; font.bold: true; visible: text.length > 0; anchors.verticalCenter: parent.verticalCenter }
+                                Text { textFormat: Text.PlainText; text: SeasonUtils.episodeCode(selectedEpisode, seasonItem); color: "#ffffff"; font.pixelSize: 20; font.bold: true; visible: text.length > 0; anchors.verticalCenter: parent.verticalCenter }
                                 Text { textFormat: Text.PlainText; text: (selectedEpisode && selectedEpisode.PremiereDate) ? MediaCatalog.formatDateLongFr(selectedEpisode.PremiereDate) : ""; color: "#ffffff"; font.pixelSize: 20; font.bold: true; visible: !!(selectedEpisode && selectedEpisode.PremiereDate); anchors.verticalCenter: parent.verticalCenter }
                                 Repeater {
                                     model: _tagsAll
@@ -2053,7 +2053,7 @@ FocusScope {
                             smooth: false
                             mipmap: false
                             source: (_logoArmed && postFirstFrame)
-                                ? MediaCatalog.seasonLogoUrl(Jellyfin, serverUrl, seriesId, selectedEpisode, seasonItem, seriesLogoBox.width, seriesLogoMaxW)
+                                ? SeasonUtils.seasonLogoUrl(Jellyfin, serverUrl, seriesId, selectedEpisode, seasonItem, seriesLogoBox.width, seriesLogoMaxW)
                                 : ""
                             opacity: _logoArmed ? 0.95 : 0.0
                             onStatusChanged: if (visualRevealPending) visualRevealPollTimer.restart()
@@ -2183,7 +2183,7 @@ FocusScope {
                                                 serverUrl: h.serverUrl
                                                 userId: h.userId
                                                 itemId: selectedEpisode ? selectedEpisode.Id : ""
-                                                itemTitle: selectedEpisode ? MediaCatalog.episodeDisplayTitle(selectedEpisode) : ""
+                                                itemTitle: selectedEpisode ? SeasonUtils.episodeDisplayTitle(selectedEpisode) : ""
                                                 userData: selectedDetails ? selectedDetails.UserData : (selectedEpisode ? selectedEpisode.UserData : null)
                                                 runTimeTicks: selectedEpisode ? (Number(selectedEpisode.RunTimeTicks) || 0) : 0
                                                 seasonId: h.seasonId
@@ -2238,7 +2238,7 @@ FocusScope {
                         model: h.episodesForRow
                         hydrated: h._episodesHydrated
                         focusRestoreGate: h._focusRestoreGate || h._playlistRestoreInFlight || h._restoringFocus
-                        fallbackPosterUrl: MediaCatalog.seasonPosterFallbackUrl(Jellyfin, h)
+                        fallbackPosterUrl: SeasonUtils.seasonPosterFallbackUrl(Jellyfin, h)
                         currentIndex: h.episodesRowIndex
                         active: !h.isLoading && !h.overlayOpen
                         showFocus: (h.currentFocus === 1)
@@ -2293,7 +2293,7 @@ FocusScope {
                             h.restoreY = rootFlick.contentY;
                             if (typeof h.requestPlay === "function") {
                                 _storeSensitiveNavContext()
-                                h.requestPlay(ep2.Id, h.accessToken, h.userId, h.serverUrl, MediaCatalog.episodeDisplayTitle(ep2));
+                                h.requestPlay(ep2.Id, h.accessToken, h.userId, h.serverUrl, SeasonUtils.episodeDisplayTitle(ep2));
                             }
                         }
                         onRequestUp: {
@@ -2446,7 +2446,7 @@ FocusScope {
             if (!selectedEpisodeId) return; restoreEpisodeId = selectedEpisodeId; restoreIndex = currentIndex; restoreY = rootFlick.contentY
             var startMs = Math.max(0, Math.floor(Number(chapter && chapter.StartPositionTicks || 0) / 10000))
             try { if (shared) NavContext.setExplicitPlaybackStart(shared, ({ source:"chapter", itemId:String(selectedEpisodeId), serverUrl:String(serverUrl||""), userId:String(userId||""), startMs:startMs, ts:Date.now() })) } catch(e) {}
-            _storeSensitiveNavContext(); requestPlay(selectedEpisodeId, accessToken, userId, serverUrl, MediaCatalog.episodeDisplayTitle(selectedEpisode))
+            _storeSensitiveNavContext(); requestPlay(selectedEpisodeId, accessToken, userId, serverUrl, SeasonUtils.episodeDisplayTitle(selectedEpisode))
         }
     }
     Loader {
@@ -2470,13 +2470,13 @@ FocusScope {
     }
     function openOverviewOverlay(){
         if (!_guardRun() || isLoading) return;
-        var ep = _it(), payload = MediaCatalog.episodeOverviewPayload(Jellyfin, ep, serverUrl);
+        var ep = _it(), payload = SeasonUtils.episodeOverviewPayload(Jellyfin, ep, serverUrl);
         if (!payload) return;
-        var meta = [], code = MediaCatalog.episodeCode(ep, seasonItem);
+        var meta = [], code = SeasonUtils.episodeCode(ep, seasonItem);
         if (code && String(code).length) meta.push(String(code));
         if (ep && ep.RunTimeTicks) meta.push(String(MediaCatalog.formatRuntimeMinutesFromTicks(ep.RunTimeTicks)));
         if (ep && ep.PremiereDate) meta.push(String(MediaCatalog.formatDateLongFr(ep.PremiereDate)));
-        payload.readerStyle = "episode"; payload.title = ep ? MediaCatalog.episodeDisplayTitle(ep) : "Résumé"; payload.meta = meta.join("  •  ");
+        payload.readerStyle = "episode"; payload.title = ep ? SeasonUtils.episodeDisplayTitle(ep) : "Résumé"; payload.meta = meta.join("  •  ");
         lastFocusBeforeOverlay = currentFocus; overlayMode = "overview"; overlayData = payload;
         later(function(){ if (overlayLoader.item) overlayLoader.item.forceActiveFocus(); });
     }

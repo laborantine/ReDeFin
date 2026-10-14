@@ -56,6 +56,28 @@ FocusScope {
 
     /* ==== V4 : navigation Accueil / Recherche ==== */
     property int currentHomeTab: 0 // 0 = Accueil, 1 = Recherche
+    // Après une longue recherche, relâcher uniquement les backdrops non visibles.
+    // Ne pas détruire PosterGrid ni ses posters : retour D-Pad instantané.
+    Timer {
+        id: inactiveHomeBackdropTimer
+        interval: 60000
+        repeat: false
+        onTriggered: {
+            if (!homePage.visible || homePage.currentHomeTab !== 1) return
+            var pg = posterGridLoader.item
+            if (pg && pg.releaseInactiveHomeBackdrop) pg.releaseInactiveHomeBackdrop()
+        }
+    }
+    onCurrentHomeTabChanged: {
+        if (currentHomeTab === 1) {
+            if (visible) inactiveHomeBackdropTimer.restart()
+        } else {
+            inactiveHomeBackdropTimer.stop()
+            // Précharger le backdrop dès le retour, sans bloquer l'affichage.
+            var pg = posterGridLoader.item
+            if (pg && pg.restoreInactiveHomeBackdrop) pg.restoreInactiveHomeBackdrop()
+        }
+    }
 
     // Contrat de propriété du focus : PosterGrid ne peut réparer/forcer son focus
     // que lorsque l'utilisateur a explicitement quitté la topbar vers le contenu.
@@ -187,6 +209,11 @@ FocusScope {
 
     function _openSearchCollection(folderId) {
         requestNavigation(_navRoute("moviepage.qml", { folderId: folderId, libraryMode: "collections" }))
+    }
+
+    function _openSearchDetailCollection(boxSetId) {
+        if (!boxSetId) return
+        requestNavigation(_navRoute("detailCollectionPage.qml", { boxSetId: boxSetId }))
     }
 
     function _openSearchSeason(seriesId, seasonId, episodeId) {
@@ -993,6 +1020,13 @@ FocusScope {
                 });
             }
 
+            if (item.requestDetailCollection) {
+                item.requestDetailCollection.connect(function(boxSetId) {
+                    savePosterGridFocus("nav-detailcollection", true);
+                    homePage._openSearchDetailCollection(boxSetId);
+                });
+            }
+
             if (item.requestDetailMovie) {
                 item.requestDetailMovie.connect(function(movieId) {
                     savePosterGridFocus("nav-detailmovie", true);
@@ -1042,6 +1076,9 @@ FocusScope {
             })
             if (item.requestCollectionPage) item.requestCollectionPage.connect(function(folderId) {
                 homePage._openSearchCollection(folderId)
+            })
+            if (item.requestDetailCollection) item.requestDetailCollection.connect(function(boxSetId) {
+                homePage._openSearchDetailCollection(boxSetId)
             })
             if (item.requestSeasonPage) item.requestSeasonPage.connect(function(seriesId, seasonId, episodeId) {
                 homePage._openSearchSeason(seriesId, seasonId, episodeId)
@@ -1717,6 +1754,8 @@ FocusScope {
     }
 
     onVisibleChanged: {
+        if (!visible) inactiveHomeBackdropTimer.stop()
+        else if (currentHomeTab === 1) inactiveHomeBackdropTimer.restart()
         if (!visible) {
             // Navigation vers une page de contenu. Un changement d'onglet
             // Recherche/Accueil ne passe jamais ici.

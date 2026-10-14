@@ -290,6 +290,16 @@ FocusScope {
         return idx;
     }
 
+    // Fournit la référence de l'épisode sélectionné pour les métadonnées.
+    // Contrairement à currentEpisodeSnapshot(), évite un clone JSON à chaque
+    // rafraîchissement de la durée affichée. Aucun changement de focus.
+    function currentEpisodeForMetadata() {
+        if (!hasContent) return null;
+        var index = currentIndex | 0;
+        if (index < 0 || index >= episodes.length) index = 0;
+        return episodes[index] || episodes[0] || null;
+    }
+
     function currentEpisodeSnapshot(){
         var idx = Math.max(0, Math.min(currentIndex|0, Math.max(0, (episodes||[]).length-1)));
         var ep = (episodes && idx < episodes.length) ? episodes[idx] : null;

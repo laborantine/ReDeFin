@@ -104,6 +104,7 @@ Item {
     // est donc récupéré à la demande sur l'item focus, sans alourdir toute la grille.
     property var  _detailCacheById: ({})
     property var  _detailCacheOrder: []
+    property string _detailScopeKey: ""
     property int  _detailFetchToken: 0
     property string _detailFetchInFlightId: ""
     property var _detailFetchHandle: null
@@ -137,6 +138,24 @@ Item {
     readonly property real posterHqOversample: 1.50
     readonly property int  reqPosterHqW: Math.round(posterW * posterHqOversample)
     readonly property int  reqPosterHqH: Math.round(posterH * posterHqOversample)
+
+    // Qt Quick shared pixmap cache: at most three standard posters around the
+    // library entry/return index may participate. Never turn it on for the full
+    // GridView, personal-media images or HQ images. Keep the anchor fixed during
+    // D-Pad navigation to avoid forcing Image.reload() on every focus change.
+    property int posterCacheAnchorGlobalIndex: 0
+    property bool _posterCacheAnchorSet: false
+    function _capturePosterCacheAnchor(indexValue) {
+        if (_posterCacheAnchorSet || indexValue < 0) return
+        posterCacheAnchorGlobalIndex = indexValue
+        _posterCacheAnchorSet = true
+    }
+    onRestoreIndexChanged: _capturePosterCacheAnchor(restoreIndex)
+    onStartIndexChanged: _capturePosterCacheAnchor(startIndex)
+    function isWarmPosterIndex(globalIndex) {
+        return !personalMode && globalIndex >= 0
+                && Math.abs(globalIndex - posterCacheAnchorGlobalIndex) <= 1
+    }
 
     readonly property real focusScale: 1.14
     readonly property int  focusLiftPx: 6
@@ -478,14 +497,8 @@ Item {
     }
 
     /* ========= Utils visibilité ========= */
-    function indexVisible(idx) {
-        var cols = (grid && grid.columns > 0) ? grid.columns : 1
-        var row = Math.floor(idx / cols)
-        var rowTop = row * grid.cellHeight
-        var rowBottom = rowTop + grid.cellHeight
-        var margin = Math.max(360, grid.cellHeight * 1.5)
-        return !(rowBottom < (grid.contentY - margin) || rowTop > (grid.contentY + grid.height + margin))
-    }
+    // Plage visible mutualisée dans GridView : voir visibleFirstIndex/visibleLastIndex.
+    // Ne pas temporiser le scroll D-Pad : la sélection doit rester immédiate.
 
     /* ========= Focus target ========= */
     function forceInitialFocus() {
@@ -748,7 +761,10 @@ Item {
     readonly property bool gridWindowCacheEnabled: true
 
     function _windowCacheKey() {
-        return MediaBrowser.windowCache_cacheKey(serverUrl, userId, folderId, normalizedLibraryMode, sortMode, "")
+        // Nouvelle forme de réponse « mixed » : ne pas restaurer d'anciennes
+        // fenêtres vides ou filtrées venant du build précédent.
+        return MediaBrowser.windowCache_cacheKey(serverUrl, userId, folderId, normalizedLibraryMode,
+                                                 sortMode, normalizedLibraryMode === "mixed" ? "mixed-v2" : "")
     }
 
     function _windowCacheBucket() {
@@ -805,9 +821,11 @@ Item {
     /* ========= Navigation hiérarchique Séries / Mixte ========= */
     function _isBrowserSeries(it) { return !collectionsMode && hierarchicalMode && MediaCatalog.isSeries(it) }
     function _isBrowserFolder(it) { return !collectionsMode && hierarchicalMode && MediaCatalog.isFolder(it) }
+    function _isSagaItem(it) {
+        return !!it && MediaCatalog.itemTypeLower(it) === "boxset"
+    }
     function _isCollectionItem(it) {
-        if (!collectionsMode || !it) return false
-        return String(it.Type || it.CollectionType || "").toLowerCase() === "boxset"
+        return collectionsMode && _isSagaItem(it)
     }
     function unreadCountFor(it) { return hierarchicalMode ? MediaCatalog.unreadCount(it) : 0 }
     function _pushBrowserReturnState(childId) {
@@ -1284,10 +1302,12 @@ Item {
     }
 
     function _itemNeedsMediaDetail(it) {
-        if (!it || !it.Id || _isBrowserFolder(it)) return false
-        if (_isBrowserSeries(it)) return true
-        if (it.MediaStreams && it.MediaStreams.length > 0) return false
-        return true
+        if (!it || !it.Id || _isBrowserFolder(it) || _isSagaItem(it)) return false
+        // Les listes Jellyfin peuvent fournir des pistes incomplètes (ou
+        // différentes de MediaSources). Toujours enrichir le film focalisé,
+        // jamais toute la grille. Une entrée en cache n'est pas redemandée.
+        var typ = MediaCatalog.itemTypeLower(it)
+        return _isBrowserSeries(it) || typ === "movie" || typ === "video" || typ === "musicvideo"
     }
 
     function _storeItemDetailForTags(id, detail) {
@@ -1406,6 +1426,16 @@ Item {
     function fetchFolder() {
         _hydrateSensitiveContextFromShared()
         if (!accessToken || !userId || !serverUrl || !folderId) return
+
+        // Un même Id Jellyfin peut exister sur deux serveurs différents.
+        // Ne jamais afficher les tags 1080p/4K/audio d'une autre session.
+        var detailScope = String(serverUrl) + "|" + String(userId) + "|" + String(folderId)
+        if (_detailScopeKey !== detailScope) {
+            _detailScopeKey = detailScope
+            _cancelSelectedDetailRequest()
+            _detailCacheById = ({})
+            _detailCacheOrder = []
+        }
 
         _fetchToken++
         _restoreSortFromShared()
@@ -1560,6 +1590,8 @@ Item {
             id: bgA
             anchors.fill: parent
             fillMode: Image.PreserveAspectCrop
+            // Fond 1280x720 demandé au serveur : ne jamais décoder une réponse 4K.
+            sourceSize: Qt.size(moviepage.bgW, moviepage.bgH)
             asynchronous: true
             cache: false
             mipmap: false
@@ -1576,6 +1608,8 @@ Item {
             id: bgB
             anchors.fill: parent
             fillMode: Image.PreserveAspectCrop
+            // Fond 1280x720 demandé au serveur : ne jamais décoder une réponse 4K.
+            sourceSize: Qt.size(moviepage.bgW, moviepage.bgH)
             asynchronous: true
             cache: false
             mipmap: false
@@ -1890,7 +1924,7 @@ Item {
                                          selectedItem,
                                          streamInfo,
                                          ageTag,
-                                         moviepage.collectionsMode,
+                                         moviepage.collectionsMode || moviepage._isSagaItem(selectedItem),
                                          moviepage._isBrowserSeries(selectedItem),
                                          moviepage._isBrowserFolder(selectedItem))
             FontMetrics {
@@ -1902,7 +1936,7 @@ Item {
             /* ===== Titre — marquee identique detailCollectionPage ===== */
             Item {
                 id: movieTitleLineBox
-                width: headerInfos.titleShouldMarquee ? Math.min(headerInfos.width, MediaCatalog.titleTextCapPx(movieTitleMetrics.averageCharacterWidth, titleCharLimit)) : headerInfos.width
+                width: headerInfos.titleShouldMarquee ? Math.min(headerInfos.width, MediaCatalog.titleTextCapPx(movieTitleMetrics.averageCharacterWidth, headerInfos.titleCharLimit)) : headerInfos.width
                 height: Math.max(38, movieTitleTextItem.implicitHeight + 2)
                 clip: false
                 visible: !!headerInfos.selectedItem
@@ -2467,6 +2501,14 @@ Item {
         reuseItems: true
         cacheBuffer: Math.round(height * 0.42)
         property int columns: Math.max(1, Math.floor(width / cellWidth))
+        readonly property real posterVisibilityMargin: Math.max(360, cellHeight * 1.5)
+        // Ces bornes entières ne changent qu'à la frontière d'une rangée ;
+        // contentY animé ne réévalue donc plus la visibilité de chaque delegate
+        // à chaque frame. Bornes identiques à l'ancien indexVisible().
+        readonly property int visibleFirstIndex: Math.max(0,
+            (Math.ceil((contentY - posterVisibilityMargin) / Math.max(1, cellHeight)) - 1) * columns)
+        readonly property int visibleLastIndex: Math.max(0,
+            ((Math.floor((contentY + height + posterVisibilityMargin) / Math.max(1, cellHeight)) + 1) * columns) - 1)
         property int pendingEnsureIndex: -1
         // Empêche un glide interrompu par une nouvelle touche de déclencher les
         // traitements de fin. En scroll rapide, seule la dernière position stable
@@ -2583,7 +2625,7 @@ Item {
             id: movieLibraryDelegate
             width: grid.cellWidth
             height: grid.cellHeight
-            visible: moviepage.indexVisible(index)
+            visible: itemIndex >= grid.visibleFirstIndex && itemIndex <= grid.visibleLastIndex
             z: selected ? 1000 : 0
 
             property var itemData: modelData
@@ -2625,11 +2667,11 @@ Item {
                     return
                 }
                 if (typeof moviepage.requestNavigation !== "function") return
-                if (moviepage.collectionsMode) {
+                if (moviepage.collectionsMode || moviepage._isSagaItem(itemData)) {
                     moviepage.requestNavigation(moviepage._navRoute("detailCollectionPage.qml", {
-                        itemId: itemData.Id,
                         boxSetId: itemData.Id,
                         returnFolderId: moviepage.folderId || "",
+                        returnLibraryMode: moviepage.normalizedLibraryMode,
                         returnIndex: moviepage._globalIndexForLocal(grid.currentIndex),
                         returnY: Math.floor(grid.contentY || 0)
                     }))
@@ -2692,16 +2734,19 @@ Item {
                 imageFillModeOverride: movieLibraryDelegate.collectionThumbFallback
                                        ? Image.PreserveAspectFit
                                        : Image.PreserveAspectCrop
-                imageCache: false
+                // A fixed 3-card warm window improves repeated returns to the
+                // same detail; QML's cache stays off for every other delegate.
+                imageCache: moviepage.isWarmPosterIndex(moviepage._globalIndexForLocal(movieLibraryDelegate.itemIndex))
                 fallbackOnImageError: false
-                fallbackKind: (movieLibraryDelegate.browserFolder || moviepage.collectionsMode)
+                fallbackKind: (movieLibraryDelegate.browserFolder || moviepage.collectionsMode || moviepage._isSagaItem(movieLibraryDelegate.itemData))
                               ? "folder" : (moviepage.personalMode ? "filmstrip" : "video")
                 showVideoIndicator: moviepage.personalMode
                                     && MediaCatalog.itemTypeLower(movieLibraryDelegate.itemData) !== "photo"
 
                 showWatchedBadge: true
                 watched: movieLibraryDelegate.watched
-                showUnplayedBadge: !moviepage.personalMode && !moviepage.collectionsMode && movieLibraryDelegate.unread > 0
+                showUnplayedBadge: !moviepage.personalMode && !moviepage.collectionsMode
+                                   && !moviepage._isSagaItem(movieLibraryDelegate.itemData) && movieLibraryDelegate.unread > 0
                 unplayedCount: movieLibraryDelegate.unread
                 showProgress: movieLibraryDelegate.resumeRatio > 0
                 progressRatioOverride: movieLibraryDelegate.resumeRatio

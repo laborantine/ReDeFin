@@ -9,6 +9,7 @@ import "../components" as Components
 import "../js/jellyfinBridge.js" as Jellyfin
 import "../js/JellyfinServerDiscovery.js" as ServerDiscovery
 import "../js/clientId.js" as ClientId
+import "../js/SafeLog.js" as SafeLog
 
 FocusScope {
     id: serverPage
@@ -95,18 +96,9 @@ FocusScope {
     }
 
     /* ===== HTTP utils ===== */
-    function _safeHttpCode(status) {
-        status = status | 0
-        return status > 0 ? ("HTTP " + status) : ""
-    }
     function _describeHttpError(err) {
-        if (err === undefined || err === null) return "network"
-        if (typeof err === "string") return String(err)
-        var parts = []
-        try { if (err.code) parts.push(String(err.code).replace(/_/g, " ")) } catch(e0) {}
-        var hc = _safeHttpCode(err && err.status || 0)
-        if (hc.length && parts.indexOf(hc) < 0) parts.push(hc)
-        return parts.length ? parts.join(" / ") : "network"
+        // Jamais de err.message/code libre dans une fenetre visible.
+        return SafeLog.safeErrorCode(err, "network_error");
     }
     function _httpsHelp(base, err) {
         var b = normalizeUrl(base)
@@ -123,10 +115,6 @@ FocusScope {
         return t.indexOf("http://") === 0 || t.indexOf("https://") === 0;
     }
 
-    function _shortHostName(value) {
-        var h = cleanHost(value).replace(/^\[/, "").replace(/\]$/, "").toLowerCase();
-        return !!(h && h.indexOf(":") < 0 && h.indexOf(".") < 0 && /^[a-z0-9][a-z0-9-]{0,62}$/.test(h));
-    }
 
     function _markTrustedLanHost(value) {
         try { return Jellyfin.trustLanHost(value) === true; } catch(e0) { return false; }
@@ -136,8 +124,23 @@ FocusScope {
         try { return Jellyfin.isWanHttpUrl(url) === true; } catch(e0) { return false; }
     }
 
-    function _wanHttpError() {
-        return "Connexion HTTP externe refusée. Utilisez HTTPS ou une adresse locale.";
+    function _withHttpConsent(url, onAccepted, onCancelled) {
+        if (!isWanHttpUrl(url) || Jellyfin.hasWanHttpConsent(url)) {
+            if (onAccepted) onAccepted();
+            return;
+        }
+        httpConsentDialog.confirm(url, function(approved) {
+            if (approved) {
+                if (onAccepted) onAccepted();
+            } else {
+                if (onCancelled) onCancelled();
+                Qt.callLater(function() {
+                    if (overlay.active && overlay.item && overlay.item.forceActiveFocus)
+                        overlay.item.forceActiveFocus();
+                    else if (serverPage.visible) urlEntryLauncher.forceActiveFocus();
+                });
+            }
+        });
     }
 
     function cleanHost(raw) {
@@ -213,14 +216,11 @@ FocusScope {
         var u = normalizeUrl(url);
         if (!u || !u.length) return;
         _cancelDiscovery()
-        if (isWanHttpUrl(u)) {
-            lastError = _wanHttpError();
-
-            return;
-        }
-
-        publishDiscovered();
-        try { _storeServerNavContext(u); requestNavigation("LoginPage.qml?ctx=1"); } catch(e){  }
+        _withHttpConsent(u, function() {
+            lastError = "";
+            publishDiscovered();
+            try { _storeServerNavContext(u); requestNavigation("LoginPage.qml?ctx=1"); } catch(e) {}
+        }, function() { lastError = "Connexion HTTP annulée."; });
     }
     function validateAndChoose(hostClean, preferHttps, doneCb) {
         var host = cleanHost(hostClean);
@@ -243,24 +243,19 @@ FocusScope {
             }
             var port = order[idx++], scheme = (port===8920)?"https":"http";
             var base = makeBase(scheme, host, port);
-            if (scheme === "http" && isWanHttpUrl(base) && !_shortHostName(host)) {
-
-                tryNext();
-                return;
-            }
             var timeout = (port===8920 ? manualHttpsTimeoutMs : manualHttpTimeoutMs);
-
-            Jellyfin.probePublicServer(base, timeout,
-                function(j, ping){
-
-                    _markTrustedLanHost(base)
-                    if (doneCb) doneCb(true, "")
-                    chooseServer(base)
-                },
-                function(err){
-
-                    tryNext()
-                })
+            _withHttpConsent(base, function() {
+                Jellyfin.probePublicServer(base, timeout,
+                    function(j, ping) {
+                        _markTrustedLanHost(base)
+                        if (doneCb) doneCb(true, "")
+                        chooseServer(base)
+                    },
+                    function(err) { tryNext() })
+            }, function() {
+                lastError = "Connexion HTTP annulée.";
+                if (doneCb) doneCb(false, lastError);
+            });
         }
         tryNext();
     }
@@ -271,29 +266,26 @@ FocusScope {
             if (doneCb) doneCb(false, "Adresse vide.");
             return;
         }
-        if (isWanHttpUrl(base) && !_shortHostName(base)) {
-            lastError = _wanHttpError();
-            if (doneCb) doneCb(false, lastError);
-            return;
-        }
         var isHttps = (base.indexOf("https://") === 0);
         var timeout = isHttps ? manualHttpsTimeoutMs : manualHttpTimeoutMs;
-
-        Jellyfin.probePublicServer(base, timeout,
-            function(j, ping){
-
-                _markTrustedLanHost(base)
-                if (doneCb) doneCb(true, "")
-                chooseServer(base)
-            },
-            function(err){
-                var desc = _describeHttpError(err)
-                var msg = (err && err.code === "invalid_response")
-                        ? "La réponse reçue n'est pas un serveur Jellyfin valide."
-                        : ("Impossible de joindre le serveur à cette adresse (" + desc + ")." + _httpsHelp(base, err))
-
-                if (doneCb) doneCb(false, msg)
-            })
+        _withHttpConsent(base, function() {
+            Jellyfin.probePublicServer(base, timeout,
+                function(j, ping) {
+                    _markTrustedLanHost(base)
+                    if (doneCb) doneCb(true, "")
+                    chooseServer(base)
+                },
+                function(err) {
+                    var desc = _describeHttpError(err)
+                    var msg = (err && err.code === "invalid_response")
+                            ? "La réponse reçue n'est pas un serveur Jellyfin valide."
+                            : ("Impossible de joindre le serveur à cette adresse (" + desc + ")." + _httpsHelp(base, err))
+                    if (doneCb) doneCb(false, msg)
+                })
+        }, function() {
+            lastError = "Connexion HTTP annulée.";
+            if (doneCb) doneCb(false, lastError);
+        });
     }
 
     /* ===== Découverte réseau ===== */
@@ -949,6 +941,18 @@ FocusScope {
                         }
                     }
 
+                    Text {
+                        width: panel.contentWidth
+                        visible: serverPage.normalizeUrl(urlPage.urlText).indexOf("http://") === 0
+                        text: serverPage.isWanHttpUrl(serverPage.normalizeUrl(urlPage.urlText))
+                              ? "HTTP externe : un avertissement de sécurité précédera la connexion."
+                              : "HTTP local non chiffré : privilégiez HTTPS si disponible."
+                        textFormat: Text.PlainText
+                        wrapMode: Text.WordWrap
+                        color: "#FFD18A"
+                        font.pixelSize: 15
+                    }
+
                     Rectangle {
                         id: btnConnect
                         width: 260
@@ -1081,7 +1085,10 @@ FocusScope {
 
                     // Fallback volontaire uniquement pour les adresses simples sans port ni chemin.
                     // Exemple: "https://monjellyfin.domaine" -> teste aussi 8920/8096 si le 443 ne répond pas.
-                    if (!_urlHasExplicitPort(baseIn) && !_urlHasPath(baseIn))
+                    if (message === "Connexion HTTP annulée.") {
+                        busy = false;
+                        err = message;
+                    } else if (!_urlHasExplicitPort(baseIn) && !_urlHasPath(baseIn))
                         fallbackPorts(message);
                     else {
                         busy = false;
@@ -1125,6 +1132,12 @@ FocusScope {
         }
     }
     function openUrlEntry() {  overlay.active = true; }
+
+    Components.InsecureHttpDialog {
+        id: httpConsentDialog
+        anchors.fill: parent
+        z: 21000
+    }
 
     Components.ReDeFinKeyboard {
         id: redefinKeyboard

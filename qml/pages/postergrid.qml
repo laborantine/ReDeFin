@@ -1,4 +1,6 @@
 import QtQuick 2.15
+import "../js/MediaBrowser.js" as MediaBrowser
+import "../js/HomeLatestLoader.js" as HomeLatest
 import "../js/jellyfinBridge.js" as Jellyfin
 import "../js/MediaCatalog.js" as MediaCatalog
 import "../js/MediaRailLayout.js" as MediaRailLayout
@@ -122,8 +124,10 @@ Item {
                     _saveHomeCacheSoon()
                 }
             } else if (name === "resumeItems") {
-                arr = MediaRailLayout.prepareHomeRowMetrics(arr, "resume", homeCardLayout)
                 if (!MediaCatalog.homeItemsEqual(resumeItems, arr)) {
+                    // Ne pas réannoter 50 DTO / positions quand Jellyfin renvoie
+                    // des données équivalentes (les métriques sont purement locales).
+                    arr = MediaRailLayout.prepareHomeRowMetrics(arr, "resume", homeCardLayout)
                     if (!resumeItems || resumeItems.length === 0) _restartHomeImageSettle()
                     resumeItems = arr
                     _saveHomeCacheSoon()
@@ -138,15 +142,58 @@ Item {
         } catch(e) {}
     }
     function _setLatestByFolderIfChanged(arr) {
-        var incomingCount = arr && arr.length ? arr.length : 0
-        arr = MediaRailLayout.prepareHomeLatestGroups(MediaCatalog.safeArray(arr), homeCardLayout)
+        arr = MediaCatalog.safeArray(arr)
         if (!MediaCatalog.homeLatestGroupsEqual(latestByFolder || [], arr)) {
+            // Projection et recalcul des positions des rails seulement si le
+            // contenu effectif a changé, pas à chaque passage du watchdog.
+            arr = MediaRailLayout.prepareHomeLatestGroups(arr, homeCardLayout)
             if (!latestByFolder || latestByFolder.length === 0) _restartHomeImageSettle()
             latestByFolder = arr
             _saveHomeCacheSoon()
         }
     }
-    Timer { id: focusRestoreTimer; interval: 110; repeat: false; onTriggered: postergrid._applyFocusSnapshotToViews() }
+    // Un seul ordonnanceur pour la restauration du snapshot ET les réparations
+    // ordinaires. La restauration a priorité ; les calibrations horizontales
+    // spécialisées restent inchangées (ApplyRange de ListView sur Freebox).
+    property int _focusRecoveryScheduledKind: -1 // -1 aucun, 0 réparation, 1 snapshot
+    Timer { id: focusRecoveryTimer; interval: 80; repeat: false; onTriggered: postergrid._runFocusRecovery() }
+    function _queueFocusRecovery(kind) {
+        if (!_alive || !focusRepairEnabled) return
+        var restore = (kind === "restore" || _focusRestorePending)
+        if (restore) {
+            if (_focusRecoveryScheduledKind !== 1 || !focusRecoveryTimer.running) {
+                _focusRecoveryScheduledKind = 1
+                focusRecoveryTimer.interval = 110
+                focusRecoveryTimer.restart()
+            }
+        } else if (!focusRecoveryTimer.running) {
+            _focusRecoveryScheduledKind = 0
+            focusRecoveryTimer.interval = 80
+            focusRecoveryTimer.start()
+        }
+    }
+    function _runFocusRecovery() {
+        _focusRecoveryScheduledKind = -1
+        if (!_alive || !focusRepairEnabled) return
+        if (_focusRestorePending || hasPendingFocusRestore()) {
+            if (_focusRestorePending) _applyFocusSnapshotToViews()
+            else scheduleFocusRestore()
+            return
+        }
+        if (!pageActive || _homeFocusRepairLeft <= 0) return
+        _repairHomeFocus()
+        if (!_hasAnyHomeListFocus() && _homeFocusRepairLeft > 0) {
+            --_homeFocusRepairLeft
+            _queueFocusRecovery("repair")
+        } else _homeFocusRepairLeft = 0
+    }
+    function _cancelFocusRepairRetry() {
+        _homeFocusRepairLeft = 0
+        if (_focusRecoveryScheduledKind === 0) {
+            focusRecoveryTimer.stop()
+            _focusRecoveryScheduledKind = -1
+        }
+    }
     Timer { id: focusRestoreSettleTimer; interval: postergrid._focusRestoreSettleMs; repeat: false; onTriggered: postergrid._focusRestoreSettle = false }
     Timer {
         id: folderRestoreHorizontalTimer
@@ -452,7 +499,8 @@ Item {
     function consumeFocusSnapshotKeepState() {
         var snap = _focusSnapshot()
         if (!snap) return false
-        try { focusRestoreTimer.stop() } catch(e0) {}
+        try { focusRecoveryTimer.stop() } catch(e0) {}
+        _focusRecoveryScheduledKind = -1
         try { focusRestoreSettleTimer.stop() } catch(e1) {}
         try { resumeRestoreHorizontalTimer.stop() } catch(e2) {}
         try { folderRestoreHorizontalTimer.stop() } catch(eFolder0) {}
@@ -541,7 +589,7 @@ Item {
         } catch(e) {}
         _restoringFocus = false
         _focusRestoreRetryLeft = 36
-        focusRestoreTimer.restart()
+        _queueFocusRecovery("restore")
         return true
     }
     function _restoreContentY(snap){ if (!_vFlick || !snap) return; var maxY = Math.max(0, (_vFlick.contentHeight || 0) - (_vFlick.height || 0)); _vFlick.contentY = Math.max(0, Math.min(maxY, snap.contentY || 0)); }
@@ -653,7 +701,7 @@ Item {
         }
         if (_focusRestoreRetryLeft > 0) {
             _focusRestoreRetryLeft--
-            focusRestoreTimer.restart()
+            _queueFocusRecovery("restore")
         } else {
             _focusRestorePending = false
             _navigationSnapshotArmed = false
@@ -664,7 +712,7 @@ Item {
         }
         return false
     }
-    function scheduleFocusRestore(){ if (!focusRepairEnabled) return; var snap = _focusSnapshot(); if (!_snapshotNeedsRestore(snap)) return; _focusRestorePending = true; _focusRestoreRetryLeft = Math.max(_focusRestoreRetryLeft, 24); focusRestoreTimer.restart(); }
+    function scheduleFocusRestore(){ if (!focusRepairEnabled) return; var snap = _focusSnapshot(); if (!_snapshotNeedsRestore(snap)) return; _focusRestorePending = true; _focusRestoreRetryLeft = Math.max(_focusRestoreRetryLeft, 24); _queueFocusRecovery("restore"); }
     readonly property int sectionMaxItems: 50
     function capItems(arr, maxN){ var n = (maxN !== undefined) ? maxN : sectionMaxItems; if (!arr || !arr.length) return []; if (arr.length <= n) return arr; return arr.slice(0, n); }
     readonly property var cappedLibraryItems: capItems(libraryItems); readonly property var cappedResumeItems: capItems(resumeItems); readonly property var cappedNextUpItems: capItems(nextUpItems)
@@ -675,7 +723,25 @@ Item {
     property bool libraryFetchCompleted: false; property bool resumeFetchCompleted: false; property bool nextUpFetchCompleted: false
     property bool _bootFetchPending: false; property string _bootFetchKey: ""; property bool _fetchInFlight: false; property string _activeFetchKey: ""
     property double _lastFetchStartMs: 0; property double _lastHomeCacheWriteMs: 0; property bool _homeImagesReady: false; property bool _homeImageReturnFreeze: false
-    property bool _homePosterVisualReady: false; readonly property bool homePosterVisualReady: _homePosterVisualReady; property int homePosterProbeMs: 45; property int homePosterReadySettleMs: 90
+    property bool _homePosterVisualReady: false; readonly property bool homePosterVisualReady: _homePosterVisualReady; property int homePosterProbeMs: 45; property int homePosterPendingProbeMs: 120; property int homePosterReadySettleMs: 90
+    property bool _homePosterProbeWaiting: false
+    property int _homePosterUnreadyPolls: 0
+    // La cadence reste rapide au démarrage, puis ralentit si Jellyfin tarde.
+    // Ne modifie ni le délai maximal du rideau ni les images déjà présentes.
+    function _homePosterProbeInterval() {
+        if (!_homePosterProbeWaiting) return Math.max(25, homePosterProbeMs)
+        var base = Math.max(25, homePosterPendingProbeMs)
+        if (_homePosterUnreadyPolls >= 20) return Math.max(base, 360)
+        if (_homePosterUnreadyPolls >= 7) return Math.max(base, 220)
+        return base
+    }
+    function _waitForHomePosters() {
+        _homePosterProbeWaiting = true
+        _homePosterVisualReady = false
+        _homePosterUnreadyPolls = Math.min(40, _homePosterUnreadyPolls + 1)
+        homePosterReadySettleTimer.stop()
+        homePosterProbeTimer.restart()
+    }
     property bool suspendVisualTextures: false; property bool homeCurtainVisible: false; property bool _homeCurtainWarmupLatched: false; property int homeImageSettleMs: 240; property int homeImageReturnFreezeMs: 240
     readonly property bool _homeImageLoadGate: !suspendVisualTextures && _homeImagesReady && (homeCurtainVisible || _homeCurtainWarmupLatched || !_homeImageReturnFreeze)
     onSuspendVisualTexturesChanged: {
@@ -693,6 +759,7 @@ Item {
         }
     }
     onHomeCurtainVisibleChanged: {
+        _homePosterUnreadyPolls = 0
         if (homeCurtainVisible) {
             _homeCurtainWarmupLatched = true
             _scheduleHomePosterVisualProbe()
@@ -785,32 +852,28 @@ Item {
     function _probeHomePosterVisualReady() {
         if (!_alive || !homeCurtainVisible) return
         if (!_hasVisibleHomeData()) {
+            _homePosterProbeWaiting = false
+            _homePosterUnreadyPolls = 0
             _homePosterVisualReady = true
             return
         }
         if (!_homeImagesReady || _homeImageReturnFreeze) {
-            _homePosterVisualReady = false
-            homePosterReadySettleTimer.stop()
-            homePosterProbeTimer.restart()
+            _waitForHomePosters()
             return
         }
         var state = _visibleHomePosterState()
-        if (state.total <= 0) {
-            _homePosterVisualReady = false
-            homePosterReadySettleTimer.stop()
-            homePosterProbeTimer.restart()
+        if (state.total <= 0 || state.pending > 0) {
+            _waitForHomePosters()
             return
         }
-        if (state.pending > 0) {
-            _homePosterVisualReady = false
-            homePosterReadySettleTimer.stop()
-            homePosterProbeTimer.restart()
-            return
-        }
+        _homePosterProbeWaiting = false
+        _homePosterUnreadyPolls = 0
         if (!_homePosterVisualReady && !homePosterReadySettleTimer.running) homePosterReadySettleTimer.restart()
     }
     function prepareHomeVisualReturn(reason) {
         _homePosterVisualReady = false
+        _homePosterProbeWaiting = false
+        _homePosterUnreadyPolls = 0
         homePosterReadySettleTimer.stop()
         if (!_hasVisibleHomeData()) {
             _homePosterVisualReady = true
@@ -821,7 +884,7 @@ Item {
         _scheduleHomePosterVisualProbe()
         return false
     }
-    Timer { id: homePosterProbeTimer; interval: Math.max(25, postergrid.homePosterProbeMs); repeat: false; onTriggered: postergrid._probeHomePosterVisualReady() }
+    Timer { id: homePosterProbeTimer; interval: postergrid._homePosterProbeInterval(); repeat: false; onTriggered: postergrid._probeHomePosterVisualReady() }
     Timer {
         id: homePosterReadySettleTimer
         interval: Math.max(40, postergrid.homePosterReadySettleMs)
@@ -835,13 +898,13 @@ Item {
             var state = postergrid._visibleHomePosterState()
             if ((state.total > 0 && state.pending === 0) || !postergrid._hasVisibleHomeData()) {
                 postergrid._homePosterVisualReady = true
+                postergrid._homePosterUnreadyPolls = 0
             } else {
-                postergrid._homePosterVisualReady = false
-                postergrid._scheduleHomePosterVisualProbe()
+                postergrid._waitForHomePosters()
             }
         }
     }
-    readonly property int homeCacheSchemaVersion: 17; readonly property int homeCacheMaxEntries: 2
+    readonly property int homeCacheSchemaVersion: 19; readonly property int homeCacheMaxEntries: 2
     property string _lastHomeCacheRestoreKey: ""
     property double _lastHomeCacheRestoreCacheTs: 0
     function _homeCacheKey(){ return "home|" + SafeLog.shortHash(serverUrl) + "|" + SafeLog.shortHash(userId) + "|" + SafeLog.shortHash("") }
@@ -857,6 +920,9 @@ Item {
         try {
             if (!postergrid._alive) return
             if (!postergrid.fetchedOnce || !postergrid.shared) return
+            // Ne jamais écraser le dernier snapshot complet par un instantané
+            // partiel pendant le streaming de bibliothèques T1.
+            if (!postergrid._latestAllComplete && postergrid._latestLibs.length > 0) return
             var st = postergrid._homeCacheStore()
             if (!st) return
             var cacheKey = postergrid._homeCacheKey(); var now = Date.now()
@@ -894,7 +960,7 @@ Item {
                 currentNextUpIndex: cacheNextUpIndex,
                 currentLatestGroup: cacheLatestGroup
             })
-            MediaCatalog.trimHomeCacheStore(st, cacheKey, postergrid.homeCacheSchemaVersion,
+            MediaBrowser.trimHomeCacheStore(st, cacheKey, postergrid.homeCacheSchemaVersion,
                                                postergrid.homeCacheFreshMs, postergrid.homeCacheMaxEntries, Date.now())
         } catch(e) {}
     }
@@ -909,9 +975,9 @@ Item {
                 return false
             }
             var now = Date.now()
-            var cacheKey = _homeCacheKey(); var c = MediaCatalog.touchHomeCache(st, cacheKey, homeCacheSchemaVersion, homeCacheFreshMs, now)
+            var cacheKey = _homeCacheKey(); var c = MediaBrowser.touchHomeCache(st, cacheKey, homeCacheSchemaVersion, homeCacheFreshMs, now)
             if (!c) {
-                MediaCatalog.trimHomeCacheStore(st, "", homeCacheSchemaVersion, homeCacheFreshMs, homeCacheMaxEntries, now)
+                MediaBrowser.trimHomeCacheStore(st, "", homeCacheSchemaVersion, homeCacheFreshMs, homeCacheMaxEntries, now)
                 return false
             }
             if (c.latestAllComplete !== true) {
@@ -924,16 +990,17 @@ Item {
                     && latestFetchCompleted === true) {
                 return true
             }
-            MediaCatalog.trimHomeCacheStore(st, cacheKey, homeCacheSchemaVersion, homeCacheFreshMs, homeCacheMaxEntries, now)
+            MediaBrowser.trimHomeCacheStore(st, cacheKey, homeCacheSchemaVersion, homeCacheFreshMs, homeCacheMaxEntries, now)
             // Annule les callbacks de l'ancienne session avant d'installer le
             // snapshot du nouveau profil. Un ancien dossier ne peut ainsi
             // pas revenir dans le modèle restauré.
             _fetchSeq++
             _nextUpSeq++
-            _cancelLatestReloads("home_cache_restored")
-            _cancelLatestInitialRequests("home_cache_restored")
+            HomeLatest.cancelReloads(postergrid, "home_cache_restored")
+            HomeLatest.cancelInitialRequests(postergrid, "home_cache_restored")
             latestPumpTimer.stop()
             latestInitialReadyTimer.stop()
+            latestPublishTimer.stop()
             _latestLibs = []
             _latestTemp = []
             _latestPos = 0
@@ -1018,8 +1085,7 @@ Item {
             scheduleBackdropHomeRepair()
         } else {
             try { if (homeImageReturnFreezeTimer.running) homeImageReturnFreezeTimer.stop() } catch(e0) {}
-            try { if (homeFocusRepairTimer.running) homeFocusRepairTimer.stop() } catch(e1) {}
-            _homeFocusRepairLeft = 0
+            _cancelFocusRepairRetry()
             _homeImageReturnFreeze = false
         }
     }
@@ -1092,9 +1158,7 @@ Item {
         landscapeFocusBleed: resumeLandscapeFocusBleed,
         spacing: spacingW
     })
-    function _mediaCardUsesLandscape(it, sectionKind) {
-        return MediaRailLayout.homeCardUsesLandscape(it, sectionKind)
-    }
+
     function mediaCardTileWidthFor(it, sectionKind) {
         return MediaRailLayout.homeCardTileWidthFor(it, sectionKind, portW, resumeLandscapeW)
     }
@@ -1145,69 +1209,15 @@ Item {
         if (isFinite(target) && !isNaN(target)) list.contentX = target
     }
     // Alias conservés pour la restauration spécifique de Continuer de regarder.
-    function _resumeNativeClampX(list, value) { return MediaRailLayout.nativeListClampX(list, value) }
+
     function _resumeRealTargetX(list, idx) {
-        if (!list || idx < 0) return NaN
-        var real = MediaRailLayout.homeRowRealDelegateGeometry(list, idx)
-        if (!real) return NaN
-        var arr = cappedResumeItems || []
-        var bleed = MediaRailLayout.homeRowItemBleedAt(arr, idx, "resume", homeCardLayout)
-        var pad = railRevealMarginPx
-        var visualLeft = real.viewportX - bleed
-        var visualRight = real.viewportX + real.width + bleed
-        var delta = 0
-        if (visualLeft < pad) delta = visualLeft - pad
-        else if (visualRight > list.width - pad) delta = visualRight - (list.width - pad)
-        return _resumeNativeClampX(list, Number(list.contentX || 0) + delta)
+        return MediaRailLayout.resumeRealTargetX(list, idx, cappedResumeItems, homeCardLayout, railRevealMarginPx)
     }
     function _resumeDirectionalNaturalTargetX(list, fromIdx, toIdx, direction) {
-        if (!list || direction === 0 || fromIdx < 0 || toIdx < 0) return NaN
-        var arr = cappedResumeItems || []
-        if (toIdx >= arr.length || fromIdx >= arr.length) return NaN
-        var spacing = Number(list.spacing || 0)
-        if (!isFinite(spacing) || isNaN(spacing)) spacing = 0
-        var currentReal = MediaRailLayout.homeRowRealDelegateGeometry(list, fromIdx)
-        var targetWidth = MediaRailLayout.homeRowItemWidthAt(arr, toIdx, "resume", homeCardLayout)
-        var currentWidth = MediaRailLayout.homeRowItemWidthAt(arr, fromIdx, "resume", homeCardLayout)
-        var targetBleed = MediaRailLayout.homeRowItemBleedAt(arr, toIdx, "resume", homeCardLayout)
-        var pad = railRevealMarginPx
-        if (currentReal) {
-            var predictedViewportX
-            if (direction < 0) predictedViewportX = currentReal.viewportX - spacing - targetWidth
-            else predictedViewportX = currentReal.viewportX + currentReal.width + spacing
-            var visualLeft = predictedViewportX - targetBleed
-            var visualRight = predictedViewportX + targetWidth + targetBleed
-            var delta = 0
-            if (visualLeft < pad) delta = visualLeft - pad
-            else if (visualRight > list.width - pad) delta = visualRight - (list.width - pad)
-            return _resumeNativeClampX(list, Number(list.contentX || 0) + delta)
-        }
-        var step = direction < 0 ? -(targetWidth + spacing) : (currentWidth + spacing)
-        return _resumeNativeClampX(list, Number(list.contentX || 0) + step)
+        return MediaRailLayout.resumeDirectionalTargetX(list, fromIdx, toIdx, direction, cappedResumeItems, homeCardLayout, railRevealMarginPx)
     }
     function _rowTargetX(list, arr, idx, sectionKind) {
-        if (!list) return 0
-        if (!arr || idx < 0 || idx >= arr.length) return MediaRailLayout.homeListMinX(list)
-
-        var bleed = MediaRailLayout.homeRowItemBleedAt(arr, idx, sectionKind, homeCardLayout)
-        var pad = railRevealMarginPx
-        if (sectionKind === "resume") {
-            var real = MediaRailLayout.homeRowRealDelegateGeometry(list, idx)
-            if (real) {
-                var realVisualLeft = real.viewportX - bleed
-                var realVisualRight = real.viewportX + real.width + bleed
-                var delta = 0
-                if (realVisualLeft < pad) delta = realVisualLeft - pad
-                else if (realVisualRight > list.width - pad)
-                    delta = realVisualRight - (list.width - pad)
-                return MediaRailLayout.homeListClampX(list, Number(list.contentX || 0) + delta)
-            }
-        }
-
-        return MediaRailLayout.homeRowTargetX(arr, idx, sectionKind, list.spacing,
-                                             list.contentX, list.width, pad,
-                                             MediaRailLayout.homeListMinX(list), MediaRailLayout.homeListMaxX(list),
-                                             homeCardLayout)
+        return MediaRailLayout.homeListTargetX(list, arr, idx, sectionKind, homeCardLayout, railRevealMarginPx)
     }
     function _ensureRowIndexVisible(list, items, idx, sectionKind, animation, animateMove, seq) {
         function apply() {
@@ -1276,7 +1286,9 @@ Item {
     function _openStandardContentItem(it) {
         if (!it) return
         var t = MediaCatalog.itemTypeLower(it)
-        if (t === "movie" || t === "video" || t === "musicvideo") {
+        if (t === "boxset") {
+            requestDetailCollection(it.Id)
+        } else if (t === "movie" || t === "video" || t === "musicvideo") {
             requestDetailMovie(it.Id)
         } else if (t === "season") {
             // /Items/Latest groupé renvoie la saison comme vraie carte. SeriesId est normalement présent ; ParentId est son fallback DTO.
@@ -1354,9 +1366,11 @@ Item {
             openUnsupportedFolder(it)
             return
         }
-        if (MediaCatalog.isCollectionsLibraryFolder(it)) requestCollectionPage(it.Id)
+        // Le CollectionType=mixed explicite prime sur les heuristiques de nom
+        // (« Collections », « Vidéos »...) pour garantir la bonne page.
+        if (MediaCatalog.isMixedLibraryFolder(it)) requestSeriesPage(it.Id, "mixed")
+        else if (MediaCatalog.isCollectionsLibraryFolder(it)) requestCollectionPage(it.Id)
         else if (MediaCatalog.isPersonalMediaLibraryFolder(it)) requestPersonalMediaPage(it.Id, "")
-        else if (MediaCatalog.isMixedLibraryFolder(it)) requestSeriesPage(it.Id, "mixed")
         else if (MediaCatalog.folderShouldOpenOnMoviePage(it)) requestMoviePage(it.Id)
         else if (MediaCatalog.isSeriesLibraryFolder(it)) requestSeriesPage(it.Id, "series")
         else if (t === "movie") requestDetailMovie(it.Id)
@@ -1364,201 +1378,123 @@ Item {
         else if (MediaCatalog.isUnsupportedMediaItem(it)) openUnsupportedFolder(it)
         else playItem(it)
     }
-    readonly property int latestFullLimit: 50; readonly property int latestMaxInflight: 2; readonly property int latestStartDelayMs: 110; readonly property int latestProximityLibraryStep: 3
+    // Identités stables des timers, sans duplication de leurs objets QML.
+    readonly property var _latestLoadTimers: ({
+        pump: latestPumpTimer,
+        publish: latestPublishTimer,
+        ready: latestInitialReadyTimer
+    })
+
+    readonly property int latestFullLimit: 50; readonly property int latestMaxInflight: 2
+    // Deux requêtes initiales et une place possible pour un focus prioritaire.
+    // Le plafond s'applique à l'ensemble (initial + rechargements), pas par file.
+    readonly property int latestTotalMaxInflight: 3
+    readonly property int latestStartDelayMs: 110; readonly property int latestProximityLibraryStep: 3
     // Le transport Jellyfin a déjà un délai de 15 s. Ne pas supprimer une
     // réponse encore valide à 6,5 s sur un serveur lent.
     readonly property int latestInitialRequestTimeoutMs: 16500
     readonly property int latestInitialReadyMs: 1800
     property var _latestLibs: []; property int _latestPos: 0; property int _latestInFlight: 0; property int _latestQueueSeq: 0; property var _latestReloadHandles: ({})
     property var _latestInitialPending: ({})
+    // Une seule demande urgente en attente : le dernier focus D-Pad l'emporte.
+    property var _latestPriorityReload: ({ id: "", reason: "" })
+    property int _latestDirtyIndex: -1
+    property bool _latestDirtyMany: false
+    property var _homeWarningLastMs: ({})
+    readonly property int homeWarningThrottleMs: 60000
+    function _warnHomeOnce(key) {
+        var last = Number(_homeWarningLastMs[key] || 0)
+        var now = Date.now()
+        if (last > 0 && now - last < homeWarningThrottleMs) return
+        _homeWarningLastMs[key] = now
+    }
 
     property int _latestStageTarget: 0; property bool _latestInitialComplete: false; property bool _latestAllComplete: false; property bool _latestHadFailures: false; property bool latestFetchCompleted: false
-    function _latestQueueDone(){ return _latestLibs && _latestPos >= _latestLibs.length && _latestInFlight <= 0; }
-    Timer { id: latestPumpTimer; interval: postergrid.latestStartDelayMs; repeat: false; onTriggered: postergrid._pumpLatestInitial() }
-    Timer { id: latestInitialReadyTimer; interval: postergrid.latestInitialReadyMs; repeat: false; onTriggered: postergrid.prepareHomeReveal("latest-background") }
-    Timer { id: latestInitialWatchdog; interval: 500; repeat: true; running: postergrid._alive && postergrid._latestInFlight > 0; onTriggered: postergrid._sweepLatestInitialRequests() }
-    function _registerLatestInitialRequest(idx, handle) {
-        var key = String(idx)
-        var pending = _latestInitialPending || ({})
-        var rec = pending[key]
-        if (!rec) {
-            rec = ({
-                idx: idx, seq: _latestQueueSeq, startedAt: Date.now(), handle: handle || null
-            })
-            pending[key] = rec
-            _latestInitialPending = pending
-        } else {
-            rec.handle = handle || null
-        }
-        return rec
-    }
-    function _cancelLatestInitialRequests(reason) {
-        var pending = _latestInitialPending || ({})
-        var keys = []
-        for (var key in pending)
-            if (Object.prototype.hasOwnProperty.call(pending, key) && pending[key]) keys.push(key)
-        for (var i = 0; i < keys.length; ++i) {
-            var rec = pending[keys[i]]
-            if (!rec) continue
-            var handle = rec.handle
-            delete pending[keys[i]]
-            _latestInFlight = Math.max(0, _latestInFlight - 1)
-            try {
-                if (handle && typeof handle.cancel === "function") handle.cancel(reason || "cancelled")
-            } catch(e1) {}
-        }
-        _latestInitialPending = ({})
-    }
-    function _sweepLatestInitialRequests() {
-        if (!_alive || _latestInFlight <= 0) return
-        var now = Date.now()
-        var pending = _latestInitialPending || ({})
-        var expired = []
-        for (var key in pending) {
-            if (!Object.prototype.hasOwnProperty.call(pending, key)) continue
-            var rec = pending[key]
-            if (rec && (now - Number(rec.startedAt || now)) >= latestInitialRequestTimeoutMs) expired.push(rec)
-        }
-        for (var i = 0; i < expired.length; ++i) {
-            var rec = expired[i]
-            var handle = rec ? rec.handle : null
-            if (rec) _finishLatestRequest(rec.idx, null, "watchdog-timeout")
-            try {
-                if (handle && typeof handle.cancel === "function") handle.cancel("latest-watchdog-timeout")
-            } catch(e0) {}
-        }
-    }
+    readonly property int latestRevealResponseCount: 3
+    property int _latestResponsesDone: 0
+    // T6: regrouper plusieurs callbacks Latest dans une seule projection QML.
+    Timer { id: latestPublishTimer; interval: 65; repeat: false; onTriggered: HomeLatest.publishPending(postergrid) }
 
-    function _startLatestInitialQueue(libs, fetchSeq) {
-        _cancelLatestReloads("latest_queue_restarted")
-        _cancelLatestInitialRequests("latest_queue_restarted")
-        latestInitialReadyTimer.stop()
-        postergrid._latestInitialPending = ({})
-        postergrid._latestQueueSeq = (fetchSeq !== undefined && fetchSeq !== null) ? fetchSeq : postergrid._fetchSeq
-        postergrid._latestLibs = MediaCatalog.safeArray(libs)
-        postergrid._latestPos = 0
-        postergrid._latestInFlight = 0
-        postergrid._latestTemp = new Array(postergrid._latestLibs.length)
-        for (var i=0;i<postergrid._latestTemp.length;i++) {
-            postergrid._latestTemp[i] = null
-            var lid = postergrid._latestLibs[i] && postergrid._latestLibs[i].Id ? String(postergrid._latestLibs[i].Id) : ""
-            for (var c=0; lid && postergrid.latestByFolder && c<postergrid.latestByFolder.length; ++c) {
-                if (postergrid.latestByFolder[c] && String(postergrid.latestByFolder[c].id || "") === lid) {
-                    postergrid._latestTemp[i] = postergrid.latestByFolder[c]
-                    break
-                }
-            }
-        }
-        postergrid._latestStageTarget = postergrid._latestLibs.length
-        postergrid._latestInitialComplete = false
-        postergrid._latestAllComplete = false
-        postergrid._latestHadFailures = false
-        // Des données déjà visibles (cache ou refresh) n'ont pas à attendre
-        // la fin de toutes les bibliothèques pour rouvrir Home.
-        postergrid.latestFetchCompleted = false
-        if (!postergrid.fetchedOnce || !postergrid.latestByFolder || postergrid.latestByFolder.length === 0) postergrid._setLatestByFolderIfChanged([])
-        if ((!postergrid.latestByFolder || postergrid.latestByFolder.length === 0)
-                && !_focusRestorePending && !_restoringFocus) {
-            postergrid.latestIndicesByGroup = []
-            postergrid.currentLatestGroup = 0
-        }
-        if (postergrid._latestLibs.length === 0) {
-            postergrid._setLatestByFolderIfChanged([])
+    Timer { id: latestPumpTimer; interval: postergrid.latestStartDelayMs; repeat: false; onTriggered: HomeLatest.pumpInitial(postergrid, postergrid._latestLoadTimers) }
+    Timer {
+        id: latestInitialReadyTimer
+        interval: postergrid.latestInitialReadyMs
+        repeat: false
+        onTriggered: {
+            if (!postergrid._alive || postergrid.latestFetchCompleted) return
+            // Le délai borne le rideau, PAS la file réseau : les autres rails
+            // continuent à arriver sans bloquer le scroll ni le D-Pad.
             postergrid._latestInitialComplete = true
             postergrid.latestFetchCompleted = true
-            postergrid._rebuildLatestByFolderFromTemp()
-            return
-        }
-        if (!postergrid.latestFetchCompleted) latestInitialReadyTimer.restart()
-        latestPumpTimer.restart()
-    }
-    function _publishLatestFromTemp() {
-        var previous = postergrid.latestByFolder || []
-        var previousIndices = postergrid.latestIndicesByGroup || []
-        var previousFocus = previous[postergrid.currentLatestGroup]
-        var selectedId = previousFocus ? String(previousFocus.id || "") : ""
-        var positions = ({})
-        for (var p = 0; p < previous.length; ++p) {
-            if (previous[p] && previous[p].id)
-                positions["#" + String(previous[p].id)] = p
-        }
-        var out = []
-        for (var i=0; i<postergrid._latestTemp.length; i++) {
-            var e = postergrid._latestTemp[i]
-            if (e && ((e.items && e.items.length > 0) || (e._evicted && e._hadItems))) out.push(e)
-        }
-        postergrid._setLatestByFolderIfChanged(out)
-        var inds = [], indicesChanged = out.length !== previousIndices.length
-        var focusedIndex = -1
-        for (var j = 0; j < out.length; ++j) {
-            var id = String(out[j].id || "")
-            var previousPosition = positions["#" + id]
-            inds[j] = previousPosition !== undefined ? (previousIndices[previousPosition] || 0) : 0
-            if (inds[j] !== previousIndices[j]) indicesChanged = true
-            if (selectedId && selectedId === id) focusedIndex = j
-        }
-        if (indicesChanged) postergrid.latestIndicesByGroup = inds
-        if (!_focusRestorePending && !_restoringFocus)
-            postergrid.currentLatestGroup = focusedIndex >= 0 ? focusedIndex
-                    : MediaCatalog.clampIndex(postergrid.currentLatestGroup, out.length)
-    }
-    function _rebuildLatestByFolderFromTemp() {
-        var wasComplete = postergrid._latestAllComplete
-        if (!postergrid._latestQueueDone()) return
-        if (!wasComplete) postergrid._publishLatestFromTemp()
-        postergrid._latestAllComplete = true
-        if (postergrid._latestAllComplete) {
-            latestInitialReadyTimer.stop()
-            postergrid.latestFetchCompleted = true
-            if (!wasComplete) postergrid._saveHomeCacheNow()
+            postergrid.prepareHomeReveal("latest-background")
         }
     }
-    function _fetchLatestForFolderId(parentId, limit, groupItems, ok, ko) {
-        return Jellyfin.fetchHomeLatestItemsForParent(
-                    serverUrl, accessToken, userId, parentId, limit,
-                    function(items) { if (ok) ok(MediaCatalog.safeArray(items)) },
-                    function(code) { if (ko) ko(String(code || "network_error")) },
-                    groupItems === true
-        )
+    Timer { id: latestInitialWatchdog; interval: 500; repeat: true; running: postergrid._alive && postergrid._latestInFlight > 0; onTriggered: HomeLatest.sweepInitialRequests(postergrid, postergrid._latestLoadTimers) }
+
+    // Les textures restent gérées par ListView/Image (aucune image conservée ici).
+    // Conserver au maximum 3 tableaux de DTO récemment évincés pendant 22 s
+    // permet un retour D-Pad instantané sans nouvelle requête Jellyfin.
+    readonly property int latestWarmRailMax: 3
+    readonly property int latestWarmRailTTL: 22000
+    readonly property int latestReloadGraceMs: 10000
+    property var _latestWarmRails: []
+    // Un seul réveil à la première expiration : pas de timer périodique pendant le scroll.
+    Timer {
+        id: latestWarmRailExpiryTimer
+        interval: postergrid.latestWarmRailTTL
+        repeat: false
+        running: false
+        onTriggered: postergrid._pruneLatestWarmRails()
     }
-    function _cancelLatestReloads(reason) {
-        var handles = _latestReloadHandles || ({})
-        _latestReloadHandles = ({})
-        for (var key in handles) {
-            if (!Object.prototype.hasOwnProperty.call(handles, key)) continue
-            try { if (handles[key] && handles[key].cancel) handles[key].cancel(reason || "cancelled") } catch(e) {}
+    function _scheduleLatestWarmRailExpiry(now) {
+        var rails = _latestWarmRails || []
+        if (!rails.length) { latestWarmRailExpiryTimer.stop(); return }
+        var waitMs = latestWarmRailTTL + 1
+        for (var i = 0; i < rails.length; ++i) {
+            var rec = rails[i]
+            if (!rec) continue
+            var remaining = Math.max(1, latestWarmRailTTL - (now - Number(rec.at || 0)) + 1)
+            if (remaining < waitMs) waitMs = remaining
         }
+        latestWarmRailExpiryTimer.interval = waitMs
+        latestWarmRailExpiryTimer.restart()
     }
-    function _latestReloadCount() {
-        var handles = _latestReloadHandles || ({}), count = 0
-        for (var key in handles)
-            if (Object.prototype.hasOwnProperty.call(handles, key) && handles[key]) count++
-        return count
-    }
-    function _latestEntryIndexById(id) {
-        id = String(id || "")
-        for (var i = 0; id && latestByFolder && i < latestByFolder.length; ++i)
-            if (latestByFolder[i] && String(latestByFolder[i].id || "") === id) return i
-        return -1
-    }
-    function _updateLatestTempEntry(entry) {
-        var id = String(entry && entry.id || "")
-        for (var i = 0; id && _latestLibs && i < _latestLibs.length; ++i) {
-            if (_latestLibs[i] && String(_latestLibs[i].Id || "") === id) {
-                _latestTemp[i] = entry
-                return true
-            }
+    function _pruneLatestWarmRails() {
+        var old = _latestWarmRails || [], now = Date.now(), next = []
+        for (var i = 0; i < old.length; ++i) {
+            var rec = old[i]
+            if (rec && now - Number(rec.at || 0) < latestWarmRailTTL) next.push(rec)
         }
-        return false
+        if (next.length !== old.length) _latestWarmRails = next
+        _scheduleLatestWarmRailExpiry(now)
     }
-    function _replaceLatestEntry(groupIndex, entry, saveNow) {
-        if (!latestByFolder || groupIndex < 0 || groupIndex >= latestByFolder.length || !entry) return false
-        var next = latestByFolder.slice(0)
-        next[groupIndex] = entry
-        _updateLatestTempEntry(entry)
-        _setLatestByFolderIfChanged(next)
-        if (saveNow === true) _saveHomeCacheNow()
-        return true
+    function _clearLatestWarmRails() {
+        latestWarmRailExpiryTimer.stop()
+        _latestWarmRails = []
+    }
+    function _rememberLatestRail(entry, now) {
+        if (!entry || !entry.id || !entry.items || !entry.items.length) return
+        var id = String(entry.id), previous = _latestWarmRails || [], next = []
+        for (var i = 0; i < previous.length; ++i) {
+            var rec = previous[i]
+            if (rec && rec.id !== id && now - rec.at <= latestWarmRailTTL) next.push(rec)
+        }
+        next.push(({ id: id, items: entry.items, at: now }))
+        if (next.length > latestWarmRailMax) next = next.slice(next.length - latestWarmRailMax)
+        _latestWarmRails = next
+        _scheduleLatestWarmRailExpiry(now)
+    }
+    function _takeWarmLatestRail(id) {
+        var now = Date.now(), old = _latestWarmRails || [], next = [], result = null
+        for (var i = 0; i < old.length; ++i) {
+            var rec = old[i]
+            if (!rec || now - rec.at > latestWarmRailTTL) continue
+            if (rec.id === id) result = rec.items
+            else next.push(rec)
+        }
+        _latestWarmRails = next
+        _scheduleLatestWarmRailExpiry(now)
+        return result
     }
     function _ensureLatestGroupData(groupIndex, reason) {
         if (!_alive || !hasCreds() || !latestByFolder || groupIndex < 0 || groupIndex >= latestByFolder.length) return false
@@ -1566,20 +1502,55 @@ Item {
         if (!entry || !entry._evicted || !entry.id) return false
         var id = String(entry.id)
         if (_latestReloadHandles && _latestReloadHandles[id]) return true
+        var warmItems = _takeWarmLatestRail(id)
+        if (warmItems && warmItems.length) {
+            var warmEntry = MediaCatalog.shallowCloneObject(entry)
+            warmEntry.items = warmItems
+            warmEntry._evicted = false
+            warmEntry._hadItems = true
+            warmEntry._evictedAt = 0
+            warmEntry._loadedAt = Date.now()
+            HomeLatest.replaceEntry(postergrid, groupIndex, warmEntry, true)
+            var warmSection = latestRepeater ? latestRepeater.itemAt(groupIndex) : null
+            if (warmSection) warmSection.evicted = false
+            if (_focusRestorePending) {
+                _focusRestoreRetryLeft = Math.max(_focusRestoreRetryLeft, 36)
+                _queueFocusRecovery("restore")
+            }
+            return false
+        }
         var urgent = reason === "focus" || reason === "focus-restore" || reason === "force-load"
-        if (!urgent && _latestReloadCount() >= latestMaxInflight) {
+        var reloadCount = HomeLatest.reloadCount(postergrid)
+        if (_latestInFlight + reloadCount >= latestTotalMaxInflight ||
+                (!urgent && reloadCount >= latestMaxInflight)) {
+            if (urgent) {
+                // Un force-load d'un delegate ne doit pas déloger un vrai focus.
+                var wanted = _latestPriorityReload || ({})
+                var priority = reason === "focus-restore" ? 3 : (reason === "focus" ? 2 : 1)
+                var currentPriority = wanted.reason === "focus-restore" ? 3 : (wanted.reason === "focus" ? 2 : 1)
+                if (!wanted.id || String(wanted.id) === id || priority >= currentPriority)
+                    _latestPriorityReload = ({ id: id, reason: reason })
+            }
+            // File de secours sans attente active pour les erreurs/annulations.
             latestReloadRetryTimer.restart()
             return true
         }
-        var seq = _fetchSeq; var handle = null
-        handle = _fetchLatestForFolderId(
+        var seq = _fetchSeq
+        // Enregistrer AVANT fetch : le cache Jellyfin peut appeler le callback
+        // synchroniquement. L'identité du record protège les retours périmés.
+        var rec = ({ handle: null })
+        _latestReloadHandles[id] = rec
+        var handle = null
+        try {
+            handle = HomeLatest.fetchForFolder(postergrid, 
                     id,
                     latestFullLimit,
                     MediaCatalog.isSeriesLibraryFolder(entry),
                     function(items) {
-                if (!_safeCanTouch(seq) || !_latestReloadHandles || _latestReloadHandles[id] !== handle) return
+                if (!_safeCanTouch(seq) || !_latestReloadHandles || _latestReloadHandles[id] !== rec) return
                 delete _latestReloadHandles[id]
-                var arr = MediaCatalog.safeArray(items); var idx = _latestEntryIndexById(id)
+                HomeLatest.wakeQueues(postergrid, postergrid._latestLoadTimers)
+                var arr = MediaCatalog.safeArray(items); var idx = HomeLatest.entryIndexById(postergrid, id)
                 if (idx < 0 || arr.length <= 0) {
                     latestReloadRetryTimer.restart()
                     return
@@ -1589,106 +1560,38 @@ Item {
                 restored._evicted = false
                 restored._hadItems = true
                 restored._evictedAt = 0
-                _replaceLatestEntry(idx, restored, true)
+                restored._loadedAt = Date.now()
+                HomeLatest.replaceEntry(postergrid, idx, restored, true)
                 var sec = latestRepeater ? latestRepeater.itemAt(idx) : null
                 if (sec) sec.evicted = false
                 updateBackdrop()
                 if (_focusRestorePending) {
                     _focusRestoreRetryLeft = Math.max(_focusRestoreRetryLeft, 36)
-                    focusRestoreTimer.restart()
+                    _queueFocusRecovery("restore")
                 } else if (focusSection === 3 && currentLatestGroup === idx) {
                     Qt.callLater(function(){ if (_alive) focusLatestGroup(idx) })
                 }
             }, function() {
-                if (_latestReloadHandles && _latestReloadHandles[id] === handle) delete _latestReloadHandles[id]
+                if (_latestReloadHandles && _latestReloadHandles[id] === rec) {
+                    delete _latestReloadHandles[id]
+                    HomeLatest.wakeQueues(postergrid, postergrid._latestLoadTimers)
+                }
                 if (_alive) latestReloadRetryTimer.restart()
             }
-        )
-        _latestReloadHandles[id] = handle
+            )
+        } catch(e0) {
+            if (_latestReloadHandles && _latestReloadHandles[id] === rec) {
+                delete _latestReloadHandles[id]
+                HomeLatest.wakeQueues(postergrid, postergrid._latestLoadTimers)
+            }
+            if (_alive) latestReloadRetryTimer.restart()
+            return true
+        }
+        // Si réponse immédiate, rec a déjà été retiré : ne jamais le ressusciter.
+        if (_latestReloadHandles && _latestReloadHandles[id] === rec) rec.handle = handle
         return true
     }
-    function _finishLatestRequest(idx, entry, reason) {
-        var key = String(idx)
-        var pending = _latestInitialPending || ({})
-        var rec = pending[key]
-        if (!rec) {
-            return false
-        }
-        try { delete pending[key] } catch(e0) {}
-        _latestInitialPending = pending
-        _latestInFlight = Math.max(0, _latestInFlight - 1)
-        if (!entry) {
-            _latestHadFailures = true
-            var folder = _latestLibs[idx]
-            console.warn("Home latest: " + String(reason || "network_error").replace(/[^a-z0-9_-]/gi, "").substr(0, 40)
-                         + " (folder " + SafeLog.shortHash(folder && folder.Id) + ")")
-        }
-        // Un échec transitoire ne retire pas un rail restauré du cache.
-        _latestTemp[idx] = entry || _latestTemp[idx] || null
-        var stageDone = _latestPos >= _latestStageTarget && _latestInFlight <= 0
-        if (stageDone && !_latestInitialComplete) _latestInitialComplete = true
-        _rebuildLatestByFolderFromTemp()
-        if (stageDone) {
-            _resetHydration()
-            updateBackdrop()
-            if ((!latestByFolder || latestByFolder.length === 0) && _latestPos < _latestLibs.length) requestMoreLatestForProximity()
-        } else if (_latestPos < _latestStageTarget) {
-            latestPumpTimer.restart()
-        }
-        return true
-    }
-    function _pumpLatestInitial() {
-        if (!postergrid._safeCanTouch(postergrid._latestQueueSeq)) return
-        var target = Math.min(postergrid._latestLibs.length, postergrid._latestStageTarget)
-        if (postergrid._latestPos >= target) {
-            if (postergrid._latestInFlight <= 0) {
-                if (!postergrid._latestInitialComplete) postergrid._latestInitialComplete = true
-                postergrid._rebuildLatestByFolderFromTemp()
-                postergrid._resetHydration()
-                postergrid.updateBackdrop()
-            }
-            return
-        }
-        if (postergrid._latestInFlight >= postergrid.latestMaxInflight) { latestPumpTimer.restart(); return }
-        var idx = postergrid._latestPos++; var lib = postergrid._latestLibs[idx]
-        var requestSeq = postergrid._latestQueueSeq
-        if (!lib || !lib.Id) {
-            postergrid._latestTemp[idx] = null
-            var invalidStageDone = postergrid._latestPos >= target && postergrid._latestInFlight <= 0
-            if (invalidStageDone) postergrid._latestInitialComplete = true
-            postergrid._rebuildLatestByFolderFromTemp()
-            if (postergrid._latestPos < target) latestPumpTimer.restart()
-            else if (invalidStageDone && (!latestByFolder || latestByFolder.length === 0) && postergrid._latestPos < postergrid._latestLibs.length) requestMoreLatestForProximity()
-            return
-        }
-        postergrid._latestInFlight++
-        postergrid._registerLatestInitialRequest(idx, null)
-        var latestHandle = _fetchLatestForFolderId(
-                    lib.Id,
-                    latestFullLimit,
-                    MediaCatalog.isSeriesLibraryFolder(lib),
-                    function(arr) {
-                try {
-                    if (!postergrid._safeCanTouch(requestSeq) || requestSeq !== postergrid._latestQueueSeq) return
-                    postergrid._finishLatestRequest(idx, {
-                        id: lib.Id, name: lib.Name || "Section", items: MediaCatalog.safeArray(arr), ct: lib.CollectionType || "", t: lib.Type || ""
-                    }, "success")
-                } catch(e1) {
-                }
-            }, function(code) {
-                try {
-                    if (postergrid._safeCanTouch(requestSeq) && requestSeq === postergrid._latestQueueSeq)
-                        postergrid._finishLatestRequest(idx, null, String(code || "error"))
-                } catch(e2) {
-                }
-            }
-        )
-        // Une réponse servie synchroniquement par le cache peut déjà avoir
-        // terminé le slot ; ne pas recréer un faux pending après le callback.
-        if (requestSeq === postergrid._latestQueueSeq && postergrid._latestInitialPending[String(idx)])
-            postergrid._registerLatestInitialRequest(idx, latestHandle)
-        if (postergrid._latestPos < target) latestPumpTimer.restart()
-    }
+
     function requestMoreLatestForProximity() {
         if (!postergrid._safeCanTouch(postergrid._latestQueueSeq)) return false
         if (!_latestLibs || _latestPos >= _latestLibs.length) {
@@ -1717,7 +1620,8 @@ Item {
     }
     function forceHomeRevealReady() {
         if (!_alive) return false
-        try { focusRestoreTimer.stop() } catch(e0) {}
+        try { focusRecoveryTimer.stop() } catch(e0) {}
+        _focusRecoveryScheduledKind = -1
         try { resumeRestoreHorizontalTimer.stop() } catch(e1) {}
         try { folderRestoreHorizontalTimer.stop() } catch(eFolderForce) {}
         _restoringFocus = false
@@ -1744,7 +1648,7 @@ Item {
         var remaining = Math.max(0, _vFlick.contentHeight - (_vFlick.contentY + _vFlick.height))
         if (remaining <= _vFlick.height * 1.15) requestMoreLatestForProximity()
     }
-    function _fetchStillValid(seq){ return postergrid._safeCanTouch(seq); }
+
     function _clearDataAfterFetchFailure() {
         try {
             if (!postergrid._safeCanTouch()) return
@@ -1777,23 +1681,49 @@ Item {
         root.nextUpFetchCompleted = false
         var seq = ++root._fetchSeq
         function applyLibraryItems(items) {
-            if (!root._fetchStillValid(seq)) return
+            if (!postergrid._safeCanTouch(seq)) return
             root._fetchInFlight = false
             root.fetchedOnce = true
             root.libraryFetchCompleted = true
             var raw = (items && items.length !== undefined) ? items : []
             var safe = raw.filter(function(i){ return i && i.Name !== "Playlists" })
             root._setListIfChanged("libraryItems", safe)
+            if (!MediaCatalog.hasCollectionsLibrary(safe) && Jellyfin.probeAccessibleCollections) {
+                // /UserViews reste la référence de la Home. Si elle omet
+                // Collections, ne pas déduire la visibilité du simple fait
+                // que /Items renvoie un BoxSet : la vue peut être masquée.
+                // Un raccourci de secours n’est créé qu’avec l’accord explicite
+                // du profil, et uniquement si un BoxSet est réellement présent.
+                Jellyfin.fetchUser(root.serverUrl, root.accessToken, root.userId,
+                    function(user) {
+                        if (!postergrid._safeCanTouch(seq) ||
+                                !MediaCatalog.mayOfferVirtualCollectionsLibrary(user, root.userId)) return
+                        Jellyfin.probeAccessibleCollections(root.serverUrl, root.accessToken, root.userId,
+                            function(hasBoxsets) {
+                                if (!hasBoxsets || !postergrid._safeCanTouch(seq)) return
+                                var current = root.libraryItems || []
+                                if (MediaCatalog.hasCollectionsLibrary(current)) return
+                                root._setListIfChanged("libraryItems", current.concat([MediaCatalog.virtualCollectionsLibrary()]))
+                                root._resetHydration()
+                                root.updateBackdrop()
+                                root.scheduleFocusRestore()
+                            }, function() {
+                                // La sonde a échoué : ne rien ajouter à l’accueil.
+                            })
+                    }, function() {
+                        // Préférences indisponibles : comportement conservateur.
+                    })
+            }
             root.currentFolderIndex = MediaCatalog.clampIndex(root.currentFolderIndex, Math.min(root.libraryItems.length, root.sectionMaxItems))
             Jellyfin.fetchHomeResumeItems( root.serverUrl, root.accessToken, root.userId, root.sectionMaxItems, function(it) {
-                    if (!root._fetchStillValid(seq)) return
+                    if (!postergrid._safeCanTouch(seq)) return
                     root._setListIfChanged("resumeItems", it || [])
                     root.resumeFetchCompleted = true
                     root.currentResumeIndex = MediaCatalog.clampIndex(root.currentResumeIndex, Math.min(root.resumeItems.length, root.sectionMaxItems))
                     root.updateBackdrop()
                     root.scheduleFocusRestore()
                 }, function() {
-                    if (!root._fetchStillValid(seq)) return
+                    if (!postergrid._safeCanTouch(seq)) return
                     root._setListIfChanged("resumeItems", [])
                     root.resumeFetchCompleted = true
                     root.currentResumeIndex = 0
@@ -1802,15 +1732,15 @@ Item {
                 }
             )
             root.fetchNextUpItems(seq)
-            root.fetchLatestPerFolder(seq)
+            HomeLatest.fetchLibraries(postergrid, postergrid._latestLoadTimers, seq)
             root._resetHydration()
             root.updateBackdrop()
             root.scheduleFocusRestore()
         }
         function failLibraryItems() {
-            if (!root._fetchStillValid(seq)) return
+            if (!postergrid._safeCanTouch(seq)) return
             root._fetchInFlight = false
-            console.warn("Home views: fetch failed")
+            _warnHomeOnce("views-failed")
             root._clearDataAfterFetchFailure()
         }
         Jellyfin.fetchViews(root.serverUrl, root.accessToken, root.userId, applyLibraryItems, failLibraryItems)
@@ -1844,22 +1774,6 @@ Item {
             }
         )
     }
-    function fetchLatestPerFolder(fetchSeq) {
-        var root = postergrid; var seq = (fetchSeq !== undefined && fetchSeq !== null) ? fetchSeq : root._fetchSeq
-        try {
-            if (!root._safeCanTouch(seq)) return
-            var libs = MediaCatalog.safeArray(root.libraryItems).filter(function(i){
-                return i
-                        && (i.CollectionType || i.IsFolder)
-                        && !MediaCatalog.isKnownUnsupportedLibraryFolder(i)
-            })
-            root._startLatestInitialQueue(libs, seq)
-        } catch(e) {
-            console.warn("Home latest: queue setup failed")
-            root._latestHadFailures = true
-            root.latestFetchCompleted = true
-        }
-    }
 
     Component.onCompleted: {
         _alive = true
@@ -1882,28 +1796,44 @@ Item {
         _nextUpSeq++
         _latestQueueSeq++
         latestInitialReadyTimer.stop()
-        _cancelLatestReloads("destroyed")
-        _cancelLatestInitialRequests("destroyed")
+        latestPublishTimer.stop()
+        _clearLatestWarmRails()
+        HomeLatest.cancelReloads(postergrid, "destroyed")
+        HomeLatest.cancelInitialRequests(postergrid, "destroyed")
         try { if (latestInitialWatchdog.running) latestInitialWatchdog.stop() } catch(eLatestWd) {}
         try { if (_visRefetch.running) _visRefetch.stop() } catch(e1) {}
         try { if (hydrationTimer.running) hydrationTimer.stop() } catch(e2) {}
         try { if (homeImageSettleTimer.running) homeImageSettleTimer.stop() } catch(e4) {}
         try { if (homeImageReturnFreezeTimer.running) homeImageReturnFreezeTimer.stop() } catch(e5) {}
-        try { if (homeFocusRepairTimer.running) homeFocusRepairTimer.stop() } catch(e6) {}
+        try { if (focusRecoveryTimer.running) focusRecoveryTimer.stop() } catch(e6) {}
+        _focusRecoveryScheduledKind = -1
         try { if (homeRevealReadyTimer.running) homeRevealReadyTimer.stop() } catch(e7) {}
         try { if (latestEvictTimer.running) latestEvictTimer.stop() } catch(e8) {}
         try { if (latestDataEvictTimer.running) latestDataEvictTimer.stop() } catch(e9) {}
         try { if (latestReloadRetryTimer.running) latestReloadRetryTimer.stop() } catch(e10) {}
+        try { if (latestProximityScrollTimer.running) latestProximityScrollTimer.stop() } catch(e11) {}
     }
     function _resetHomeCacheRestoreDedup(){ _lastHomeCacheRestoreKey=""; _lastHomeCacheRestoreCacheTs=0 }
-    onAccessTokenChanged: { _resetHomeCacheRestoreDedup(); if (ready) ensureBootFetch() }
-    onUserIdChanged: { _resetHomeCacheRestoreDedup(); if (ready) ensureBootFetch() }
-    onServerUrlChanged: { _resetHomeCacheRestoreDedup(); if (ready) ensureBootFetch() }
+    onAccessTokenChanged: { _clearLatestWarmRails(); _resetHomeCacheRestoreDedup(); if (ready) ensureBootFetch() }
+    onUserIdChanged: { _clearLatestWarmRails(); _resetHomeCacheRestoreDedup(); if (ready) ensureBootFetch() }
+    onServerUrlChanged: { _clearLatestWarmRails(); _resetHomeCacheRestoreDedup(); if (ready) ensureBootFetch() }
     onBgBlurChanged:      updateBackdrop()
     onLibraryItemsChanged:   {  updateBackdrop() }
     onResumeItemsChanged:    {  updateBackdrop() }
     onNextUpItemsChanged:    {  updateBackdrop() }
+    // Une Repeater basée sur un entier recrée potentiellement tous les rails
+    // lorsque la taille change. ListModel append/remove stabilise les delegates
+    // déjà focusés pendant la livraison progressive des bibliothèques.
+    ListModel { id: latestRailModel }
+    function _syncLatestRailCount() {
+        var target = latestByFolder ? latestByFolder.length : 0
+        while (latestRailModel.count > target)
+            latestRailModel.remove(latestRailModel.count - 1)
+        while (latestRailModel.count < target)
+            latestRailModel.append({ slot: latestRailModel.count })
+    }
     onLatestByFolderChanged: {
+        _syncLatestRailCount()
         updateBackdrop()
         scheduleFocusRestore()
         scheduleLatestEvict()
@@ -1939,6 +1869,21 @@ Item {
         if (backdrop && backdrop.scheduleUpdate)
             backdrop.scheduleUpdate()
     }
+    // Recherche prolongée : n'évacuer que les 2 textures backdrop, jamais les
+    // posters/indices du Home. Retour et focus D-Pad restent immédiatement actifs.
+    function releaseInactiveHomeBackdrop() {
+        if (!_alive || visible || pageActive || suspendVisualTextures) return false
+        var backdrop = backdropLayerLoader.item
+        if (!backdrop || !backdrop.releaseTextures) return false
+        backdrop.releaseTextures()
+        return true
+    }
+    function restoreInactiveHomeBackdrop() {
+        if (!_alive || suspendVisualTextures) return
+        var backdrop = backdropLayerLoader.item
+        if (backdrop && backdrop.update && backdrop.currentUrl)
+            backdrop.update(backdrop.currentUrl())
+    }
     property bool _homeMaintenanceQueued: false; property bool _homeMaintenanceRestoreFocus: false; property bool _homeMaintenanceRepairFocus: false
     Timer {
         id: homeMaintenanceTimer; interval: 0; repeat: false
@@ -1962,6 +1907,7 @@ Item {
     signal requestPersonalMediaPage(var folderId, string preselectItemId)
     signal requestSeriesPage(var folderId, string libraryMode)
     signal requestCollectionPage(var folderId)
+    signal requestDetailCollection(var boxSetId)
     signal requestDetailMovie(string movieId)
     signal requestSeasonPage(string seriesId, string seasonId, string preselectEpisodeId)
     function _sectionHasContent(section) {
@@ -2014,12 +1960,16 @@ Item {
     function _latestActiveList(){ if(!latestRepeater || !latestByFolder || latestByFolder.length<=0) return null; var g=Math.max(0, Math.min(currentLatestGroup||0, latestByFolder.length-1)); var sec=latestRepeater.itemAt(g); return (sec && sec.listObj) ? sec.listObj : null }
     function _hasAnyHomeListFocus(){ var l=_latestActiveList(); return !!((folderList && folderList.activeFocus) || (resumeList && resumeList.activeFocus) || (nextUpList && nextUpList.activeFocus) || (l && l.activeFocus)) }
     function cancelHomeFocusRepair() {
-        _homeFocusRepairLeft = 0
-        try { homeFocusRepairTimer.stop() } catch(e0) {}
-        try { focusRestoreTimer.stop() } catch(e1) {}
+        _cancelFocusRepairRetry()
+        try { focusRecoveryTimer.stop() } catch(e1) {}
+        _focusRecoveryScheduledKind = -1
     }
 
-    function scheduleHomeFocusRepair(){ if(!_alive || !pageActive || !focusRepairEnabled) return; _homeFocusRepairLeft=6; homeFocusRepairTimer.restart(); }
+    function scheduleHomeFocusRepair(){
+        if (!_alive || !pageActive || !focusRepairEnabled) return
+        _homeFocusRepairLeft = Math.max(_homeFocusRepairLeft, 6)
+        _queueFocusRecovery("repair")
+    }
     function _repairHomeFocus(){
         if(!_alive || !pageActive || !focusRepairEnabled) return
         if(_restoringFocus || _focusRestorePending || _focusRestoreSettle || hasPendingFocusRestore()){
@@ -2030,7 +1980,6 @@ Item {
         var section = _sectionHasContent(focusSection) ? focusSection : _nearestSection(-1, 1)
         if (section >= 0) _focusSection(section, currentLatestGroup, "focus-repair")
     }
-    Timer { id: homeFocusRepairTimer; interval: 80; repeat: false; onTriggered: { postergrid._repairHomeFocus(); if(!postergrid._hasAnyHomeListFocus() && postergrid._homeFocusRepairLeft>0){ postergrid._homeFocusRepairLeft--; restart() } } }
     property int _focusSectionScrollQueued: -1
     function _scheduleFocusSectionScroll(){ _focusSectionScrollQueued = focusSection; focusSectionScrollTimer.restart() }
     Timer { id: focusSectionScrollTimer; interval: 0; repeat: false; onTriggered: {
@@ -2061,6 +2010,11 @@ Item {
         }
         g = Math.max(0, Math.min(g, latestByFolder.length-1))
         currentLatestGroup = g
+        // Si le focus a changé pendant une saturation réseau, la demande
+        // urgente précédente ne doit pas recharger un rail quitté.
+        var newlyFocused = latestByFolder[g]
+        if (_latestPriorityReload.id && (!newlyFocused || String(newlyFocused.id || "") !== _latestPriorityReload.id))
+            _latestPriorityReload = ({ id: "", reason: "" })
         if (_ensureLatestGroupData(g, "focus")) {
             var waitingSec = latestRepeater ? latestRepeater.itemAt(g) : null
             if (waitingSec) {
@@ -2085,7 +2039,19 @@ Item {
             if (hydrationAllowed && !hydrationDone && !hydrationTimer.running) hydrationTimer.restart()
         })
     }
-    property real _lastScrollY: 0; signal scrolled(real y, int direction); readonly property real latestEvictScreens: 2.2; readonly property int latestDataEvictDelayMs: 4200
+    property real _lastScrollY: 0; signal scrolled(real y, int direction); readonly property real latestEvictScreens: 2.2; readonly property int latestDataEvictDelayMs: 4800
+    property real _latestViewportScanY: 0
+    readonly property int latestViewportStepPx: 64
+    function _updateLatestViewportScan(force) {
+        if (!_vFlick) return
+        var y = _vFlick.contentY
+        if (force || Math.abs(y - _latestViewportScanY) >= latestViewportStepPx)
+            _latestViewportScanY = y
+    }
+    Timer {
+        id: latestProximityScrollTimer; interval: 90; repeat: false
+        onTriggered: postergrid._maybeLoadLatestByVerticalProximity()
+    }
     Timer { id: latestEvictTimer; interval: 650; repeat: false; running: false; onTriggered: postergrid._evictLatestSections() }
     Timer { id: latestDataEvictTimer; interval: postergrid.latestDataEvictDelayMs; repeat: false; running: false; onTriggered: postergrid._evictFarLatestData() }
     Timer {
@@ -2114,23 +2080,25 @@ Item {
     }
     function _evictFarLatestData() {
         if (!latestRepeater || !sections || !_vFlick || !pageActive || !latestByFolder) return
-        var viewTop = _vFlick.contentY; var viewBot = viewTop + _vFlick.height; var farPad = height * latestEvictScreens; var next = latestByFolder.slice(0); var changed = false
-        for (var i = 0; i < next.length; ++i) {
-            var sec = latestRepeater.itemAt(i); var entry = next[i]
+        var viewTop = _vFlick.contentY; var viewBot = viewTop + _vFlick.height; var farPad = height * latestEvictScreens
+        var source = latestByFolder, next = null, changed = false, now = Date.now()
+        for (var i = 0; i < source.length; ++i) {
+            var sec = latestRepeater.itemAt(i); var entry = source[i]
             if (!sec || !entry || entry._evicted || !entry.items || entry.items.length <= 0) continue
             var top = sec.y + sections.y; var bot = top + sec.height; var far = (bot < (viewTop - farPad)) || (top > (viewBot + farPad)); var pinned = (focusSection === 3 && currentLatestGroup === i) || _isLatestRestoreAnchoredGroup(i)
-            if (!far || pinned) continue
+            if (!far || pinned || (now - Number(entry._loadedAt || 0)) < latestReloadGraceMs) continue
+            if (!next) next = latestByFolder.slice(0)
+            _rememberLatestRail(entry, now)
             var trimmed = MediaCatalog.shallowCloneObject(entry)
             trimmed.items = []
             trimmed._evicted = true
             trimmed._hadItems = true
-            trimmed._evictedAt = Date.now()
+            trimmed._evictedAt = now
             next[i] = trimmed
-            _updateLatestTempEntry(trimmed)
+            HomeLatest.updatePendingEntry(postergrid, trimmed)
             sec.evicted = true
-            try {
-                if (Jellyfin.evictLatestParentApiCache) Jellyfin.evictLatestParentApiCache(String(entry.id || ""))
-            } catch(e0) {}
+            // Laisser vivre l'entrée API et les autres partages de requêtes :
+            // vider les DTO QML ne signifie pas qu'une requête doit être refaite.
             changed = true
         }
         if (changed) {
@@ -2155,6 +2123,13 @@ Item {
             if (postergrid.isScrollingEff) hydrationTimer.stop()
             else if (postergrid.hydrationAllowed && !postergrid.hydrationDone && !hydrationTimer.running) hydrationTimer.restart()
             postergrid.scheduleLatestEvict()
+            postergrid._updateLatestViewportScan(false)
+            // Ne jamais bloquer le scroll : seul le travail réseau de proximité
+            // est mutualisé, avec une cadence bornée à 90 ms.
+            if (!latestProximityScrollTimer.running) latestProximityScrollTimer.start()
+        }
+        onMovementEnded: {
+            postergrid._updateLatestViewportScan(true)
             postergrid._maybeLoadLatestByVerticalProximity()
         }
         function ensureSectionVisible(sectionItem, margin) {
@@ -2232,6 +2207,9 @@ Item {
                         property bool cardPreferBackdrop: true; property bool cardMusicFallback: false; property bool cardAllowLoad: postergrid._homeImageLoadGate; property bool cardEnableMouseInput: true
                         property bool cardSuppressFocusTransform: false; property string cardImagePolicy: "standard"; property string cardFallbackKind: "folder"; property int cardTileW: libraryTileW
                         property int cardTileH: libraryTileH; property int cardTitleH: titleH; property int cardSidePad: focusPadSide; property int cardTopPad: libraryTopPad
+                        property bool cardPooled: false
+                        ListView.onPooled: cardPooled = true
+                        ListView.onReused: cardPooled = false
                         source: postergrid.posterGridCardSource
                         onLoaded: if (item) item.homeLoader = folderCardLoader
                         Connections {
@@ -2327,7 +2305,7 @@ Item {
                                 postergrid._animateRailX( resumeList, resumeContentXAnim, targetX)
                             } else {
                                 resumeContentXAnim.stop()
-                                resumeList.contentX = postergrid._resumeNativeClampX( resumeList, targetX)
+                                resumeList.contentX = MediaRailLayout.nativeListClampX( resumeList, targetX)
                             }
                             return true
                         }
@@ -2381,13 +2359,13 @@ Item {
                         hasViewportAnchor = hasViewportAnchor && isFinite(viewportX) && !isNaN(viewportX)
                         if (reason === "restore-immediate" && !hasViewportAnchor) {
                             var x = Number(savedX)
-                            if (isFinite(x) && !isNaN(x)) resumeList.contentX = postergrid._resumeNativeClampX( resumeList, x)
+                            if (isFinite(x) && !isNaN(x)) resumeList.contentX = MediaRailLayout.nativeListClampX( resumeList, x)
                         }
                         var real = MediaRailLayout.homeRowRealDelegateGeometry( resumeList, selectedIndex)
                         if (real && hasViewportAnchor) {
                             var delta = real.viewportX - viewportX
                             if (Math.abs(delta) >= 0.5) {
-                                resumeList.contentX = postergrid._resumeNativeClampX( resumeList, Number(resumeList.contentX || 0)
+                                resumeList.contentX = MediaRailLayout.nativeListClampX( resumeList, Number(resumeList.contentX || 0)
                                             + delta)
                             }
                             scheduleVisibilityRepair(2)
@@ -2396,7 +2374,7 @@ Item {
                         if (real) {
                             var realTarget = postergrid._resumeRealTargetX( resumeList, selectedIndex)
                             if (isFinite(realTarget) && !isNaN(realTarget)) {
-                                resumeList.contentX = postergrid._resumeNativeClampX( resumeList, realTarget)
+                                resumeList.contentX = MediaRailLayout.nativeListClampX( resumeList, realTarget)
                                 scheduleVisibilityRepair(2)
                                 return true
                             }
@@ -2436,7 +2414,7 @@ Item {
                                 var targetX = postergrid._resumeRealTargetX( resumeList, idx)
                                 if (isFinite(targetX) && !isNaN(targetX) && Math.abs( Number(resumeList.contentX || 0)
                                             - targetX) >= 0.75) {
-                                    resumeList.contentX = postergrid._resumeNativeClampX( resumeList, targetX)
+                                    resumeList.contentX = MediaRailLayout.nativeListClampX( resumeList, targetX)
                                 }
                             }
                             resumeList._visibilityRepairLeft = Math.max( 0, resumeList._visibilityRepairLeft - 1)
@@ -2466,13 +2444,17 @@ Item {
                     }
                     delegate: Loader {
                         id: resumeCardLoader
-                        readonly property bool portraitMovie: !postergrid._mediaCardUsesLandscape(cardData, "resume")
+                        readonly property bool portraitMovie: !MediaRailLayout.homeCardUsesLandscape(cardData, "resume")
                         width: postergrid.mediaCardDelegateWidthFor(cardData, "resume")
                         height: resumeSection.rowCardHeight; z: cardSelected ? 100 : 0
                         property var cardData: modelData; property var cardController: postergrid; property bool cardSelected: resumeList.activeFocus && focusSection === 1 && resumeList.selectedIndex === index; property bool cardShowProgress: true
                         property bool cardPreferBackdrop: !portraitMovie; property bool cardMusicFallback: false; property string cardFallbackKind: portraitMovie ? "movie" : "episode"; property string cardImagePolicy: "standard"
                         property bool cardAllowLoad: postergrid._homeImageLoadGate; property bool cardEnableMouseInput: true; property bool cardSuppressFocusTransform: false; property int cardTileW: postergrid.mediaCardTileWidthFor(cardData, "resume")
                         property int cardTileH: postergrid.mediaCardTileHeightFor(cardData, "resume"); property int cardTitleH: titleH; property int cardSidePad: postergrid.mediaCardSidePadFor(cardData, "resume"); property int cardTopPad: postergrid.mediaCardTopPadFor(cardData, "resume")
+                        // Éviter les timers/marquees des cartes conservées dans le pool Qt 5.15.
+                        property bool cardPooled: false
+                        ListView.onPooled: cardPooled = true
+                        ListView.onReused: cardPooled = false
                         source: postergrid.posterGridCardSource
                         onLoaded: {
                             if (item) item.homeLoader = resumeCardLoader
@@ -2570,6 +2552,9 @@ Item {
                         property bool cardPreferBackdrop: false; property bool cardMusicFallback: false; property string cardFallbackKind: "series"; property string cardImagePolicy: "nextup-series"
                         property bool cardAllowLoad: postergrid._homeImageLoadGate; property bool cardEnableMouseInput: true; property bool cardSuppressFocusTransform: false; property int cardTileW: postergrid.resumeLandscapeW
                         property int cardTileH: portH; property int cardTitleH: titleH; property int cardSidePad: focusPadSide; property int cardTopPad: topPadPortrait
+                        property bool cardPooled: false
+                        ListView.onPooled: cardPooled = true
+                        ListView.onReused: cardPooled = false
                         source: postergrid.posterGridCardSource
                         onLoaded: if (item) item.homeLoader = nextUpCardLoader
                         Connections {
@@ -2608,14 +2593,14 @@ Item {
                 }
             }
             Repeater {
-                id: latestRepeater; model: latestByFolder.length
+                id: latestRepeater; model: latestRailModel
                 delegate: Item {
                     id: latestSection
                     property int groupIndex: index; property var entry: latestByFolder[index]; property string sectionName: (entry && entry.name) ? entry.name : "Médias"; property var sectionItemsRaw: (entry && entry.items) ? entry.items : []
-                    property var sectionItems: postergrid.capItems(sectionItemsRaw); property alias listObj: latestList; property bool isMusicSection: MediaCatalog.isMusicLibraryFolder(entry)
+                    property var sectionItems: postergrid.capItems(sectionItemsRaw); readonly property var listObj: latestListLoader.item; property bool isMusicSection: MediaCatalog.isMusicLibraryFolder(entry)
                     readonly property string cardSectionKind: (entry && entry._pgSectionKind) ? String(entry._pgSectionKind) : (MediaCatalog.isSeriesLibraryFolder(entry) ? "latest-series" : "latest")
                     readonly property int cardH: postergrid.cardHPortrait; readonly property int viewportMarginY: postergrid.height; readonly property real absY: y + sections.y
-                    readonly property bool nearViewport: ((absY + height) >= (_vFlick.contentY - viewportMarginY)) && (absY <= (_vFlick.contentY + _vFlick.height + viewportMarginY))
+                    readonly property bool nearViewport: ((absY + height) >= (postergrid._latestViewportScanY - viewportMarginY)) && (absY <= (postergrid._latestViewportScanY + _vFlick.height + viewportMarginY))
                     readonly property bool forceLoad: postergrid.focusSection === 3 && postergrid.currentLatestGroup === groupIndex
                     readonly property bool sectionActiveNow: forceLoad || nearViewport; property bool _everSectionActive: false
                     onNearViewportChanged: {
@@ -2659,10 +2644,22 @@ Item {
                         color: "#AEB5C9"; font.pixelSize: 18
                         visible: !!(entry && entry._evicted && (nearViewport || forceLoad))
                     }
-                    ListView {
-                        id: latestList; anchors.top: parent.top; anchors.topMargin: 45; anchors.left: parent.left
-                        anchors.right: parent.right; anchors.leftMargin: viewLeftMargin; anchors.rightMargin: viewRightMargin; height: latestSection.cardH
-                        model: latestSection.sectionModelActive ? latestSection.sectionItems : null
+                    // T8: conserver les wrappers/hauteurs stables dans Column,
+                    // mais ne créer le vrai ListView horizontal qu'à proximité.
+                    // L'éviction existante (650 ms) évite les churns au scroll rapide.
+                    // Chargement synchrone pour préserver focus D-Pad/restauration.
+                    Loader {
+                        id: latestListLoader
+                        anchors.top: parent.top; anchors.topMargin: 45; anchors.left: parent.left
+                        anchors.right: parent.right; anchors.leftMargin: viewLeftMargin; anchors.rightMargin: viewRightMargin
+                        height: latestSection.cardH
+                        asynchronous: false
+                        active: latestSection.sectionModelActive
+                        sourceComponent: Component {
+                            ListView {
+                                id: latestList
+                                anchors.fill: parent
+                                model: latestSection.sectionItems
                         orientation: ListView.Horizontal; spacing: spacingW; snapMode: ListView.NoSnap
                         highlightMoveDuration: 0
                         highlightRangeMode: ListView.NoHighlightRange
@@ -2719,6 +2716,9 @@ Item {
                             property string cardImagePolicy: latestSection.cardSectionKind === "latest-series" ? "latest-series" : "standard"
                             property int cardTileW: postergrid.mediaCardTileWidthFor(cardData, latestSection.cardSectionKind); property int cardTileH: postergrid.mediaCardTileHeightFor(cardData, latestSection.cardSectionKind); property int cardTitleH: titleH
                             property int cardSidePad: postergrid.mediaCardSidePadFor(cardData, latestSection.cardSectionKind); property int cardTopPad: postergrid.mediaCardTopPadFor(cardData, latestSection.cardSectionKind)
+                            property bool cardPooled: false
+                            ListView.onPooled: cardPooled = true
+                            ListView.onReused: cardPooled = false
                             source: postergrid.posterGridCardSource
                             onLoaded: if (item) item.homeLoader = latestCardLoader
                             Connections {
@@ -2776,6 +2776,8 @@ Item {
                             postergrid.setLatestIndexForGroup(groupIndex, selectedIndex)
                             postergrid.updateBackdrop()
                             if (postergrid.hydrationAllowed && !postergrid.hydrationDone && !hydrationTimer.running) hydrationTimer.restart()
+                        }
+                            }
                         }
                     }
                 }

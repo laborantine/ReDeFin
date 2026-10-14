@@ -9,6 +9,7 @@ import "../js/PlayerTrackSelection.js" as TrackSelection
 import "../js/jellyfinBridge.js"  as JFB
 import "../js/playerOverlayHelper.js" as H
 import "../js/SkipIntro.js" as SkipIntro
+import "../js/SafeLog.js" as SafeLog
 FocusScope {
     id: root
     width: 1920; height: 1080
@@ -80,6 +81,7 @@ FocusScope {
     readonly property int _mpStalled: MediaPlayer.Stalled
     readonly property int _mpNoMedia: MediaPlayer.NoMedia
     readonly property int _mpLoaded: MediaPlayer.Loaded
+    readonly property int _mpBuffering: MediaPlayer.Buffering
     readonly property int _mpBuffered: MediaPlayer.Buffered
     property bool _tearingDownPlayer: false
     property real _lastUiClockPushWallMs: 0
@@ -102,6 +104,19 @@ FocusScope {
     property int frozenPlaybackWatchWindowMs: 90000
     property int frozenPlaybackNoProgressMs: 5500
     property int frozenPlaybackStartupGraceMs: 2800
+    // Devialet HLS stereo : les gels peuvent rester dans StalledMedia/Buffering
+    // sans MediaError. Un maximum de deux reprises par média limite les boucles.
+    property int hlsStallThresholdMs: 16000
+    property int hlsStallStartupGraceMs: 12000
+    property int hlsStallRecoveryCooldownMs: 45000
+    property int hlsStallRecoveryMaxAttempts: 2
+    property int _hlsStallRecoveryCount: 0
+    property real _hlsStallLastRecoveryWallMs: 0
+    // Distinguer seek accepte par Qt et progression effective en lecture HLS.
+    property bool _hlsSeekProgressPending: false
+    property bool _hlsSeekProgressConfirmed: false
+    property int _hlsSeekProgressAnchorMs: -1
+    property real _hlsSeekProgressIssuedWallMs: 0
     // Overlay visuel de chargement vidéo. Il n'influence jamais la politique DirectPlay / remux / transcodage et reste purement informatif.
     property bool videoLoadingGate: true
     // initiale ou d'un buffering, et sert de base au verrou transport.
@@ -225,9 +240,6 @@ FocusScope {
     property string playbackRuleMode: "smart"
     function _normalizedPlaybackRuleMode(value) {
         return JF.normalizePlaybackRuleMode(value)
-    }
-    function _smartPlaybackRulesEnabled(){
-        return _normalizedPlaybackRuleMode(playbackRuleMode) !== "directplay"
     }
     function _syncPlaybackRuleMode(reason) {
         var mode = _normalizedPlaybackRuleMode(playbackRuleMode)
@@ -821,6 +833,13 @@ FocusScope {
     property bool _seekRestoreAccepted: false
     property real _seekRestoreReadyWallMs: 0
     property real _seekRestorePrimeWallMs: 0
+    // T14 : la source HLS Devialet 2.0 demarre parfois reellement a 00:00
+    // malgre PlaybackInfo.StartTimeTicks. Ne pas inventer de base UI.
+    property bool _devialetStereoHlsLocalResume: false
+    // T15 : essai HTTP/MKV stéréo limité à Devialet, repli HLS mémorisé
+    // pendant la lecture courante. Aucun Timer / Image / objet QML ajouté.
+    property bool _devialetStereoProgressiveDownmix: false
+    property bool _devialetStereoProgressiveFailed: false
     property real _seekRestorePauseWallMs: 0
     property int  _seekRestorePhase: 0 // 0=attente, 1=prime, 2=pause demandée, 3=seek émis
     property bool _trackSwitchRestartAfterFailure: false
@@ -882,7 +901,9 @@ FocusScope {
     property int _autoLocalizeSubStream: -1
     property int resumePrerollMs: 1500
     property bool   scrobbleEnabled: true
-    property int    userDataEveryMs: 2500
+    // Rapports de session frequents (pilotage distant), ecritures UserData limitees.
+    property int    sessionProgressEveryMs: 10000
+    property int    userDataEveryMs: 60000
     property int    resumeCheckpointDelayMs: 1800
     property bool   _startedReported: false
     property string _reportedSessionId: ""
@@ -890,7 +911,17 @@ FocusScope {
     property string _stoppedPendingSessionId: ""
     property double _lastProgressSentMs: 0
     property double _lastUserDataSentMs: 0
+    // Une requete de progression periodique a la fois, avec repli si le serveur
+    // ne repond jamais. Les evenements (pause/reprise) ne sont pas bloques.
+    property bool   _periodicProgressInFlight: false
+    property double _periodicProgressStartedMs: 0
+    property int    _periodicProgressSequence: 0
+    // Invalide les callbacks UserData anciens apres un nouvel evenement ou changement item.
+    property int    _checkpointWriteSeq: 0
     property bool   _playbackExitInProgress: false
+    // Anti-reentrance EndOfMedia : les changements de status du backend Qt
+    // peuvent être émis plusieurs fois pour un même média.
+    property string _naturalEndHandledItemId: ""
     property int    _finalExitPositionMs: -1
     property int    _lastPersistableUiMs: 0
     property string lastGoodLogoUrl: ""
@@ -900,28 +931,13 @@ FocusScope {
     property string _lastPushedLogoNorm: ""
     property string _pendingTitle: ""
     property string _pendingLogo: ""
-    property bool   _topBarDirty: false
     Timer {
         id: topBarApplyTimer
         interval: 40; repeat: false
         onTriggered: {
             if (!topBarLoader.item) return
             try {
-                topBarLoader.item.baseUrl   = (serverUrl||"").replace(/\/$/,"")
-                topBarLoader.item.fbx       = root.fbx
-                topBarLoader.item.serverUrl = root.serverUrl
-                topBarLoader.item.userId    = root.userId
-                topBarLoader.item.showClock   = Qt.binding(function(){ return root.topbarShowClock })
-                // Même position que les pages de détail; GIF seulement si chrome visible.
-                topBarLoader.item.clockHudActive = Qt.binding(function(){
-                    return root.uiChromeOpacity > 0.08 && topBarLoader.visible
-                })
-                if (topBarLoader.item.hasOwnProperty("safeMarginRight"))
-                    topBarLoader.item.safeMarginRight = Qt.binding(function(){ return Math.max(28, root.tvSafeMargin) })
-                if (topBarLoader.item.hasOwnProperty("safeMarginLeft"))
-                    topBarLoader.item.safeMarginLeft  = Qt.binding(function(){ return Math.max(28, root.tvSafeMargin) })
-                if (topBarLoader.item.hasOwnProperty("safeMarginTop"))
-                    topBarLoader.item.safeMarginTop   = Qt.binding(function(){ return Math.max(28, root.tvSafeMargin) })
+                H.syncTopBarContext(root, topBarLoader, false)
             } catch(e){}
             if (_pendingTitle !== _lastPushedTitle) {
                 try { topBarLoader.item.itemTitle = _pendingTitle } catch(e){}
@@ -934,10 +950,11 @@ FocusScope {
                 try { topBarLoader.item.itemLogoUrl = _pendingLogo } catch(e){}
                 _lastPushedLogoNorm = norm
             }
-            _topBarDirty = false
         }
     }
-    function _queueTopBarPush(){ _topBarDirty=true; if(!topBarApplyTimer.running) topBarApplyTimer.start() }
+    function _queueTopBarPush() {
+        if (!topBarApplyTimer.running) topBarApplyTimer.start()
+    }
     function isDsLike(){ return isHls || lastUsedTranscoding || lastUsedDirectStream || lastUsedServerRemux || serverTimedStream || timeShifted || (selectedAudioStream >= 0) }
     function isPureDirectPlay(){ return JF.isPureDirectPlay(root) }
     function listIndexForStream(s){ return TrackSelection.indexForStream(subtitleStreamIndexMap, s) }
@@ -1007,40 +1024,44 @@ FocusScope {
     function _capturePersistablePositionMs(reason){
         return PlayerSession.capturePlayerPersistablePosition(root, mp, reason)
     }
-    function _sendPlaybackCheckpoint(reason, isPaused, includeSessionProgress){
-        if (serverPrerollBlocking)
-            return false
-        if (_tearingDownPlayer || _playbackExitInProgress || !scrobbleEnabled ||
-                _trackSwitchVerificationActive || _sourceResetActive || _gateArmed ||
-                !serverUrl || !accessToken || !userId || !itemId)
-            return false
-        var pos = _capturePersistablePositionMs(reason || "checkpoint")
-        if (pos <= 0) return false
-        // la position exacte ReDeFin reste la dernière écriture du cycle.
-        _rememberPersistablePositionMs(pos, reason || "checkpoint")
-        _sendStartIfNeeded(pos)
-        function persistExactUserData(){
-            if (_tearingDownPlayer || _playbackExitInProgress) return
-            JFB.updateUserPlaybackPosition(serverUrl, accessToken, userId, itemId,
-                                           _ticks(pos), function(){}, function(){})
-            _lastUserDataSentMs = _nowMs()
-        }
-        if (includeSessionProgress === true && playSessionId) {
-            _sendProgress(!!isPaused, pos, function(){ persistExactUserData() })
-            _lastProgressSentMs = _nowMs()
-        } else {
-            persistExactUserData()
-        }
-        return true
+    function _sendPlaybackCheckpoint(reason, isPaused, includeSessionProgress) {
+        return PlayerSession.sendPlaybackCheckpoint(root, JFB, reason, isPaused, includeSessionProgress)
     }
     function _finalizeCurrentSessionForSwitch(reason){
         if (!playSessionId || _stoppedReportedSessionId === playSessionId ||
                 _stoppedPendingSessionId === playSessionId)
             return
         var pos = _capturePersistablePositionMs(reason || "item-switch")
+        ++_checkpointWriteSeq
         try { progressTimer.stop() } catch(e0) {}
         try { resumeCheckpointTimer.stop() } catch(e1) {}
         PlayerSession.sendStoppedAtPosition(root, JFB, pos, function(){})
+    }
+    function _finishNaturalEndOfMedia(){
+        // Le pré-roll est traité séparément ; ne jamais interpréter un reload
+        // de piste/qualité ou une récupération d'erreur comme une fin de vidéo.
+        if (_tearingDownPlayer || _playbackExitInProgress || serverPrerollBlocking ||
+                _sourceResetActive || _trackSwitchRebaseActive ||
+                _trackSwitchVerificationActive || _mediaErrorRecoveryInProgress)
+            return
+        var finishedId = String(root.itemId || "")
+        if (!finishedId || _naturalEndHandledItemId === finishedId) return
+        _naturalEndHandledItemId = finishedId
+        _releaseVideoLoading("end-of-media")
+        _resetDeferredReload("end-of-media")
+        var endPos = durationMs() > 0 ? durationMs() : _capturePersistablePositionMs("end-of-media")
+        _rememberPersistablePositionMs(endPos, "end-of-media")
+        ++_checkpointWriteSeq
+        // La fonction stop de PlayerSession déduplique par playSessionId.
+        PlayerSession.sendStoppedAtPosition(root, JFB, endPos, function(){})
+        var nextIndex = PlayerSession.naturalEndNextIndex(finishedId, _playlistArray(), autoplayNext)
+        if (nextIndex >= 0) {
+            hideNextPanel()
+            nextHiddenWaiter.budget = nextHideMaxWaitMs
+            nextHiddenWaiter.restart()
+        } else {
+            finalizePlaybackAndExit("end-of-media")
+        }
     }
     function finalizePlaybackAndExit(reason){
         if (_playbackExitInProgress)
@@ -1360,8 +1381,7 @@ FocusScope {
                 // Une exception dans le callback ne doit jamais le rejouer :
                 // il peut déjà avoir modifié les pistes ou lancé une négociation.
                 try { cb.apply(null, arguments) } catch(e0) {
-                    console.warn("ReDeFin: erreur dans le callback de sous-titres locaux")
-                }
+                        }
             }
         }, preserveOnFailure)
     }
@@ -1387,7 +1407,7 @@ FocusScope {
         var p = (positionMs !== undefined && positionMs !== null)
               ? _clampUi(Number(positionMs) || 0)
               : _capturePersistablePositionMs(isPaused ? "progress-paused" : "progress")
-        PlayerSession.sendProgress(root, JFB, isPaused, p, done)
+        return PlayerSession.sendProgress(root, JFB, isPaused, p, done)
     }
     function _sendStopped(){ PlayerSession.sendStopped(root, JFB) }
     Timer {
@@ -1405,7 +1425,7 @@ FocusScope {
     }
     Timer {
         id: progressTimer
-        interval: Math.max(500, userDataEveryMs)
+        interval: Math.max(1000, sessionProgressEveryMs)
         repeat: true
         running: scrobbleEnabled && !!itemId
         onTriggered: {
@@ -1626,6 +1646,10 @@ FocusScope {
         }
         onSourceChanged: {
             if (_tearingDownPlayer) return
+            _hlsSeekProgressPending = false
+            _hlsSeekProgressConfirmed = false
+            _hlsSeekProgressAnchorMs = -1
+            _hlsSeekProgressIssuedWallMs = 0
             var hasSource = String(mp.source || "").length > 0
             if (!hasSource)
                 _skipIntroMainSourceSeen = false
@@ -1647,8 +1671,14 @@ FocusScope {
                 }
                 return
             }
-            if (mp.playbackState === MediaPlayer.PlayingState)
+            if (mp.playbackState === MediaPlayer.PlayingState) {
                 root._syncPlaybackSpeedToPlayer("state-playing", true)
+                // Sur Devialet, un downmix HLS peut rester muet/bloque dans Stalled
+                // ou Buffering sans MediaError : surveiller des le premier Playing.
+                if ((isHls && audioOutputMode === "stereo" || _devialetStereoProgressiveDownmix) &&
+                        !_sourceResetActive && !_trackSwitchVerificationActive)
+                    _armFrozenPlaybackWatch("hls-stereo-playing", frozenPlaybackWatchWindowMs)
+            }
             if (mp.playbackState === MediaPlayer.PausedState && !_pauseWatchInPause) {
                 _stopFrozenPlaybackWatch("paused")
                 _pauseWatchInPause = true
@@ -1704,18 +1734,23 @@ FocusScope {
                 if (!_sourceResetActive) _releaseVideoLoading("position-progress")
             }
             _maybeCompleteStaticDirectPlayFallback("position")
+            // Validation sur progression REELLE, pas sur le seul accusé de mp.seek().
+            PlayerSession.observeHlsSeekProgress(root, mp)
             // Synchronisation locale dédiée : on suit directement MediaPlayer.position (+ baseOffsetMs) à chaque progression utile. La ProgressBar peut rester throttlée indépendamment.
             if (!scrubActive && useLocalSubs && subsLoader.item)
                 _pushLocalSubsUiMs(0, false)
             if (!scrubActive) updateClocksFromPlaybackThrottled(false)
             if (_mediaErrorRecoveryInProgress && _mediaErrorRecoverySafeUiMs > 0 &&
                     mp.playbackState === MediaPlayer.PlayingState &&
+                    (!(isHls && audioOutputMode === "stereo") || _hlsSeekProgressConfirmed) &&
                     uiPositionMs() >= _mediaErrorRecoverySafeUiMs - 2000 &&
                     mp.position > 0) {
                 _mediaErrorRecoveryInProgress = false
                 _stopFrozenPlaybackWatch("positionRecovered")
             }
             if (mp.playbackState === MediaPlayer.PlayingState && uiPositionMs() > 0 &&
+                    !(isHls && audioOutputMode === "stereo" && _hlsSeekProgressPending) &&
+                    !(_mediaErrorRecoveryInProgress && isHls && audioOutputMode === "stereo" && !_hlsSeekProgressConfirmed) &&
                     !(_mediaErrorRecoveryInProgress && mp.position <= 1000 && uiPositionMs() <= baseOffsetMs + 1500)) {
                 var stableUi = uiPositionMs()
                 _pauseWatchLastStableUiMs = stableUi
@@ -1756,31 +1791,35 @@ FocusScope {
                 return
             }
             if (mp.status===MediaPlayer.Buffered || mp.status===MediaPlayer.Loaded) {
-                if (!_mediaErrorRecoveryInProgress)
+                // Un BufferedMedia fugitif entre deux gels ne reinitialise pas
+                // le budget de reprises HLS. Il faut une fenetre de stabilite.
+                if (!_mediaErrorRecoveryInProgress &&
+                        (!(isHls && audioOutputMode === "stereo") ||
+                         _nowMs() > _mediaErrorProgressGuardUntilWallMs + 30000))
                     _mediaErrorRecoveryCount = 0
+                if (isHls && audioOutputMode === "stereo" &&
+                        mp.playbackState === MediaPlayer.PlayingState &&
+                        !_frozenPlaybackWatchActive && !_sourceResetActive &&
+                        !_trackSwitchVerificationActive)
+                    _armFrozenPlaybackWatch("hls-stereo-ready", frozenPlaybackWatchWindowMs)
                 root._syncPlaybackSpeedToPlayer("status-ready", true)
                 _maybeCompleteStaticDirectPlayFallback("status-ready")
                 _kickStartupPlay("status-ready")
                 _scheduleVideoLoadingRelease("status-ready")
             } else if (mp.status===MediaPlayer.Loading || mp.status===MediaPlayer.Stalled) {
+                if (isHls && audioOutputMode === "stereo" &&
+                        mp.playbackState === MediaPlayer.PlayingState) {
+                    if (!_frozenPlaybackWatchActive && !_sourceResetActive)
+                        _armFrozenPlaybackWatch("hls-stereo-rebuffer", frozenPlaybackWatchWindowMs)
+                }
                 if (mp.playbackState !== MediaPlayer.PausedState &&
                         (mp.status===MediaPlayer.Stalled ||
                          mp.playbackState !== MediaPlayer.PlayingState || mp.position <= 0))
                     _armVideoLoading("status-loading")
             }
             if (_pendingSeekMs>=0 && (mp.status===MediaPlayer.Buffered || mp.status===MediaPlayer.Loaded)) seekRestoreTimer.start()
-            if (mp.status===MediaPlayer.EndOfMedia){
-                _releaseVideoLoading("end-of-media")
-                _resetDeferredReload("end-of-media")
-                var endPos = durationMs() > 0 ? durationMs() : _capturePersistablePositionMs("end-of-media")
-                _rememberPersistablePositionMs(endPos, "end-of-media")
-                PlayerSession.sendStoppedAtPosition(root, JFB, endPos, function(){})
-                if (playlistRef && autoplayNext) {
-                    hideNextPanel()
-                    nextHiddenWaiter.budget = nextHideMaxWaitMs
-                    nextHiddenWaiter.restart()
-                }
-            }
+            if (mp.status===MediaPlayer.EndOfMedia)
+                root._finishNaturalEndOfMedia()
         }
     }
     VideoOutput {
@@ -1895,24 +1934,7 @@ FocusScope {
                 item.anchors.top   = topBarLoader.top
                 item.height = 70
                 item.visible = true
-                item.baseUrl   = (serverUrl||"").replace(/\/$/,"")
-                item.fbx       = root.fbx
-                item.serverUrl = root.serverUrl
-                item.userId    = root.userId
-                item.userName = Qt.binding(function(){ return root.userName })
-                item.userImageTag = Qt.binding(function(){ return root.userImageTag })
-                // Un nouveau media ne doit pas reutiliser le logo de l'ancien.
-                item.stickyLogo = false
-                item.showClock   = Qt.binding(function(){ return root.topbarShowClock })
-                item.clockHudActive = Qt.binding(function(){
-                    return root.uiChromeOpacity > 0.08 && topBarLoader.visible
-                })
-                if (item.hasOwnProperty("safeMarginRight"))
-                    item.safeMarginRight = Qt.binding(function(){ return Math.max(28, root.tvSafeMargin) })
-                if (item.hasOwnProperty("safeMarginLeft"))
-                    item.safeMarginLeft  = Qt.binding(function(){ return Math.max(28, root.tvSafeMargin) })
-                if (item.hasOwnProperty("safeMarginTop"))
-                    item.safeMarginTop   = Qt.binding(function(){ return Math.max(28, root.tvSafeMargin) })
+                H.syncTopBarContext(root, topBarLoader, true)
             } catch(e){}
             _pushTopBar()
         }
@@ -2066,7 +2088,14 @@ FocusScope {
     property int nextToProgressGap: 24
     property int nextFallbackBottom: 96
     property int nextHideMaxWaitMs: 1500
-    function _goNextEpisode(){ transportNext("next-panel") }
+    function _goNextEpisode(){
+        var advanced = transportNext("next-panel")
+        // Si la playlist a été modifiée pendant l'attente de fermeture du
+        // panneau, la fin réelle ne doit jamais laisser un écran figé.
+        if (!advanced && _naturalEndHandledItemId === String(itemId || ""))
+            finalizePlaybackAndExit("end-of-playlist")
+        return advanced
+    }
     function _playlistArray(){
         var src = []
         if (playlistRef && playlistRef.hasList())
@@ -2782,7 +2811,7 @@ FocusScope {
             if (event.accepted) return
         }
     }
-    
+
     Component.onCompleted: {
         _resetDeferredReload("completed")
         _primaryUiReady = false
@@ -2836,6 +2865,8 @@ FocusScope {
     }
     onServerUrlChanged: {
         _resetServerPrerollState("serverUrl")
+        _devialetStereoProgressiveFailed = false
+        _devialetStereoProgressiveDownmix = false
         refreshStreams()
         refreshCurrentItemTitle()
         _loadSkipIntroForCurrentItem("serverUrl")
@@ -2845,6 +2876,11 @@ FocusScope {
         _syncNextOverlayContext()
     }
     onItemIdChanged: {
+        _naturalEndHandledItemId = ""
+        _hlsStallRecoveryCount = 0
+        _hlsStallLastRecoveryWallMs = 0
+        _devialetStereoProgressiveFailed = false
+        _devialetStereoProgressiveDownmix = false
         ++_topBarMetadataSeq
         _topBarMetadataPending = true
         // Effacer immediatement l'ancien titre, sans attendre le push differe.

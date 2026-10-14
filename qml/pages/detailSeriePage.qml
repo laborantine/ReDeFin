@@ -143,7 +143,9 @@ FocusScope {
     property string nextUpDurationText: ""
     property string nextUpEndText: ""
     function _updateNextUpMeta(){
-        var ep = MediaRailLayout.nextUpEpisodeFromBlock(nextUpLoader.item);
+        var block = nextUpLoader.item;
+        var ep = block && typeof block.currentEpisodeForMetadata === "function"
+                ? block.currentEpisodeForMetadata() : null;
         if (!ep) { nextUpDurationText=""; nextUpEndText=""; return; }
         var ticks = Number(ep.RunTimeTicks || ep.RuntimeTicks || 0);
         if (!ticks || ticks <= 0) { nextUpDurationText=""; nextUpEndText=""; return; }
@@ -1092,10 +1094,19 @@ FocusScope {
 
     property string fallbackPosterUrl: ""
     property bool   posterLogoFailed: false
+    // La fiche affiche le logo à 90 % du poster ; la version agrandie
+    // dispose d'une URL indépendante, construite seulement sur demande.
+    readonly property int reqPosterLogoW: Math.max(64, Math.round(posterW * 0.90 * posterOS))
+    readonly property int reqPosterLogoH: Math.max(64, Math.round(posterH * 0.90 * posterOS))
     property string seriesLogoUrl: (hasItem && item.ImageTags && item.ImageTags.Logo)
         ? Jellyfin.itemImageUrl(serverUrl, item.Id, "Logo", item.ImageTags.Logo,
-                               { maxWidth:900, maxHeight:900, quality:85, format:"png" })
+                               { maxWidth:reqPosterLogoW, maxHeight:reqPosterLogoH, quality:85, format:"png" })
         : ""
+    function _seriesLogoOverlayUrl() {
+        if (!hasItem || !item.ImageTags || !item.ImageTags.Logo) return ""
+        return Jellyfin.itemImageUrl(serverUrl, item.Id, "Logo", item.ImageTags.Logo,
+                                    { maxWidth:900, maxHeight:900, quality:85, format:"png" })
+    }
     property string seriesCoverUrl: (hasItem && item.ImageTags && item.ImageTags.Primary)
         ? Jellyfin.itemImageUrl(serverUrl, item.Id, "Primary", item.ImageTags.Primary,
                                { fillWidth:reqPosterW, fillHeight:reqPosterH, quality:88, format:"jpg" })
@@ -2888,7 +2899,9 @@ FocusScope {
         if (!hasItem) return;
         lastFocusBeforeOverlay=currentFocus;
         overlayMode="poster";
-        overlayData={ posterUrl: effectivePosterUrl, posterMaxW: posterMaxW, posterMaxH: posterMaxH };
+        var enlargedUrl = (seriesLogoUrl && !posterLogoFailed && posterLogo.status === Image.Ready)
+                        ? _seriesLogoOverlayUrl() : seriesCoverUrl;
+        overlayData={ posterUrl: enlargedUrl, posterMaxW: posterMaxW, posterMaxH: posterMaxH };
     }
     function _overviewReaderImageUrl(){
         return item ? MediaCatalog.backdropOrPrimaryUrl(Jellyfin, serverUrl, item, {

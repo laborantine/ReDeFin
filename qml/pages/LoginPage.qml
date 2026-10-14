@@ -168,14 +168,28 @@ FocusScope {
     signal requestHomeLoading(bool active)
     function _securityErrorForServerUrl(url) {
         try {
-            if (Jellyfin && Jellyfin.isWanHttpUrl && Jellyfin.isWanHttpUrl(url))
-                return "Connexion HTTP externe refusée. Utilise HTTPS ou une adresse locale."
+            if (Jellyfin && Jellyfin.isWanHttpBlocked && Jellyfin.isWanHttpBlocked(url))
+                return "Connexion HTTP non vérifiée : consentement requis."
         } catch(e0) {}
-        try {
-            if (SafeLog.isWanHttpUrl(url))
-                return "Connexion HTTP externe refusée. Utilise HTTPS ou une adresse locale."
-        } catch(e1) {}
         return ""
+    }
+    property string _httpConsentDeclinedUrl: ""
+    function _withHttpConsent(url, onAccepted, onCancelled) {
+        if (!Jellyfin.isWanHttpBlocked(url)) {
+            if (onAccepted) onAccepted();
+            return;
+        }
+        httpConsentDialog.confirm(url, function(approved) {
+            if (approved) {
+                _httpConsentDeclinedUrl = "";
+                splashBg.scheduleRefresh("httpConsentGranted");
+                if (onAccepted) onAccepted();
+            } else {
+                if (String(url) === String(page.serverUrl))
+                    _httpConsentDeclinedUrl = String(url);
+                if (onCancelled) onCancelled();
+            }
+        });
     }
     function _normalizeContextServerUrl(url) {
         var raw = String(url || "").trim()
@@ -248,13 +262,6 @@ FocusScope {
         var keep = value && _trustedLanHostBeforeRotation(value)
         _clearTrustedLanHosts()
         if (keep) _restoreTrustedLanHost(value)
-    }
-    function _isShortLanServerUrl(value) {
-        try {
-            return Jellyfin && typeof Jellyfin.isShortLanHostName === "function"
-                    && Jellyfin.isShortLanHostName(value) === true
-        } catch(e0) {}
-        return false
     }
 
     function _trustValidatedLanHost(value) {
@@ -521,9 +528,9 @@ FocusScope {
     property bool   loading: true
     property string errorText: ""
     property var    tokenByUserId: ({})
-    // Choix du prochain login. Comme dans l’ancienne logique v3 : coché par
-    // défaut, puis appliqué uniquement au profil qui vient de s’authentifier.
-    property bool   rememberProfileOnLogin: true
+    // Opt-in pour CHAQUE nouveau login. Les sessions deja enregistrees restent
+    // disponibles ; aucun nettoyage global du coffre lors d'une mise a jour.
+    property bool   rememberProfileOnLogin: false
     property var    discoveredServersCache: []
     property string _overlaySwitchTarget: ""
     property bool   _suppressBackOnce: false
@@ -585,7 +592,8 @@ FocusScope {
         }
         function wantedSource() {
             var base = normalizedBase()
-            if (!base || hasFailed(base)) return ""
+            // Pas même une image publique vers HTTP externe avant consentement.
+            if (!base || hasFailed(base) || Jellyfin.isWanHttpBlocked(base)) return ""
             return base + "/Branding/Splashscreen"
         }
         function scheduleRefresh(reason) {
@@ -798,13 +806,14 @@ FocusScope {
         var tag = user.PrimaryImageTag || (user.ImageTags && user.ImageTags.Primary) || ""
         tokenByUserId[uid] = token
 
-        // La case du formulaire est l'autorité. Elle est cochée par défaut, mais
-        // une désactivation ne doit jamais être réécrasée par le mode confort.
+        // La case du formulaire est l'autorite : desactivee pour une nouvelle
+        // connexion, activable explicitement sans modifier les profils existants.
         var rememberToken = (rememberRequested === undefined || rememberRequested === null)
                 ? (page.rememberProfileOnLogin === true)
                 : (rememberRequested === true)
-        if (_maximumSessionSecurityEnabled() || persistentSessionTokensAllowed !== true)
-            rememberToken = false
+        if (_maximumSessionSecurityEnabled() || persistentSessionTokensAllowed !== true
+                || Jellyfin.isWanHttpUrl(serverUrl))
+            rememberToken = false // HTTP externe : session en RAM uniquement.
 
         try {
             // Synchronise le réglage global pour les anciennes versions/UI, mais
@@ -883,7 +892,7 @@ FocusScope {
         return count * profileCarouselCellWidth;
     }
     function ensureProfileCarouselFocus(){
-        if(loginOverlay.active || quickOverlay.active || serverOverlay.active) return;
+        if(httpConsentDialog.visible || loginOverlay.active || quickOverlay.active || serverOverlay.active) return;
         if(!loading && usersModel.length>0){
             if(userCarousel.currentIndex<0) userCarousel.currentIndex=0;
             userCarousel.forceActiveFocus();
@@ -891,9 +900,9 @@ FocusScope {
         }
     }
     function _setDefaultFocus(){
-        if(loginOverlay.active || quickOverlay.active || serverOverlay.active || loading) return;
+        if(httpConsentDialog.visible || loginOverlay.active || quickOverlay.active || serverOverlay.active || loading) return;
         Qt.callLater(function(){
-            if(loginOverlay.active || quickOverlay.active || serverOverlay.active || loading) return;
+            if(httpConsentDialog.visible || loginOverlay.active || quickOverlay.active || serverOverlay.active || loading) return;
             if(usersModel.length > 0) ensureProfileCarouselFocus();
             else addCard.forceActiveFocus();
         });
@@ -969,6 +978,7 @@ FocusScope {
         }
 
         try { if (Store.forgetThisDevice) Store.forgetThisDevice(); else Store.clearAll() } catch(e0) {}
+        try { if (Jellyfin.clearWanHttpConsent) Jellyfin.clearWanHttpConsent() } catch(eConsent) {}
         _requestSettingsUpdate({ clearSensitiveSettings: true })
         tokenByUserId = ({})
         localUsers = []
@@ -1031,11 +1041,26 @@ FocusScope {
             loading=false; _recomputeModel(); _setDefaultFocus(); return;
         }
         var secErr = _securityErrorForServerUrl(srv)
-        // Un nom LAN court non encore approuve peut uniquement effectuer le
-        // probe public /System/Info/Public. Aucun secret n'est envoyé ici.
-        if (secErr.length > 0 && !_isShortLanServerUrl(srv)) {
-            loading=false; errorText=secErr; serverUsers=[];
-            _recomputeModel(); _setDefaultFocus();
+        // Sans IP de destination fiable fournie par le SDK, un nom court ou
+        // .local n'est pas une preuve LAN. Demander l'accord AVANT tout flux
+        // de session, meme si le probe public Jellyfin a deja reussi.
+        if (secErr.length > 0) {
+            loading = false;
+            if (_httpConsentDeclinedUrl === srv) {
+                errorText = "Connexion HTTP annulée.";
+                serverUsers = [];
+                _recomputeModel();
+                _setDefaultFocus();
+                return;
+            }
+            _withHttpConsent(srv, function() {
+                if (srv === page.serverUrl) page.loadData();
+            }, function() {
+                errorText = "Connexion HTTP annulée.";
+                serverUsers = [];
+                _recomputeModel();
+                _setDefaultFocus();
+            });
             return;
         }
         try {
@@ -1073,7 +1098,7 @@ FocusScope {
                 },
                 function(errS){
                     if (seq !== _loadSeq || srv !== serverUrl) return;
-                    loading=false; errorText="Impossible de contacter le serveur ("+errS+").";
+                    loading=false; errorText="Impossible de contacter le serveur (" + SafeLog.safeErrorCode(errS, "network_error") + ").";
                     _recomputeModel(); _setDefaultFocus();
 
                 }
@@ -1120,6 +1145,7 @@ FocusScope {
 
     }
     onServerUrlChanged: {
+        _httpConsentDeclinedUrl = "";
         // Couvre aussi les changements injectés directement par ShellPage.
         _rotateSecurityContextForServer(serverUrl)
         _clearApiCaches();
@@ -1140,6 +1166,12 @@ FocusScope {
             hydrateFromStore();
         splashBg.scheduleRefresh("fbxChanged");
         loadData();
+    }
+
+    Components.InsecureHttpDialog {
+        id: httpConsentDialog
+        anchors.fill: parent
+        z: 30000
     }
 
     /* ================== OVERLAYS (Server / QuickConnect / Login) ================== */
@@ -1167,21 +1199,18 @@ FocusScope {
             });
             if (item.chooseServer) item.chooseServer.connect(function (s) {
                 if (s && s.url) {
-                    var secErr = page._securityErrorForServerUrl(s.url)
-                    if (secErr.length > 0 && !page._isShortLanServerUrl(s.url)) {
-                        page.errorText = secErr;
-                        page.loading = false;
-                        page._recomputeModel();
-                        page._setDefaultFocus();
-                    } else {
+                    page._withHttpConsent(s.url, function() {
                         page._clearApiCaches();
                         page._applyServerUrlFromContext(s.url);
                         page._rememberServerUrl(s.url, s);
                         page.loadData();
-                    }
+                    }, function() {
+                        page.errorText = "Connexion HTTP annulée.";
+                        page._setDefaultFocus();
+                    });
                 }
                 serverOverlay.active = false;
-                page.forceActiveFocus();
+                if (!httpConsentDialog.visible) page.forceActiveFocus();
                 Qt.callLater(page._setDefaultFocus);
             });
             if (item.removeSavedServer) item.removeSavedServer.connect(function (url) {
@@ -1209,6 +1238,12 @@ FocusScope {
     }
     function closeQuickConnect(){ quickOverlay.active=false; }
     function openQuickConnectSafe(){
+        if (Jellyfin.isWanHttpBlocked(page.serverUrl)) {
+            page._withHttpConsent(page.serverUrl,
+                function() { page.openQuickConnectSafe(); },
+                function() { page.errorText = "Connexion HTTP annulée."; });
+            return;
+        }
         if (loginOverlay.active) {
             page._swallowNextBackRelease();
             if (loginOverlay.item && loginOverlay.item.close) {
@@ -1282,7 +1317,8 @@ FocusScope {
                     },
                     function(e){
                         busy=false;
-                        err=(e==="http_404"?"QuickConnect indisponible.":("Init échouée ("+e+")."));
+                        var ec = SafeLog.safeErrorCode(e, "network_error");
+                        err = (ec === "http_404" ? "QuickConnect indisponible." : ("Init échouée (" + ec + ")."));
 
                         Qt.callLater(function(){ regenBtn.forceActiveFocus(); });
                     }
@@ -1554,12 +1590,12 @@ FocusScope {
     /* ================== OVERLAY CONNEXION ================== */
     function openLogin(){
         page._swallowNextBackRelease()
-        page.rememberProfileOnLogin = true
+        page.rememberProfileOnLogin = false
         loginOverlay.active = true
     }
     function openLoginForUser(name){
         page._swallowNextBackRelease()
-        page.rememberProfileOnLogin = true
+        page.rememberProfileOnLogin = false
         loginOverlay.active = true
         Qt.callLater(function(){
             try {
@@ -1702,8 +1738,8 @@ FocusScope {
             property bool closing: false
             property string closeTarget: ""
             readonly property int panelAnimationMs: 220
-            // Choix local au formulaire, coché par défaut. Il ne modifie pas
-            // directement les Settings Freebox : la persistance est appliquée
+            // Choix local au formulaire, decoche par defaut. Il ne modifie pas
+            // directement les Settings Freebox : la persistance est appliquee
             // seulement après une authentification réussie.
             property bool rememberChoice: page.rememberProfileOnLogin
             property bool maximumSecurityChoice: false
@@ -1711,6 +1747,7 @@ FocusScope {
 
             function refreshSecurityChoices(){
                 maximumSecurityChoice = page._maximumSessionSecurityEnabled()
+                        || Jellyfin.isWanHttpUrl(page.serverUrl)
                 if (maximumSecurityChoice) {
                     rememberChoice = false
                     page.rememberProfileOnLogin = false
@@ -1761,16 +1798,7 @@ FocusScope {
                 return _loginString(passText);
             }
             function _authErrorToString(e) {
-                if (e === undefined || e === null) return "network";
-                if (typeof e === "string") return e;
-                try {
-                    if (e.code) return String(e.code);
-                    if (e.ErrorCode) return String(e.ErrorCode);
-                    if (e.errorCode) return String(e.errorCode);
-                    if (e.Message) return "server_message";
-                    if (e.message) return "server_message";
-                } catch(ex) {}
-                return "network";
+                return SafeLog.safeErrorCode(e, "network_error");
             }
             function _authenticateManual(loginName, loginPass, ok, ko) {
                 try {
@@ -1796,7 +1824,12 @@ FocusScope {
                 if (busy) return;
                 if (!page.serverUrl) { err = "Aucun serveur."; return; }
                 var secErr = page._securityErrorForServerUrl(page.serverUrl)
-                if (secErr.length > 0) { err = secErr; return; }
+                if (secErr.length > 0) {
+                    page._withHttpConsent(page.serverUrl,
+                        function() { login.doLogin(); },
+                        function() { login.err = "Connexion HTTP annulée."; });
+                    return;
+                }
                 var loginName = _loginUserName();
                 if (!loginName) { err = "Veuillez saisir un identifiant."; return; }
                 var loginPass = _loginPasswordValue();
@@ -1895,6 +1928,18 @@ FocusScope {
                         }
                     }
 
+                    Text {
+                        text: Jellyfin.isWanHttpUrl(page.serverUrl)
+                              ? "HTTP externe : connexion non chiffrée, session temporaire uniquement."
+                              : "Connexion HTTP locale : vos identifiants circulent sans chiffrement."
+                        visible: page.serverUrl.toLowerCase().indexOf("http://") === 0
+                        textFormat: Text.PlainText
+                        color: "#FFD18A"
+                        font.pixelSize: 14
+                        width: parent.width
+                        wrapMode: Text.WordWrap
+                    }
+
                     FbxBase.Clickable {
                         id: rememberSessionToggle
                         width: 560
@@ -1933,7 +1978,9 @@ FocusScope {
                             anchors.left: parent.left
                             anchors.leftMargin: 16
                             anchors.verticalCenter: parent.verticalCenter
-                            text: "Mémoriser ce profil"
+                            text: Jellyfin.isWanHttpUrl(page.serverUrl)
+                                  ? "Mémorisation désactivée en HTTP externe"
+                                  : "Mémoriser ce profil"
                             textFormat: Text.PlainText
                             color: page.uiText
                             font.pixelSize: 17
@@ -2067,8 +2114,7 @@ FocusScope {
             }
             Component.onCompleted: Qt.callLater(function(){
                 login.panelShown = true;
-                if (!page._maximumSessionSecurityEnabled())
-                    page.rememberProfileOnLogin = true;
+                // Ne pas forcer la memorisation lors du chargement de l'overlay.
                 login.refreshSecurityChoices();
                 if (userField.item && passField.item) {
                     userField.item.downTarget = passField.item;
@@ -2123,6 +2169,21 @@ FocusScope {
                 onTriggered: parent._updateClock()
             }
         }
+    }
+    Text {
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.bottom: bottomBar.top
+        anchors.bottomMargin: 9
+        width: Math.min(parent.width - 80, 900)
+        textFormat: Text.PlainText
+        horizontalAlignment: Text.AlignHCenter
+        text: Jellyfin.isWanHttpUrl(page.serverUrl)
+              ? "HTTP externe non chiffré : vos données peuvent être interceptées. Privilégiez HTTPS."
+              : "HTTP local non chiffré : préférez HTTPS si votre serveur le permet."
+        color: "#FFD18A"
+        font.pixelSize: 15
+        elide: Text.ElideRight
+        visible: !page.loginBackdropOnly && page.serverUrl.toLowerCase().indexOf("http://") === 0
     }
     Row {
         id: bottomBar
@@ -2513,6 +2574,12 @@ FocusScope {
                     if(page._postLogoutLatch || page._okSwallowUntilRelease || tile._selecting)
                         return;
                     if(!uid) return;
+                    if (Jellyfin.isWanHttpBlocked(page.serverUrl)) {
+                        page._withHttpConsent(page.serverUrl,
+                            function() { tile.selectThis(); },
+                            function() { page.errorText = "Connexion HTTP annulée."; });
+                        return;
+                    }
 
                     var tok = page.tokenByUserId[uid] || "";
                     page.errorText = "";

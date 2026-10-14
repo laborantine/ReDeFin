@@ -22,13 +22,17 @@ Item {
     property int _pendingLatestGroup: -1
     property int _pendingLatestIndex: -1
     property var _failureMemo: ({})
+    // Identique aux dimensions demandées à Jellyfin, sans dépendance au focus.
+    readonly property int decodeBackdropW: host ? Math.max(1, Math.min(host.width || 1280, host.bgCapW)) : 1280
+    readonly property int decodeBackdropH: host ? Math.max(1, Math.min(host.height || 720, host.bgCapH)) : 720
     readonly property int failureMemoLimit: 128
+    readonly property int failureRetryMs: 60000
 
     function _rememberFailure(url) {
         if (!url) return
         var memo = _failureMemo || ({})
-        if (memo[url] === true) return
-        memo[url] = true
+        // Pas de blacklist permanente : un Jellyfin lent / un 503 peut récupérer.
+        memo[url] = Date.now() + failureRetryMs
         _failureMemo = MediaRailLayout.trimObjectMemo(memo, failureMemoLimit)
     }
 
@@ -144,15 +148,22 @@ Item {
             _clearAll()
             return
         }
-        if (_failureMemo && _failureMemo[fullUrl]) {
-            _clearAll()
+        var retryAfter = Number(_failureMemo ? _failureMemo[fullUrl] : 0) || 0
+        if (Date.now() < retryAfter) {
+            // Sur erreur en arrière-plan, garder l'ancienne image affichée.
+            if (!_visibleUrl) _clearAll()
             return
         }
         if (fullUrl === _visibleUrl || fullUrl === _loadingUrl) return
         _loadingUrl = fullUrl
         var image = _loadingImage()
         if (String(image.source || "") !== String(fullUrl || "")) image.source = fullUrl
-        else if (image.status === Image.Ready) {
+        else if (image.status === Image.Error) {
+            // Une source identique en erreur ne redémarre pas son téléchargement
+            // sans changement d'URL (cache QML désactivé pour ces deux buffers).
+            image.source = ""
+            image.source = fullUrl
+        } else if (image.status === Image.Ready) {
             if (_showB) _promoteA()
             else _promoteB()
         }
@@ -208,6 +219,7 @@ Item {
         id: bgA
         anchors.fill: parent
         fillMode: Image.PreserveAspectCrop
+        sourceSize: Qt.size(backdropLayer.decodeBackdropW, backdropLayer.decodeBackdropH)
         asynchronous: true
         cache: false
         mipmap: false
@@ -228,6 +240,7 @@ Item {
         id: bgB
         anchors.fill: parent
         fillMode: Image.PreserveAspectCrop
+        sourceSize: Qt.size(backdropLayer.decodeBackdropW, backdropLayer.decodeBackdropH)
         asynchronous: true
         cache: false
         mipmap: false

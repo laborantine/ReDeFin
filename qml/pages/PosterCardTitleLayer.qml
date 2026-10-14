@@ -129,7 +129,9 @@ Item {
     }
 
     function _requestUpdateMarquee(reason) {
-        if (_destroying) return
+        // Un delegate ListView pooled reste vivant : ne pas réarmer ses timers.
+        // La carte rappelle cette méthode au retour du pool.
+        if (_destroying || _boolProp("delegatePooled", false)) return
         marqueeUpdateTimer.restart()
     }
 

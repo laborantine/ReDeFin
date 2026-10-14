@@ -6,6 +6,9 @@ import "." as Pages
 import "../components" as Components
 import "../js/jellyfinBridge.js" as Jellyfin
 import "../js/MediaCatalog.js" as MediaCatalog
+import "../js/SeasonUtils.js" as SeasonUtils
+import "../js/MediaBrowser.js" as MediaBrowser
+import "../js/PersonCredits.js" as PersonCredits
 import "../js/MediaRailLayout.js" as MediaRailLayout
 FocusScope {
     id: personPage
@@ -125,18 +128,8 @@ FocusScope {
     property int creditsPageSize: 160
     readonly property int creditsWindowMaxItems: 480
     readonly property int creditsPrefetchThreshold: 8
-    property var _creditsBasePages: []
-    property var _creditsEpisodePages: []
-    property var _creditsBaseHandle: null
-    property var _creditsEpisodeHandle: null
-    property double _creditsBaseDeadlineAt: 0
-    property double _creditsEpisodeDeadlineAt: 0
-    property int _creditsBaseAttempt: 0
-    property int _creditsEpisodeAttempt: 0
-    property bool creditsBaseHasMoreBefore: false
-    property bool creditsBaseHasMoreAfter: false
-    property bool creditsEpisodeHasMoreBefore: false
-    property bool creditsEpisodeHasMoreAfter: false
+    // Le contrôleur possède les pages, handles et tentatives réseau.
+    property var _creditsController: null
     property bool _creditsBaseLoadingMore: false
     property bool _creditsEpisodeLoadingMore: false
 
@@ -234,8 +227,8 @@ FocusScope {
             movieId: movieId,
             seriesId: seriesId,
             episodeId: episodeId,
-            baseStart: _creditsPageStartForId("base", baseAnchorId),
-            episodeStart: _creditsPageStartForId("episodes", episodeId),
+            baseStart: _creditsController ? _creditsController.pageStartForId("base", baseAnchorId) : 0,
+            episodeStart: _creditsController ? _creditsController.pageStartForId("episodes", episodeId) : 0,
             y: rootFlick ? Math.round(rootFlick.contentY || 0) : 0,
             ts: Date.now()
         }
@@ -524,49 +517,11 @@ FocusScope {
         }
     }
 
-    property bool _creditsBaseDone: false
-    property bool _creditsEpisodesDone: false
-    function _maybeFinishCredits(){
-        if (!_creditsBaseDone) return
-        if (!_creditsEpisodesDone) return
-        creditsLoading = false
-        creditsLoaded = true
-        Qt.callLater(_restoreFocusState)
-    }
-
-    function _creditsPages(branch){ return branch === "episodes" ? (_creditsEpisodePages || []) : (_creditsBasePages || []) }
-    function _creditsHandle(branch){ return branch === "episodes" ? _creditsEpisodeHandle : _creditsBaseHandle }
-    function _creditsAttempt(branch){ return branch === "episodes" ? _creditsEpisodeAttempt : _creditsBaseAttempt }
-    function _creditsDeadline(branch){ return branch === "episodes" ? _creditsEpisodeDeadlineAt : _creditsBaseDeadlineAt }
-    function _setCreditsDeadline(branch, value){ if (branch === "episodes") _creditsEpisodeDeadlineAt = value; else _creditsBaseDeadlineAt = value }
-    function _setCreditsHandle(branch, value){ if (branch === "episodes") _creditsEpisodeHandle = value; else _creditsBaseHandle = value }
-    function _setCreditsLoadingMore(branch, value){ if (branch === "episodes") _creditsEpisodeLoadingMore = value; else _creditsBaseLoadingMore = value }
-    function _creditsWindowStart(branch){
-        return MediaCatalog.catalogPageWindowStart(_creditsPages(branch))
-    }
-    function _creditsPageStartForId(branch, id){
-        return MediaCatalog.catalogPageStartForItemId(_creditsPages(branch), id)
-    }
-    function _creditsWindowEnd(branch){
-        return MediaCatalog.catalogPageWindowEnd(_creditsPages(branch))
-    }
-    function _cancelCreditsRequest(branch){
-        var h = _creditsHandle(branch)
-        _setCreditsHandle(branch, null)
-        _setCreditsLoadingMore(branch, false)
-        if (branch === "episodes") ++_creditsEpisodeAttempt; else ++_creditsBaseAttempt
-        try { if (h && h.cancel) h.cancel("context_changed") } catch(e) {}
-    }
-    function _cancelAllCreditsRequests(){ _cancelCreditsRequest("base"); _cancelCreditsRequest("episodes") }
-    function _creditsSelectedId(list, data){
-        var idx = list ? (list.currentIndex | 0) : -1
-        return data && idx >= 0 && idx < data.length && data[idx] ? String(data[idx].Id || "") : ""
-    }
-    function _rebuildCredits(branch){
-        var oldMovieId = _creditsSelectedId(moviesList, movies)
-        var oldSeriesId = _creditsSelectedId(seriesList, series)
-        var oldEpisodeId = _creditsSelectedId(episodesList, episodes)
-        var buckets = MediaCatalog.personCreditBuckets(_creditsPages(branch))
+    function _rebuildCredits(branch, pages){
+        var oldMovieId = MediaBrowser.browserSelectedItemId(movies, moviesList ? moviesList.currentIndex : -1)
+        var oldSeriesId = MediaBrowser.browserSelectedItemId(series, seriesList ? seriesList.currentIndex : -1)
+        var oldEpisodeId = MediaBrowser.browserSelectedItemId(episodes, episodesList ? episodesList.currentIndex : -1)
+        var buckets = PersonCredits.personCreditBuckets(pages)
         // Films/séries suivent SortName côté serveur. Les épisodes conservent l'ordre historique Série/Saison/Épisode à chaque continuation (jamais au focus).
         if (branch === "episodes") episodes = buckets.episodes
         else { movies = buckets.movies; series = buckets.series }
@@ -577,124 +532,104 @@ FocusScope {
             if (ei >= 0 && episodesList) episodesList.currentIndex = ei
         })
     }
-    function _appendCreditsPage(branch, arr, start, limit, direction){
-        var state = MediaCatalog.appendCatalogPageWindow(
-                    _creditsPages(branch), arr, start, limit, direction, creditsWindowMaxItems)
-        if (branch === "episodes") {
-            _creditsEpisodePages = state.pages
-            creditsEpisodeHasMoreBefore = state.hasMoreBefore
-            creditsEpisodeHasMoreAfter = state.hasMoreAfter
-        } else {
-            _creditsBasePages = state.pages
-            creditsBaseHasMoreBefore = state.hasMoreBefore
-            creditsBaseHasMoreAfter = state.hasMoreAfter
-        }
-        _rebuildCredits(branch)
+
+    function _cancelCreditsController() {
+        if (_creditsController) _creditsController.cancel()
+        _creditsController = null
     }
-    function _creditsPageContains(arr, railKind){
-        return MediaCatalog.personCreditsPageContains(arr, railKind)
-    }
-    function _finishCreditsInitialBranch(branch){
-        if (branch === "episodes") _creditsEpisodesDone = true
-        else _creditsBaseDone = true
-        _maybeFinishCredits()
-    }
-    function _fetchPersonItemsPage(seq, branch, includeTypes, start, limit, direction, railKind, autoPages, initial){
-        if (seq !== _fetchSeq) return
-        var deadlineAt = _creditsDeadline(branch)
-        if (!deadlineAt) { deadlineAt = Date.now() + 14000; _setCreditsDeadline(branch, deadlineAt) }
-        if (Date.now() >= deadlineAt) {
-            _setCreditsLoadingMore(branch, false)
-            if (initial) _finishCreditsInitialBranch(branch)
-            return null
-        }
-        direction = direction === "backward" ? "backward" : "forward"
-        limit = Math.max(40, (limit || creditsPageSize) | 0)
-        start = Math.max(0, start | 0)
-        autoPages = Math.max(0, autoPages | 0)
-        _cancelCreditsRequest(branch)
-        var attempt = branch === "episodes" ? ++_creditsEpisodeAttempt : ++_creditsBaseAttempt
-        _setCreditsLoadingMore(branch, !initial)
-        var handle = Jellyfin.fetchPersonItemsPage(
-            serverUrl, accessToken, userId, itemId, includeTypes, start, limit, deadlineAt,
-            function(arr){
-                if (seq !== _fetchSeq || attempt !== _creditsAttempt(branch)) return
-                if (_creditsHandle(branch) === handle) _setCreditsHandle(branch, null)
-                _setCreditsLoadingMore(branch, false)
-                arr = arr || []
-                if (initial && start > 0 && arr.length === 0) {
-                    Qt.callLater(function(){ _fetchPersonItemsPage(seq, branch, includeTypes, 0, limit, "forward", "", 0, true) })
-                    return
-                }
-                _appendCreditsPage(branch, arr, start, limit, direction)
-                var full = arr.length >= limit
-                var canContinue = !_creditsPageContains(arr, railKind) && autoPages < 3 &&
-                                  ((direction === "forward" && full) || (direction === "backward" && start > 0))
-                if (canContinue) {
-                    var next = direction === "backward" ? Math.max(0, start - limit) : start + arr.length
-                    Qt.callLater(function(){ _fetchPersonItemsPage(seq, branch, includeTypes, next, limit, direction, railKind, autoPages + 1, false) })
-                    return
-                }
-                if (initial) _finishCreditsInitialBranch(branch)
-            },
-            function(err){
-                if (seq !== _fetchSeq || attempt !== _creditsAttempt(branch)) return
-                if (_creditsHandle(branch) === handle) _setCreditsHandle(branch, null)
-                _setCreditsLoadingMore(branch, false)
-                if (initial) _finishCreditsInitialBranch(branch)
-            }
-        )
-        _setCreditsHandle(branch, handle)
-        return handle
-    }
-    function _requestCreditsWindow(branch, direction, railKind){
-        if (_creditsHandle(branch)) return false
-        var pages = _creditsPages(branch)
-        if (!pages.length) return false
-        var before = branch === "episodes" ? creditsEpisodeHasMoreBefore : creditsBaseHasMoreBefore
-        var after = branch === "episodes" ? creditsEpisodeHasMoreAfter : creditsBaseHasMoreAfter
-        var limit = Math.max(40, creditsPageSize | 0), start = 0
-        if (direction === "backward") {
-            if (!before) return false
-            var first = _creditsWindowStart(branch)
-            start = Math.max(0, first - limit)
-            limit = Math.max(40, first - start)
-        } else {
-            if (!after) return false
-            start = _creditsWindowEnd(branch)
-        }
-        _setCreditsDeadline(branch, Date.now() + 14000)
-        _fetchPersonItemsPage(_fetchSeq, branch, branch === "episodes" ? "Episode" : "Movie,Series",
-                              start, limit, direction, railKind, 0, false)
-        return true
-    }
-    function _maybeRequestCreditsMore(railKind, index, count){
-        if (index < 0 || count <= 0) return
-        var branch = railKind === "episodes" ? "episodes" : "base"
-        var before = branch === "episodes" ? creditsEpisodeHasMoreBefore : creditsBaseHasMoreBefore
-        var after = branch === "episodes" ? creditsEpisodeHasMoreAfter : creditsBaseHasMoreAfter
-        if (before && index <= 1) { _requestCreditsWindow(branch, "backward", railKind); return }
-        if (after && index >= Math.max(0, count - creditsPrefetchThreshold))
-            _requestCreditsWindow(branch, "forward", railKind)
-    }
-    function fetchCredits(seq){
-        _cancelAllCreditsRequests()
+    function fetchCredits(seq) {
+        _cancelCreditsController()
         creditsLoading = true
         creditsLoaded = false
-        _creditsBaseDone = false
-        _creditsEpisodesDone = false
-        _creditsBasePages = []; _creditsEpisodePages = []
-        creditsBaseHasMoreBefore = false; creditsBaseHasMoreAfter = false
-        creditsEpisodeHasMoreBefore = false; creditsEpisodeHasMoreAfter = false
-        movies = []; series = []; episodes = []
-        var state = _readFocusState() || ({})
-        var baseStart = Math.max(0, Number(state.baseStart || 0) | 0)
-        var episodeStart = Math.max(0, Number(state.episodeStart || 0) | 0)
-        _creditsBaseDeadlineAt = Date.now() + 14000
-        _creditsEpisodeDeadlineAt = Date.now() + 14000
-        _fetchPersonItemsPage(seq, "base", "Movie,Series", baseStart, creditsPageSize, "forward", "", 0, true)
-        _fetchPersonItemsPage(seq, "episodes", "Episode", episodeStart, creditsPageSize, "forward", "", 0, true)
+        movies = []
+        series = []
+        episodes = []
+        _creditsController = PersonCredits.create({
+            isCurrent: function() { return seq === personPage._fetchSeq },
+            pageSize: function() { return personPage.creditsPageSize },
+            windowMaxItems: creditsWindowMaxItems,
+            prefetchThreshold: creditsPrefetchThreshold,
+            fetchPage: function(branch, start, limit, deadline, done, fail) {
+                return Jellyfin.fetchPersonItemsPage(
+                    personPage.serverUrl, personPage.accessToken, personPage.userId,
+                    personPage.itemId, branch === "episodes" ? "Episode" : "Movie,Series",
+                    start, limit, deadline, done, fail)
+            },
+            onPages: function(branch, pages) { personPage._rebuildCredits(branch, pages) },
+            onLoadingChanged: function(branch, loading) {
+                if (branch === "episodes") personPage._creditsEpisodeLoadingMore = loading
+                else personPage._creditsBaseLoadingMore = loading
+            },
+            onLoaded: function() {
+                personPage.creditsLoading = false
+                personPage.creditsLoaded = true
+                Qt.callLater(personPage._restoreFocusState)
+            }
+        })
+        _creditsController.load(_readFocusState())
     }
+    // Coordination visuelle commune des trois rails. Les ListView restent
+    // natives et conservent leurs dimensions, délégués et voisins D-Pad.
+    function _creditsRailItems(kind) {
+        if (kind === "movies") return movies
+        if (kind === "series") return series
+        return episodes
+    }
+    function _scheduleCreditsRailHq(list, kind) {
+        var item = MediaBrowser.browserSelectedItem(_creditsRailItems(kind), list.currentIndex)
+        _scheduleHq(kind === "episodes" ? "episode" : "media", item && item.Id ? item.Id : "")
+    }
+    function _creditsRailFocusChanged(list, kind) {
+        if (list.activeFocus) {
+            if (kind === "movies") currentFocus = focusMovies
+            else if (kind === "series") currentFocus = focusSeries
+            else currentFocus = focusEpisodes
+            _scheduleCreditsRailHq(list, kind)
+        } else {
+            _scheduleHq("", "")
+        }
+    }
+    function _creditsRailIndexChanged(list, kind) {
+        if (_creditsController) _creditsController.requestMore(kind, list.currentIndex, list.count)
+        if (list.activeFocus) {
+            _saveFocusState()
+            _scheduleCreditsRailHq(list, kind)
+        }
+    }
+    function _focusAboveCreditsRail(kind) {
+        if (kind === "episodes" && series && series.length) focusSeriesRail()
+        else if (kind !== "movies" && movies && movies.length) focusMoviesRail()
+        else focusFavoriteButton()
+    }
+    function _focusBelowCreditsRail(kind) {
+        if (kind === "movies" && series && series.length) focusSeriesRail()
+        else if (episodes && episodes.length) focusEpisodesRail()
+    }
+    function _handleCreditsRailKey(event, list, kind) {
+        if (event.key === Qt.Key_Left || event.key === Qt.Key_Right) {
+            var backward = event.key === Qt.Key_Left
+            if (backward && list.currentIndex > 0) list.currentIndex--
+            else if (!backward && list.currentIndex < list.count - 1) list.currentIndex++
+            else if (_creditsController)
+                _creditsController.requestWindow(kind === "episodes" ? "episodes" : "base",
+                    backward ? "backward" : "forward", kind)
+            event.accepted = true
+        } else if (event.key === Qt.Key_Up) {
+            _focusAboveCreditsRail(kind)
+            event.accepted = true
+        } else if (event.key === Qt.Key_Down && kind !== "episodes") {
+            _focusBelowCreditsRail(kind)
+            event.accepted = true
+        } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Select) {
+            var data = _creditsRailItems(kind)
+            if (list.currentIndex >= 0 && list.currentIndex < data.length) {
+                if (kind === "episodes") _openEpisode(data[list.currentIndex])
+                else _openMedia(data[list.currentIndex])
+            }
+            event.accepted = true
+        }
+    }
+
     function _applyPerson(p){
         person = p || null
         favorite = !!(person && person.UserData && person.UserData.IsFavorite)
@@ -721,7 +656,7 @@ FocusScope {
 
     function _schedulePersonBioRetry(seq){
         if (seq !== _fetchSeq || !itemId) return
-        if (!MediaCatalog.personMetadataNeedsRefresh(person)) {
+        if (!PersonCredits.personMetadataNeedsRefresh(person)) {
             personMetadataPending = false
             return
         }
@@ -737,7 +672,7 @@ FocusScope {
         var retryItemId = _personBioRetryItemId
         if (!seq || seq !== _fetchSeq || !retryItemId
                 || retryItemId !== String(itemId)
-                || !MediaCatalog.personMetadataNeedsRefresh(person)
+                || !PersonCredits.personMetadataNeedsRefresh(person)
                 || !serverUrl || !accessToken || !userId) {
             _finishPersonMetadataWait()
             return
@@ -751,8 +686,8 @@ FocusScope {
                     return
                 }
                 var currentPerson = person
-                var scopedMerged = MediaCatalog.mergePersonMetadata(scoped, currentPerson)
-                if (!MediaCatalog.personMetadataNeedsRefresh(scopedMerged)) {
+                var scopedMerged = PersonCredits.mergePersonMetadata(scoped, currentPerson)
+                if (!PersonCredits.personMetadataNeedsRefresh(scopedMerged)) {
                     _finishPersonMetadataWait()
                     _applyPerson(scopedMerged)
                     return
@@ -765,11 +700,11 @@ FocusScope {
                             return
                         }
                         var previous = person
-                        var merged = MediaCatalog.mergePersonMetadata(rich, scoped || previous)
+                        var merged = PersonCredits.mergePersonMetadata(rich, scoped || previous)
                         _finishPersonMetadataWait()
-                        if ((MediaCatalog.personOverviewPresent(merged) && !MediaCatalog.personOverviewPresent(previous))
-                                || (MediaCatalog.personBirthDatePresent(merged) && !MediaCatalog.personBirthDatePresent(previous))
-                                || !MediaCatalog.personMetadataNeedsRefresh(merged))
+                        if ((PersonCredits.personOverviewPresent(merged) && !PersonCredits.personOverviewPresent(previous))
+                                || (PersonCredits.personBirthDatePresent(merged) && !PersonCredits.personBirthDatePresent(previous))
+                                || !PersonCredits.personMetadataNeedsRefresh(merged))
                             _applyPerson(merged)
                     },
                     function(){
@@ -789,11 +724,11 @@ FocusScope {
                             return
                         }
                         var previous = person
-                        var merged = MediaCatalog.mergePersonMetadata(rich, previous)
+                        var merged = PersonCredits.mergePersonMetadata(rich, previous)
                         _finishPersonMetadataWait()
-                        if ((MediaCatalog.personOverviewPresent(merged) && !MediaCatalog.personOverviewPresent(previous))
-                                || (MediaCatalog.personBirthDatePresent(merged) && !MediaCatalog.personBirthDatePresent(previous))
-                                || !MediaCatalog.personMetadataNeedsRefresh(merged))
+                        if ((PersonCredits.personOverviewPresent(merged) && !PersonCredits.personOverviewPresent(previous))
+                                || (PersonCredits.personBirthDatePresent(merged) && !PersonCredits.personBirthDatePresent(previous))
+                                || !PersonCredits.personMetadataNeedsRefresh(merged))
                             _applyPerson(merged)
                     },
                     function(){
@@ -818,7 +753,7 @@ FocusScope {
                 function(p){
                     if (seq !== _fetchSeq) return
                     // Jellyfin peut renvoyer au premier accès un DTO user-scoped partiel : Overview peut être présent sans PremiereDate, ou l'inverse. La fiche n'est considérée complète que lorsque bio ET date de naissance sont disponibles.
-                    if (!MediaCatalog.personMetadataNeedsRefresh(p)) {
+                    if (!PersonCredits.personMetadataNeedsRefresh(p)) {
                         personMetadataPending = false
                         _applyPerson(p)
                         return
@@ -827,8 +762,8 @@ FocusScope {
                     Jellyfin.fetchPerson(serverUrl, accessToken, itemId,
                         function(p2){
                             if (seq !== _fetchSeq) return
-                            var merged = MediaCatalog.mergePersonMetadata(p2, p)
-                            var needsRetry = MediaCatalog.personMetadataNeedsRefresh(merged)
+                            var merged = PersonCredits.mergePersonMetadata(p2, p)
+                            var needsRetry = PersonCredits.personMetadataNeedsRefresh(merged)
                             if (needsRetry) {
                                 // person n'est pas encore affecté à merged : activer explicitement l'attente avant apply.
                                 personMetadataPending = true
@@ -840,7 +775,7 @@ FocusScope {
                         function(){
                             if (seq !== _fetchSeq) return
                             // Le DTO initial reste exploitable si l'enrichissement échoue. Le retry différé donnera une dernière chance au serveur sans bloquer l'affichage de PersonPage.
-                            var needsRetry = MediaCatalog.personMetadataNeedsRefresh(p)
+                            var needsRetry = PersonCredits.personMetadataNeedsRefresh(p)
                             if (needsRetry)
                                 personMetadataPending = true
                             _applyPerson(p)
@@ -854,7 +789,7 @@ FocusScope {
                     Jellyfin.fetchPerson(serverUrl, accessToken, itemId,
                         function(p2){
                             if (seq !== _fetchSeq) return
-                            var needsRetry = MediaCatalog.personMetadataNeedsRefresh(p2)
+                            var needsRetry = PersonCredits.personMetadataNeedsRefresh(p2)
                             if (needsRetry)
                                 personMetadataPending = true
                             _applyPerson(p2)
@@ -874,7 +809,7 @@ FocusScope {
             Jellyfin.fetchPerson(serverUrl, accessToken, itemId,
                 function(p){
                     if (seq !== _fetchSeq) return
-                    var needsRetry = MediaCatalog.personMetadataNeedsRefresh(p)
+                    var needsRetry = PersonCredits.personMetadataNeedsRefresh(p)
                     if (needsRetry)
                         personMetadataPending = true
                     _applyPerson(p)
@@ -1576,45 +1511,9 @@ FocusScope {
                     }
                     header: Item { width: railEdgePad; height: 1 }
                     footer: Item { width: railEdgePad; height: 1 }
-                    Keys.onPressed: {
-                        if (event.key === Qt.Key_Left) {
-                            if (currentIndex > 0) currentIndex--
-                            else personPage._requestCreditsWindow("base", "backward", "movies")
-                            event.accepted = true
-                        } else if (event.key === Qt.Key_Right) {
-                            if (currentIndex < count - 1) currentIndex++
-                            else personPage._requestCreditsWindow("base", "forward", "movies")
-                            event.accepted = true
-                        } else if (event.key === Qt.Key_Up) {
-                            personPage.focusFavoriteButton()
-                            event.accepted = true
-                        } else if (event.key === Qt.Key_Down) {
-                            if (series && series.length) personPage.focusSeriesRail()
-                            else if (episodes && episodes.length) personPage.focusEpisodesRail()
-                            event.accepted = true
-                        } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Select) {
-                            if (currentIndex >= 0 && currentIndex < movies.length)
-                                personPage._openMedia(movies[currentIndex])
-                            event.accepted = true
-                        }
-                    }
-                    onActiveFocusChanged: {
-                        if (activeFocus) {
-                            personPage.currentFocus = personPage.focusMovies
-                            var it = (movies && currentIndex >= 0 && currentIndex < movies.length) ? movies[currentIndex] : null
-                            personPage._scheduleHq("media", it && it.Id ? it.Id : "")
-                        } else {
-                            personPage._scheduleHq("", "")
-                        }
-                    }
-                    onCurrentIndexChanged: {
-                        personPage._maybeRequestCreditsMore("movies", currentIndex, count)
-                        if (activeFocus) {
-                            personPage._saveFocusState()
-                            var it = (movies && currentIndex >= 0 && currentIndex < movies.length) ? movies[currentIndex] : null
-                            personPage._scheduleHq("media", it && it.Id ? it.Id : "")
-                        }
-                    }
+                    Keys.onPressed: personPage._handleCreditsRailKey(event, moviesList, "movies")
+                    onActiveFocusChanged: personPage._creditsRailFocusChanged(moviesList, "movies")
+                    onCurrentIndexChanged: personPage._creditsRailIndexChanged(moviesList, "movies")
                     delegate: mediaCardDelegate
                 }
             }
@@ -1667,45 +1566,9 @@ FocusScope {
                     }
                     header: Item { width: railEdgePad; height: 1 }
                     footer: Item { width: railEdgePad; height: 1 }
-                    Keys.onPressed: {
-                        if (event.key === Qt.Key_Left) {
-                            if (currentIndex > 0) currentIndex--
-                            else personPage._requestCreditsWindow("base", "backward", "series")
-                            event.accepted = true
-                        } else if (event.key === Qt.Key_Right) {
-                            if (currentIndex < count - 1) currentIndex++
-                            else personPage._requestCreditsWindow("base", "forward", "series")
-                            event.accepted = true
-                        } else if (event.key === Qt.Key_Up) {
-                            if (movies && movies.length) personPage.focusMoviesRail()
-                            else personPage.focusFavoriteButton()
-                            event.accepted = true
-                        } else if (event.key === Qt.Key_Down) {
-                            if (episodes && episodes.length) personPage.focusEpisodesRail()
-                            event.accepted = true
-                        } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Select) {
-                            if (currentIndex >= 0 && currentIndex < series.length)
-                                personPage._openMedia(series[currentIndex])
-                            event.accepted = true
-                        }
-                    }
-                    onActiveFocusChanged: {
-                        if (activeFocus) {
-                            personPage.currentFocus = personPage.focusSeries
-                            var it = (series && currentIndex >= 0 && currentIndex < series.length) ? series[currentIndex] : null
-                            personPage._scheduleHq("media", it && it.Id ? it.Id : "")
-                        } else {
-                            personPage._scheduleHq("", "")
-                        }
-                    }
-                    onCurrentIndexChanged: {
-                        personPage._maybeRequestCreditsMore("series", currentIndex, count)
-                        if (activeFocus) {
-                            personPage._saveFocusState()
-                            var it = (series && currentIndex >= 0 && currentIndex < series.length) ? series[currentIndex] : null
-                            personPage._scheduleHq("media", it && it.Id ? it.Id : "")
-                        }
-                    }
+                    Keys.onPressed: personPage._handleCreditsRailKey(event, seriesList, "series")
+                    onActiveFocusChanged: personPage._creditsRailFocusChanged(seriesList, "series")
+                    onCurrentIndexChanged: personPage._creditsRailIndexChanged(seriesList, "series")
                     delegate: mediaCardDelegate
                 }
             }
@@ -1758,43 +1621,9 @@ FocusScope {
                     }
                     header: Item { width: episodeEdgePad; height: 1 }
                     footer: Item { width: episodeEdgePad; height: 1 }
-                    Keys.onPressed: {
-                        if (event.key === Qt.Key_Left) {
-                            if (currentIndex > 0) currentIndex--
-                            else personPage._requestCreditsWindow("episodes", "backward", "episodes")
-                            event.accepted = true
-                        } else if (event.key === Qt.Key_Right) {
-                            if (currentIndex < count - 1) currentIndex++
-                            else personPage._requestCreditsWindow("episodes", "forward", "episodes")
-                            event.accepted = true
-                        } else if (event.key === Qt.Key_Up) {
-                            if (series && series.length) personPage.focusSeriesRail()
-                            else if (movies && movies.length) personPage.focusMoviesRail()
-                            else personPage.focusFavoriteButton()
-                            event.accepted = true
-                        } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Select) {
-                            if (currentIndex >= 0 && currentIndex < episodes.length)
-                                personPage._openEpisode(episodes[currentIndex])
-                            event.accepted = true
-                        }
-                    }
-                    onActiveFocusChanged: {
-                        if (activeFocus) {
-                            personPage.currentFocus = personPage.focusEpisodes
-                            var it = (episodes && currentIndex >= 0 && currentIndex < episodes.length) ? episodes[currentIndex] : null
-                            personPage._scheduleHq("episode", it && it.Id ? it.Id : "")
-                        } else {
-                            personPage._scheduleHq("", "")
-                        }
-                    }
-                    onCurrentIndexChanged: {
-                        personPage._maybeRequestCreditsMore("episodes", currentIndex, count)
-                        if (activeFocus) {
-                            personPage._saveFocusState()
-                            var it = (episodes && currentIndex >= 0 && currentIndex < episodes.length) ? episodes[currentIndex] : null
-                            personPage._scheduleHq("episode", it && it.Id ? it.Id : "")
-                        }
-                    }
+                    Keys.onPressed: personPage._handleCreditsRailKey(event, episodesList, "episodes")
+                    onActiveFocusChanged: personPage._creditsRailFocusChanged(episodesList, "episodes")
+                    onCurrentIndexChanged: personPage._creditsRailIndexChanged(episodesList, "episodes")
                     delegate: Item {
                         id: episodeCard
                         width: episodeCardW
@@ -2006,7 +1835,7 @@ FocusScope {
                             Text {
                                 id: episodeTitleText
                                 textFormat: Text.PlainText
-                                text: MediaCatalog.episodeDisplayTitle(modelData)
+                                text: SeasonUtils.episodeDisplayTitle(modelData)
                                 x: 0
                                 y: Math.round((episodeTitleClip.height - height) / 2) - 1
                                 color: episodeTitleClip.focusHot ? "#FFFFFF" : "#E0E3EC"
@@ -2152,7 +1981,7 @@ FocusScope {
                                 Text {
                                     id: episodeMetaText
                                     textFormat: Text.PlainText
-                                    text: MediaCatalog.personEpisodeMeta(modelData)
+                                    text: PersonCredits.personEpisodeMeta(modelData)
                                     x: 0
                                     y: Math.round((episodeMetaSource.height - height) / 2) - 1
                                     color: episodeMetaClip.focusHot ? "#C9D0E3" : "#9EA7BC"
@@ -2949,7 +2778,7 @@ FocusScope {
         _cancelPersonBioRetry()
         _cancelHudFocusPending()
         ++_fetchSeq
-        _cancelAllCreditsRequests()
+        _cancelCreditsController()
     }
 
     Keys.onPressed: {

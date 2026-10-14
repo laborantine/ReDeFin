@@ -1055,7 +1055,20 @@ FocusScope {
     readonly property int reqPosterH: Math.round(posterH * posterOS)
     readonly property int reqPosterHqW: Math.round(posterW * posterHqOS)
     readonly property int reqPosterHqH: Math.round(posterH * posterHqOS)
+    // Logo dans la fiche : image chargée à sa taille réelle (~207x297),
+    // avec la même marge de décodage que les autres visuels du poster.
+    readonly property int reqPosterLogoW: Math.max(64, Math.round(posterW * 0.90 * posterOS))
+    readonly property int reqPosterLogoH: Math.max(64, Math.round(posterH * 0.90 * posterOS))
     property string movieLogoUrl: {
+        if (!hasItem || isMusicVideo) return ""
+        var tag = item.ImageTags && item.ImageTags.Logo ? String(item.ImageTags.Logo) : ""
+        return tag ? Jellyfin.itemImageUrl(serverUrl, item.Id, "Logo", tag, {
+            maxWidth: reqPosterLogoW, maxHeight: reqPosterLogoH, quality: 85, format: "png"
+        }) : ""
+    }
+    // Utilisée uniquement à l'ouverture de l'agrandissement, jamais par le
+    // poster de la fiche. Aucune requête HQ n'est émise avant cet affichage.
+    function _movieLogoOverlayUrl() {
         if (!hasItem || isMusicVideo) return ""
         var tag = item.ImageTags && item.ImageTags.Logo ? String(item.ImageTags.Logo) : ""
         return tag ? Jellyfin.itemImageUrl(serverUrl, item.Id, "Logo", tag, {
@@ -2751,13 +2764,18 @@ FocusScope {
         if (movieCoverUrl && movieCoverUrl.length) return movieCoverUrl
         return movieLogoUrl
     }
+    function _enlargedPosterUrl(){
+        if (movieLogoUrl && !posterLogoFailed && posterLogo.status === Image.Ready) return _movieLogoOverlayUrl()
+        if (movieCoverUrl && movieCoverUrl.length) return movieCoverUrl
+        return _movieLogoOverlayUrl()
+    }
     function openOverlay(mode, payload){
         if (!hasItem) return
         lastFocusBeforeOverlay = currentFocus
         overlayMode = mode
         overlayData = payload || ({})
     }
-    function openPosterOverlay(){ openOverlay("poster", { posterUrl: _currentArtUrl() }) }
+    function openPosterOverlay(){ openOverlay("poster", { posterUrl: _enlargedPosterUrl() }) }
     function _overviewReaderImageUrl(){
         return item ? MediaCatalog.backdropOrPrimaryUrl(Jellyfin, serverUrl, item, { fillWidth:720, fillHeight:405, quality:88, format:"jpg" }) : ""
     }

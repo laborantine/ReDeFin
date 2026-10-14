@@ -42,6 +42,9 @@ FocusScope {
     property string imagePolicy: "standard"
     property bool homeDelegateMode: false
     property var homeLoader: null
+    // Les loaders ListView recyclés restent vivants : suspendre leurs animations,
+    // sans jamais effacer les textures (sinon flicker au retour du scroll).
+    property bool delegatePooled: false
 
     property bool useImageSourceOverride: false
     property string imageSourceOverride: ""
@@ -109,6 +112,9 @@ FocusScope {
         return fallback
     }
 
+            // Le focus et les propriétés purement visuelles sont synchronisés directement.
+            // Seuls les changements d'identité, d'URL ou de dimensions nécessitent
+            // la transaction de résolution de source d'image.
             // Transaction légère : les propriétés du Loader Home arrivent en grappe.
             // La résolution d'URL ne doit voir que l'état final, jamais les tailles intermédiaires.
             property bool _homeSyncing: false
@@ -128,6 +134,7 @@ FocusScope {
                     sidePad = h.cardSidePad || 0
                     topPad = h.cardTopPad || 0
                     selected = h.cardSelected === true
+                    delegatePooled = h.cardPooled === true
                     showProgress = h.cardShowProgress === true
                     preferBackdrop = h.cardPreferBackdrop === true
                     musicFallback = h.cardMusicFallback === true
@@ -143,36 +150,52 @@ FocusScope {
 
                 homeSyncCommitted()
             }
+            property bool _homeSyncQueued: false
+            function _queueHomeLoaderSync() {
+                if (_homeSyncQueued) return
+                _homeSyncQueued = true
+                Qt.callLater(function() {
+                    // Loader détruit/recyclé avant le tour suivant : rien à synchroniser.
+                    if (!cardRoot._alive) return
+                    cardRoot._homeSyncQueued = false
+                    if (cardRoot.homeLoader) cardRoot._syncHomeLoader()
+                })
+            }
             onHomeLoaderChanged: _syncHomeLoader()
             Connections {
                 target: cardRoot.homeLoader
                 ignoreUnknownSignals: true
                 function onCardControllerChanged() { cardRoot._syncHomeLoader() }
                 function onCardDataChanged() { cardRoot._syncHomeLoader() }
-                function onCardTileWChanged() { cardRoot._syncHomeLoader() }
-                function onCardTileHChanged() { cardRoot._syncHomeLoader() }
-                function onCardTitleHChanged() { cardRoot._syncHomeLoader() }
-                function onCardSidePadChanged() { cardRoot._syncHomeLoader() }
-                function onCardTopPadChanged() { cardRoot._syncHomeLoader() }
-                function onCardSelectedChanged() { cardRoot._syncHomeLoader() }
-                function onCardShowProgressChanged() { cardRoot._syncHomeLoader() }
-                function onCardPreferBackdropChanged() { cardRoot._syncHomeLoader() }
-                function onCardMusicFallbackChanged() { cardRoot._syncHomeLoader() }
-                function onCardAllowLoadChanged() { cardRoot._syncHomeLoader() }
+                function onCardTileWChanged() { cardRoot._queueHomeLoaderSync() }
+                function onCardTileHChanged() { cardRoot._queueHomeLoaderSync() }
+                function onCardTitleHChanged() { cardRoot._queueHomeLoaderSync() }
+                function onCardSidePadChanged() { cardRoot._queueHomeLoaderSync() }
+                function onCardTopPadChanged() { cardRoot._queueHomeLoaderSync() }
+                function onCardSelectedChanged() { var h = cardRoot.homeLoader; if (h) cardRoot.selected = h.cardSelected === true }
+                function onCardPooledChanged() { var h = cardRoot.homeLoader; if (h) cardRoot.delegatePooled = h.cardPooled === true }
+                function onCardShowProgressChanged() { var h = cardRoot.homeLoader; if (h) cardRoot.showProgress = h.cardShowProgress === true }
+                function onCardPreferBackdropChanged() { cardRoot._queueHomeLoaderSync() }
+                function onCardMusicFallbackChanged() { var h = cardRoot.homeLoader; if (h) cardRoot.musicFallback = h.cardMusicFallback === true }
+                function onCardAllowLoadChanged() {
+                    var h = cardRoot.homeLoader
+                    if (!h || h.cardAllowLoad !== true) cardRoot._syncHomeLoader() // libérer les textures immédiatement
+                    else cardRoot._queueHomeLoaderSync()
+                }
                 function onCardImagePolicyChanged() { cardRoot._syncHomeLoader() }
-                function onCardFallbackKindChanged() { cardRoot._syncHomeLoader() }
-                function onCardEnableMouseInputChanged() { cardRoot._syncHomeLoader() }
-                function onCardSuppressFocusTransformChanged() { cardRoot._syncHomeLoader() }
+                function onCardFallbackKindChanged() { var h = cardRoot.homeLoader; if (h) cardRoot.fallbackKind = h.cardFallbackKind || "" }
+                function onCardEnableMouseInputChanged() { var h = cardRoot.homeLoader; if (h) cardRoot.enableMouseInput = h.cardEnableMouseInput !== false }
+                function onCardSuppressFocusTransformChanged() { var h = cardRoot.homeLoader; if (h) cardRoot.suppressFocusTransform = h.cardSuppressFocusTransform === true }
             }
 
             // Image.source conserve l’URL complète nécessaire au rendu. Les états internes
             // ne recopient jamais cette URL dans des journaux ou caches de diagnostic.
 
-            readonly property bool allowAnims: useAllowAnimsOverride ? allowAnimsOverride : cardRoot._boolProp(controller, "allowAnims", cardRoot._boolProp(controller, "allowFocusAnims", false))
-            readonly property bool allowDecos: useAllowDecosOverride ? allowDecosOverride : cardRoot._boolProp(controller, "allowDecos", allowAnims)
-            readonly property bool allowMarquee: useAllowMarqueeOverride
+            readonly property bool allowAnims: !delegatePooled && (useAllowAnimsOverride ? allowAnimsOverride : cardRoot._boolProp(controller, "allowAnims", cardRoot._boolProp(controller, "allowFocusAnims", false)))
+            readonly property bool allowDecos: !delegatePooled && (useAllowDecosOverride ? allowDecosOverride : cardRoot._boolProp(controller, "allowDecos", allowAnims))
+            readonly property bool allowMarquee: !delegatePooled && (useAllowMarqueeOverride
                                                  ? allowMarqueeOverride
-                                                 : (controller ? cardRoot._boolProp(controller, "allowMarquee", false) : false)
+                                                 : (controller ? cardRoot._boolProp(controller, "allowMarquee", false) : false))
             readonly property int focusLiftPx: focusLiftPxOverride >= 0
                                                ? focusLiftPxOverride
                                                : Math.round(cardRoot._numProp(controller, "focusLiftPx", 6))
@@ -188,11 +211,20 @@ FocusScope {
             readonly property real posterScaleValue: cardRoot._numProp(controller, "posterScale", 1.35)
             readonly property int hqPosterQualityValue: Math.round(cardRoot._numProp(controller, "hqPosterQuality", 92))
             readonly property real hqPosterScaleValue: cardRoot._numProp(controller, "hqPosterScale", 1.60)
+            // Même enveloppe que la requête Jellyfin ; stable lors du focus et du scroll.
+            readonly property int decodeBaseW: Math.max(1, Math.round(Math.min(imageRequestWidth > 0 ? imageRequestWidth : tileWidth,
+                                                        cardRoot._numProp(controller, "bgCapW", 1280)) * posterScaleValue))
+            readonly property int decodeBaseH: Math.max(1, Math.round(Math.min(imageRequestHeight > 0 ? imageRequestHeight : tileHeight,
+                                                        cardRoot._numProp(controller, "bgCapH", 720)) * posterScaleValue))
+            readonly property int decodeHqW: Math.max(1, Math.round(Math.min(imageRequestWidth > 0 ? imageRequestWidth : tileWidth,
+                                                      cardRoot._numProp(controller, "bgCapW", 1280)) * hqPosterScaleValue))
+            readonly property int decodeHqH: Math.max(1, Math.round(Math.min(imageRequestHeight > 0 ? imageRequestHeight : tileHeight,
+                                                      cardRoot._numProp(controller, "bgCapH", 720)) * hqPosterScaleValue))
             readonly property string hqPosterTargetIdValue: { try { return controller && controller.hqPosterTargetId ? String(controller.hqPosterTargetId) : "" } catch(e) { return "" } }
             readonly property bool hqPosterActive: !!(allowLoad && selected && modelData && modelData.Id && hqPosterTargetIdValue.length && String(modelData.Id) === hqPosterTargetIdValue)
             readonly property bool marqueeFocusActive: selected && allowMarquee && allowAnims && allowLoad
             function _focusVisualActive() {
-                return selected && !suppressFocusTransform
+                return !delegatePooled && selected && !suppressFocusTransform
             }
 
             function _typeOf(item) { return item ? String(item.Type || "").toLowerCase() : "" }
@@ -660,9 +692,12 @@ FocusScope {
                 function _syncStableSource() {
                     try {
                         var key = cardRoot._cardIdentityKey(cardRoot.modelData)
-                        if (key !== _stableKey) {
+                        var identityChanged = key !== _stableKey
+                        if (identityChanged) {
                             _stableKey = key
-                            _stableSource = ""
+                            // Ne pas publier une source vide avant l'URL suivante :
+                            // deux changements de source dans le même tour peuvent
+                            // vider la texture d'une carte encore visible.
                             _requestKey = ""
                             _stableImageId = ""
                             _stableImageType = ""
@@ -692,7 +727,9 @@ FocusScope {
                                 _requestKey = _stableKey
                                 _imgError = false
                             }
-                        } else if (!cardRoot.allowLoad || !_hasPotentialImg) {
+                        } else if (!cardRoot.allowLoad || !_hasPotentialImg || identityChanged) {
+                            // Sur un nouvel item sans URL : ne JAMAIS garder l'image
+                            // du delegate précédent ; sinon identité/source divergent.
                             // Un simple gel du binding conserverait encore la texture et
                             // sa requête. Vider réellement source libère le décodage/cache
                             // QML lorsque Home passe sous Search ou qu'un rail est éloigné.
@@ -752,6 +789,7 @@ FocusScope {
             id: posterImg
             anchors.fill: parent
             fillMode: visual._stablePreserveAspectFit ? Image.PreserveAspectFit : Image.PreserveAspectCrop
+            sourceSize: Qt.size(visual.decodeBaseW, visual.decodeBaseH)
             asynchronous: true
             cache: cardRoot.imageCache
             // Freebox: le cache reste désactivé par défaut sur une card recyclée.
@@ -820,6 +858,7 @@ FocusScope {
                 Image {
                     anchors.fill: parent
                     fillMode: visual._stablePreserveAspectFit ? Image.PreserveAspectFit : Image.PreserveAspectCrop
+                    sourceSize: Qt.size(visual.decodeHqW, visual.decodeHqH)
                     asynchronous: true
                     cache: false
                     mipmap: false
@@ -1076,6 +1115,22 @@ FocusScope {
                     visual.scale = cardRoot._focusVisualActive() ? (cardRoot.zoomScale - 0.02) : 1.0
                 }
             }
+            onDelegatePooledChanged: {
+                if (delegatePooled) {
+                    scaleIn.stop()
+                    scaleOut.stop()
+                    visual.scale = 1.0
+                }
+                var titleLayer = titleLayerLoader.item
+                if (titleLayer) {
+                    if (delegatePooled && titleLayer._resetMarqueeState)
+                        titleLayer._resetMarqueeState()
+                    else if (!delegatePooled && titleLayer._requestUpdateMarquee)
+                        titleLayer._requestUpdateMarquee()
+                }
+                if (!delegatePooled)
+                    visual.scale = cardRoot._focusVisualActive() ? (cardRoot.zoomScale - 0.02) : 1.0
+            }
             onSuppressFocusTransformChanged: {
                 scaleIn.stop()
                 scaleOut.stop()
@@ -1083,6 +1138,7 @@ FocusScope {
                     visual.scale = cardRoot._focusVisualActive() ? (cardRoot.zoomScale - 0.02) : 1.0
                     return
                 }
+                if (cardRoot.delegatePooled) return
                 if (cardRoot._focusVisualActive()) scaleIn.start()
                 else scaleOut.start()
             }
