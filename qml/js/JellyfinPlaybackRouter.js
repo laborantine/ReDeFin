@@ -10,6 +10,7 @@
 .import "JellyfinPlaybackDevialet.js" as JFDevialet
 .import "clientId.js" as ClientId
 .import "AudioOutputPolicy.js" as AudioOutput
+.import "SafeLog.js" as SafeLog
 var _MODE_AUTO       = "auto"
 var _MODE_CORE       = "core"
 var _MODE_REVOLUTION = "revolution"
@@ -26,17 +27,21 @@ function _s(v) {
 }
 
 function negotiationErrorCode(err) {
-    var code = ""
+    var raw = "";
     try {
-        if (typeof err === "string") code = err
-        else if (err && err.code !== undefined) code = String(err.code)
-        else if (err && err.message !== undefined) code = String(err.message)
-    } catch(e0) {}
-    code = String(code || "network_error").toLowerCase().replace(/^error[:\s]*/i, "")
-    if (code.indexOf("insecure_transport") >= 0) return "insecure_transport"
-    if (code.indexOf("invalid_playback_url") >= 0) return "invalid_playback_url"
-    if (code.indexOf("core_url_unavailable") >= 0) return "core_url_unavailable"
-    return code || "network_error"
+        if (typeof err === "string") raw = err;
+        else if (err && err.code !== undefined && err.code !== null) raw = String(err.code);
+        else if (err && err.message !== undefined && err.message !== null) raw = String(err.message);
+    } catch (e0) {}
+    var code = _s(raw).toLowerCase().replace(/^error[:\s]*/i, "").trim();
+    // Ces codes pilotent le lecteur et ne sont pas des erreurs réseau libres.
+    if (code === "insecure_transport" || code === "invalid_playback_url" ||
+            code === "core_url_unavailable")
+        return code;
+    // Préserver les codes HTTP/timeout/format connus, jamais les chaînes libres.
+    var safeCode = SafeLog.safeErrorCode(code, "network_error");
+    return safeCode !== "network_error" ? safeCode
+                                 : SafeLog.safeErrorCode(err, "network_error");
 }
 
 function replaceQueryParameter(url, key, value) {

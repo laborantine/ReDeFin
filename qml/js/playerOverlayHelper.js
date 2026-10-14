@@ -2,7 +2,9 @@
 .import "JellyfinPlaybackRouter.js" as PlaybackRouter
 .import "PlayerSession.js" as PlayerSession
 
-// ReDeFin subtitle routing: local text subtitles only on pure DirectPlay; remux/DirectStream/transcode/HLS use server-managed subtitles.
+// Sous-titres : overlay texte local en DirectPlay pur ; exception MOV_TEXT/TX3G choisie
+// explicitement, possible aussi en Remux/HLS selon JellyfinPlaybackCore.
+// Les autres pistes suivent le chemin sous-titres géré par le serveur.
 /* playerOverlayHelper.js — interaction et présentation du lecteur.
  * Télécommande / focus, logo et HUD, puis raccord négociation -> interface.
  * PlayerSession possède le cycle média, le seek et la récupération.
@@ -902,6 +904,10 @@ function negotiateAndApply(root, mp, router, subtitleItem, timers, startMs, forc
     if (!stickyManualDirectPlay && !stickyManualRemux) TrackSelection.applyStickyManualQuality(root, ctx);
     ctx.playbackRuleMode = root.playbackRuleMode || "smart";
     ctx.audioOutputMode = root.audioOutputMode || "multichannel";
+    // T15 : une erreur du MKV progressif interdit un nouvel essai pendant
+    // cette lecture. Un changement de piste ne doit pas annuler le fallback HLS.
+    if (ctx.audioOutputMode === "stereo" && root._devialetStereoProgressiveFailed === true)
+        ctx.preferStereoAudioOnlyHls = true;
     ctx.playbackRouterMode = root.playbackDeviceMode || "";
     ctx.playbackRouterBackend = root.playbackBackendMode || "";
 
@@ -960,6 +966,8 @@ function negotiateAndApply(root, mp, router, subtitleItem, timers, startMs, forc
         root.lastUsedTranscoding = res.lastUsedTranscoding === true;
         root.lastUsedDirectStream = res.lastUsedDirectStream === true;
         root.lastUsedServerRemux = res.lastUsedServerRemux === true;
+        root._devialetStereoHlsLocalResume = res.devialetStereoHlsNeedsLocalSeek === true;
+        root._devialetStereoProgressiveDownmix = res.devialetStereoProgressiveDownmix === true;
         root.serverTimedStream = res.serverTimedStream === true;
         root.timeShifted = res.timeShifted === true;
         root.currentPlaybackVideoTranscodeByPolicy = res.policyTranscode === true ||
@@ -993,6 +1001,8 @@ function negotiateAndApply(root, mp, router, subtitleItem, timers, startMs, forc
         if (forcedSeekOnPureStaticDp) localSeek = forcedLocalSeek;
         root._pendingSeekMs = localSeek > 0 ? root._clampUi(localSeek) : -1;
         root._pendingServerTimedBaseMs = root.serverTimedStream ? streamBase : -1;
+        // T14 : seul un vrai URL serverTimed releve du reset dur.
+        // La reprise Devialet via seek local reste hors de ce chemin.
         var hardReset = !!(root.serverTimedStream && streamBase >= 0 &&
             (extra.staticDirectPlayFallbackOwner === true ||
                 (extra.trackSwitchRebase === true && extra.trackSwitchColdLocalSeek !== true)));
@@ -1072,4 +1082,31 @@ function negotiateAndApply(root, mp, router, subtitleItem, timers, startMs, forc
         fail(e5);
     }
     return true;
+}
+
+// Injection identique lors du chargement de TopBar et de ses mises à jour différées.
+// Le Loader est passé explicitement : son id n’est pas une propriété de root.
+function syncTopBarContext(root, loader, initializeProfile) {
+    var item = loader.item;
+    item.baseUrl = (root.serverUrl || "").replace(/\/$/, "");
+    item.fbx = root.fbx;
+    item.serverUrl = root.serverUrl;
+    item.userId = root.userId;
+    if (initializeProfile === true) {
+        item.userName = Qt.binding(function() { return root.userName; });
+        item.userImageTag = Qt.binding(function() { return root.userImageTag; });
+        // Un nouveau média ne doit pas réutiliser le logo de l’ancien.
+        item.stickyLogo = false;
+    }
+    item.showClock = Qt.binding(function() { return root.topbarShowClock; });
+    // Même position que les fiches ; GIF seulement si le chrome est visible.
+    item.clockHudActive = Qt.binding(function() {
+        return root.uiChromeOpacity > 0.08 && loader.visible;
+    });
+    if (item.hasOwnProperty("safeMarginRight"))
+        item.safeMarginRight = Qt.binding(function() { return Math.max(28, root.tvSafeMargin); });
+    if (item.hasOwnProperty("safeMarginLeft"))
+        item.safeMarginLeft = Qt.binding(function() { return Math.max(28, root.tvSafeMargin); });
+    if (item.hasOwnProperty("safeMarginTop"))
+        item.safeMarginTop = Qt.binding(function() { return Math.max(28, root.tvSafeMargin); });
 }

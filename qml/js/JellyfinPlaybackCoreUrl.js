@@ -1,9 +1,10 @@
 .pragma library
 .import "jellyfinBridge.js" as JellyfinBridge
 .import "SafeLog.js" as SafeLog
+.import "JellyfinStreamRules.js" as StreamRules
 // Module URL/transport statiquement importé par JellyfinPlaybackCore.js.
-// Aucune Qt.include() asynchrone : les dépendances de politique sont injectées
-// une seule fois par le Core afin de préserver le premier démarrage Freebox.
+// Seules les deux opérations de politique matérielle sont injectées par le Core.
+// Les métadonnées et les pistes viennent directement de JellyfinStreamRules.
 var _deps = {}
 function configure(deps) { _deps = deps || {}; return true }
 function setFbx(fbxCtx) {
@@ -14,23 +15,9 @@ function setFbx(fbxCtx) {
     } catch(e0) {}
 }
 function _dep(name) { return _deps && typeof _deps[name] === "function" ? _deps[name] : null }
-function _s(v) { var f = _dep("s"); return f ? f(v) : ((v === undefined || v === null) ? "" : (v + "")) }
+function _s(v) { return (v === undefined || v === null) ? "" : (v + "") }
 function _policyBuildDeviceProfile(mode) { var f = _dep("policyBuildDeviceProfile"); return f ? f(mode) : null }
 function _policyPreferredContainer(ctx, src) { var f = _dep("policyPreferredContainer"); return f ? f(ctx, src) : null }
-function _firstStream(src, type) { var f = _dep("firstStream"); return f ? f(src, type) : null }
-function _subtitleStreamByIndex(src, index) { var f = _dep("subtitleStreamByIndex"); return f ? f(src, index) : null }
-function _isType(st, name) { var f = _dep("isType"); return f ? f(st, name) : false }
-function _isTextSubtitleCodec(codec) { var f = _dep("isTextSubtitleCodec"); return f ? f(codec) : false }
-function _isDvdSubtitleCodec(codec) { var f = _dep("isDvdSubtitleCodec"); return f ? f(codec) : false }
-function _isSafeFrenchForcedSubtitle(st, src) { var f = _dep("isSafeFrenchForcedSubtitle"); return f ? f(st, src) : false }
-function _isSafeFrenchForcedTextSubtitle(st) { var f = _dep("isSafeFrenchForcedTextSubtitle"); return f ? f(st) : false }
-function _isLegacyTitleOnlyFrenchForcedTextSubtitle(st) { var f = _dep("isLegacyTitleOnlyFrenchForcedTextSubtitle"); return f ? f(st) : false }
-function _isIgnorableTrailingForeignForcedSubtitle(src, st) { var f = _dep("isIgnorableTrailingForeignForcedSubtitle"); return f ? f(src, st) : false }
-function _scoreFrenchAudioStream(st) { var f = _dep("scoreFrenchAudioStream"); return f ? f(st) : -9999 }
-function _exactAudioCodecHint(codec) { var f = _dep("exactAudioCodecHint"); return f ? f(codec) : null }
-function _containerOrExt(src) { var f = _dep("containerOrExt"); return f ? f(src) : "" }
-function _isTransportStreamContainer(container, path) { var f = _dep("isTransportStreamContainer"); return f ? f(container, path) : false }
-function _hasInterlacedH264Video(streams) { var f = _dep("hasInterlacedH264Video"); return f ? f(streams) : false }
 
 // JellyfinPlaybackCoreUrl.js
 // Helpers URL, transport et profil extraits de JellyfinPlaybackCore.js.
@@ -362,7 +349,7 @@ function _decidePreferredContainerWithSrc(ctx, src) {
     try {
         var path = (src && src.Path) ? src.Path : ""
         var ext  = _extFrom(path)
-        var v    = _firstStream(src, "Video")
+        var v    = StreamRules.firstStream(src, "Video")
         var vCdc = v ? _s(v.Codec).toLowerCase() : ""
         if (ext === "webm" || vCdc === "vp8" || vCdc === "vp9") return "webm"
         if (wanted) return wanted
@@ -386,7 +373,7 @@ function _buildRemuxProgressiveUrl(ctx, src, mediaSourceId, playSessionId, effec
         subtitleStreamIndex: selectedSub,
         subtitleMethod: selectedSub !== null ? subMethodWanted : null,
         mediaSourceId: mediaSourceId,
-        container: forcedContainer || _decidePreferredContainerWithSrc(ctx, src) || _containerOrExt(src) || "mkv",
+        container: forcedContainer || _decidePreferredContainerWithSrc(ctx, src) || StreamRules.containerOrExt(src) || "mkv",
         playSessionId: playSessionId || "",
         startTimeTicks: ticks,
         audioCodec: remuxAudioCodecLock || null,
@@ -691,7 +678,8 @@ function _hostFromUrlForValidation(url) {
 function _isWanHttpUrl(url) {
     var s = _s(url).trim();
     if (s.toLowerCase().indexOf("http://") !== 0) return false;
-    return !_secIsLanHost(s);
+    // Helper de BLOCAGE seulement ; la connexion reste HTTP non chiffre.
+    return !_secIsLanHost(s) && !JellyfinBridge.hasWanHttpConsent(s);
 }
 
 // normalizeServerUrlStrict
@@ -717,8 +705,7 @@ function _transportValidateServerUrlStrict(url, allowWanHttp) {
 
 // Les URL média Jellyfin sont nettement plus longues qu'une URL serveur :
 // api_key, PlaySessionId, MediaSourceId, codecs, pistes et options HLS/remux.
-// Elles gardent toutefois des contraintes plus fortes : URL absolue, même
-// origine que le serveur validé et aucun secret en HTTP WAN.
+// Toujours contrôler l'origine, et HTTP WAN seulement si explicitement accepté.
 function _secPlaybackOrigin(url) {
     var s = _s(url).trim()
     if (!s || s.length > 8192 || /[\r\n\t]/.test(s)) return null
@@ -782,9 +769,9 @@ function _transportValidatePlaybackUrlStrict(url, expectedServerUrl) {
     if (!mediaOrigin || !serverOrigin) { reason="origin-parse"; return false }
     if (mediaOrigin.scheme !== serverOrigin.scheme || mediaOrigin.host !== serverOrigin.host || mediaOrigin.port !== serverOrigin.port) { reason="origin-mismatch"; return false }
 
-    // HTTPS est toujours accepté après contrôle d'origine. HTTP n'est admis
-    // que pour un hôte LAN réellement validé, y compris sur une URL longue.
-    if (mediaOrigin.scheme === "http" && !_secIsLanHost("http://" + _hostFromUrlForValidation(s))) { reason="http-non-lan"; return false }
+    // HTTPS reste privilégié ; HTTP WAN requiert le consentement de CETTE origine.
+    if (mediaOrigin.scheme === "http" && !_secIsLanHost("http://" + _hostFromUrlForValidation(s))
+            && !JellyfinBridge.hasWanHttpConsent(s)) { reason="http-unapproved"; return false }
     if (_isWanHttpUrl(s)) { reason="wan-http"; return false }
 
     return true
@@ -792,8 +779,8 @@ function _transportValidatePlaybackUrlStrict(url, expectedServerUrl) {
 
 // _normalizeBase
 function _normalizeBase(url) {
-    // Playback toujours authentifié : HTTPS sur WAN, HTTP uniquement sur LAN.
-    // Aucun appelant ne peut réactiver HTTP WAN via un flag de compatibilité.
+    // Playback toujours authentifié : HTTPS/LAN ou HTTP WAN approuvé en RAM.
+    // Le flag legacy ne permet pas de contourner le consentement.
     return _transportNormalizeServerUrlStrict(url, false)
 }
 
@@ -883,243 +870,13 @@ function _sendRequest(method, url, headers, body, onSuccess, onError) {
 
 // fetchStreams
 function _transportFetchStreams(serverUrl, accessToken, itemId, onSuccess, onError) {
-
     var url = _u(serverUrl, "/Items/" + encodeURIComponent(itemId))
-
-    _sendRequest("get", url, _headersWithToken(accessToken), null, function (res) {
-        var j = _jsonNormalize(res.json) || {}
-        var streams = j.MediaStreams || []
-        var aLabels = []
-        var aMap = []
-        var aCodecMap = []
-        var aChannelMap = []
-        var aBitrateMap = []
-        var sLabels = []
-        var sMap = [-1]
-        var sIsText = [false]
-        // Aligné sur sMap : l'entrée 0 représente « Aucun ». Conserver le codec
-        // exact permet au Player de distinguer MOV_TEXT/TX3G des autres textes et
-        // de sélectionner leur affichage par l’overlay QML sans remux MP4.
-        var sCodecMap = [""]
-        var defaultAudioStreamIndex = -1
-        var defaultSubtitleStreamIndex = -1
-        var firstAudioStreamIndex = -1
-        var firstSubtitleStreamIndex = -1
-        var forcedAudioStreamIndex = -1
-        var forcedSubtitleStreamIndex = -1
-        var bestFrenchAudioStreamIndex = -1
-        var bestFrenchAudioScore = -9999
-        var frenchAudioScoreByIndex = {}
-        var strictFrenchForcedDefaultTextSubtitleStreamIndex = -1
-        var strictFrenchForcedDefaultSubtitleStreamIndex = -1
-        var legacyFrenchForcedTextSubtitleStreamIndex = -1
-        var legacyFrenchForcedTextSubtitleCandidateCount = 0
-        var firstInternalSubtitleStreamIndex = -1
-        var hasAnyPriorityInternalSubtitle = false
-        var defaultForcedInternalSubtitlesAreSafeFrenchForced = true
-        var hasPriorityInternalSubtitleRisk = false
-        var hasImplicitFirstInternalSubtitleRisk = false
-        var hasInternalDvdSubtitle = false
-        var safeFrenchForcedDvdSubtitleStreamIndex = -1
-        var requiresInterlacedTsTranscode = false
-        var hasDvdNavPacket = false
-        for (var i = 0; i < streams.length; i++) {
-            var st = streams[i]
-            if (_s(st && st.Codec).toLowerCase() === "dvd_nav_packet")
-                hasDvdNavPacket = true
-            if (_isType(st, "Audio")) {
-                var audioIdx = (typeof st.Index === "number") ? st.Index : i
-                if (firstAudioStreamIndex < 0)
-                    firstAudioStreamIndex = audioIdx
-                if (forcedAudioStreamIndex < 0 && st.IsForced === true)
-                    forcedAudioStreamIndex = audioIdx
-                if (defaultAudioStreamIndex < 0 && st.IsDefault === true)
-                    defaultAudioStreamIndex = audioIdx
-                var frenchScore = _scoreFrenchAudioStream(st)
-                frenchAudioScoreByIndex[String(audioIdx)] = frenchScore
-                if (frenchScore > bestFrenchAudioScore) {
-                    bestFrenchAudioScore = frenchScore
-                    bestFrenchAudioStreamIndex = audioIdx
-                }
-                var lbl = (st.DisplayTitle && st.DisplayTitle.length > 0)
-                        ? st.DisplayTitle
-                        : ((st.Language ? st.Language : "Audio") + (st.Channels ? (" (" + st.Channels + "ch)") : ""))
-                aLabels.push(lbl)
-                aMap.push(audioIdx)
-                aCodecMap.push(_exactAudioCodecHint(st.Codec) || "")
-                aChannelMap.push((typeof st.Channels === "number" && isFinite(st.Channels))
-                                 ? Math.max(0, Math.floor(st.Channels)) : 0)
-                aBitrateMap.push((typeof st.BitRate === "number" && isFinite(st.BitRate) && st.BitRate > 0)
-                                 ? Math.floor(st.BitRate) : 0)
-            } else if (_isType(st, "Subtitle")) {
-                var subIdx = (typeof st.Index === "number") ? st.Index : i
-                if (firstSubtitleStreamIndex < 0)
-                    firstSubtitleStreamIndex = subIdx
-                if (forcedSubtitleStreamIndex < 0 && st.IsForced === true)
-                    forcedSubtitleStreamIndex = subIdx
-                if (defaultSubtitleStreamIndex < 0 && st.IsDefault === true)
-                    defaultSubtitleStreamIndex = subIdx
-                var lab = (st.DisplayTitle && st.DisplayTitle.length > 0)
-                        ? st.DisplayTitle
-                        : (st.Language ? st.Language : "Sous-titres")
-                sLabels.push(lab)
-                sMap.push(subIdx)
-                var codec = _s(st.Codec).toLowerCase()
-                var codecTag = _s(st.CodecTag).toLowerCase()
-                var normalizedSubtitleCodec = (codec === "tx3g" || codecTag === "tx3g") ? "mov_text" : codec
-                sCodecMap.push(normalizedSubtitleCodec)
-                var textish = (st.IsTextSubtitleStream === true) || _isTextSubtitleCodec(codec)
-                sIsText.push(!!textish)
-
-                if (st.IsExternal !== true && _isDvdSubtitleCodec(codec)) {
-                    hasInternalDvdSubtitle = true
-                    if (safeFrenchForcedDvdSubtitleStreamIndex < 0 && _isSafeFrenchForcedSubtitle(st, j))
-                        safeFrenchForcedDvdSubtitleStreamIndex = subIdx
-                }
-
-                // QtMultimedia peut sélectionner la première piste de sous-titres
-                // physiquement interne même si Matroska ne lui donne aucun drapeau.
-                // On mémorise donc la première piste INTERNE séparément des entrées
-                // externes, qui restent toujours dormantes tant qu'elles ne sont pas choisies.
-                if (st.IsExternal !== true && firstInternalSubtitleStreamIndex < 0)
-                    firstInternalSubtitleStreamIndex = subIdx
-
-                // Le DirectPlay automatique est autorisé lorsque toutes les pistes
-                // internes prioritaires sont françaises et réellement forcées. Pour une
-                // piste image, IsForced=true est obligatoire : le titre seul ne suffit pas.
-                // On garde séparément le meilleur candidat texte pour l'overlay/remux.
-                if (st.IsExternal !== true && (st.IsDefault === true || st.IsForced === true)) {
-                    hasAnyPriorityInternalSubtitle = true
-                    if (_isSafeFrenchForcedSubtitle(st, j)) {
-                        if (strictFrenchForcedDefaultSubtitleStreamIndex < 0)
-                            strictFrenchForcedDefaultSubtitleStreamIndex = subIdx
-                        if (_isSafeFrenchForcedTextSubtitle(st) &&
-                            strictFrenchForcedDefaultTextSubtitleStreamIndex < 0)
-                            strictFrenchForcedDefaultTextSubtitleStreamIndex = subIdx
-                    } else if (!_isIgnorableTrailingForeignForcedSubtitle(j, st)) {
-                        // Une piste étrangère uniquement Forced, non Default et placée
-                        // après des ancrages français forcés sûrs ne peut pas gagner la
-                        // sélection native : elle ne doit pas annuler le DirectPlay.
-                        defaultForcedInternalSubtitlesAreSafeFrenchForced = false
-                        hasPriorityInternalSubtitleRisk = true
-                    }
-                } else if (_isLegacyTitleOnlyFrenchForcedTextSubtitle(st)) {
-                    legacyFrenchForcedTextSubtitleCandidateCount++
-                    if (legacyFrenchForcedTextSubtitleStreamIndex < 0)
-                        legacyFrenchForcedTextSubtitleStreamIndex = subIdx
-                }
-            }
-        }
-        requiresInterlacedTsTranscode = !!(
-            _isTransportStreamContainer(j.Container, j.Path) &&
-            _hasInterlacedH264Video(streams)
-        )
-        var videoType = (typeof j.VideoType === "number") ? j.VideoType : parseInt(_s(j.VideoType), 10)
-        var sourcePathLower = _s(j.Path).toLowerCase()
-        var sourceNameLower = _s(j.Name).toLowerCase()
-        var isDvdSource = !!(videoType === 1 || videoType === 2 || hasDvdNavPacket ||
-            sourcePathLower.indexOf("video_ts") >= 0 || /\.iso$/.test(sourcePathLower) ||
-            sourceNameLower.indexOf("/dvd") >= 0 || sourceNameLower.indexOf("video_ts") >= 0)
-
-        if (defaultAudioStreamIndex < 0 && forcedAudioStreamIndex >= 0)
-            defaultAudioStreamIndex = forcedAudioStreamIndex
-        if (defaultAudioStreamIndex < 0)
-            defaultAudioStreamIndex = firstAudioStreamIndex
-        if (defaultSubtitleStreamIndex < 0 && forcedSubtitleStreamIndex >= 0)
-            defaultSubtitleStreamIndex = forcedSubtitleStreamIndex
-        if (defaultSubtitleStreamIndex < 0)
-            defaultSubtitleStreamIndex = firstSubtitleStreamIndex
-        if (bestFrenchAudioScore < 80)
-            bestFrenchAudioStreamIndex = -1
-
-        // Décision précoce transmise au PlayerOverlay : si la meilleure piste
-        // française (VFF/VFI prioritaire) n'est pas la première piste physique,
-        // le démarrage doit passer par le serveur afin d'épingler son index.
-        var preferredFrenchAudioNeedsServerSelection = !!(
-            bestFrenchAudioStreamIndex >= 0 &&
-            firstAudioStreamIndex >= 0 &&
-            bestFrenchAudioStreamIndex !== firstAudioStreamIndex
-        )
-
-        // Important : Jellyfin peut ne marquer aucune piste audio IsDefault.
-        // Dans ce cas la sélection ci-dessus retombe naturellement sur la première
-        // piste. On juge donc la piste effectivement sélectionnée, pas uniquement
-        // le drapeau IsDefault. Cela couvre le cas d'une unique piste DTS française.
-        var effectiveDefaultAudioFrench = false
-        if (defaultAudioStreamIndex >= 0) {
-            var effectiveFrenchScore = frenchAudioScoreByIndex[String(defaultAudioStreamIndex)]
-            effectiveDefaultAudioFrench = (typeof effectiveFrenchScore === "number" && effectiveFrenchScore >= 80)
-        }
-        // Le secours « titre uniquement » n'est accepté que s'il existe un seul
-        // candidat texte français forcé. Cette unicité évite d'activer au hasard
-        // une piste mal balisée parmi plusieurs variantes anciennes.
-        if (legacyFrenchForcedTextSubtitleCandidateCount !== 1)
-            legacyFrenchForcedTextSubtitleStreamIndex = -1
-
-        // Sans aucun drapeau Default/Forced, QtMultimedia 5.15 peut activer la
-        // première piste interne physique. Cela a été observé avec une piste FR
-        // « Complet » : le fichier semblait sans piste prioritaire côté Jellyfin,
-        // mais le DirectPlay affichait malgré tout les sous-titres complets.
-        //
-        // On force donc un remux no-sub si une première piste interne existe et
-        // qu'aucune priorité Matroska ne permet de prévoir le choix du lecteur.
-        // Seule exception : l'unique ancien SRT « FR Forced » déjà reconnu, qui
-        // reste pris en charge en DirectPlay via SubtitleOverlay.
-        if (!hasAnyPriorityInternalSubtitle && firstInternalSubtitleStreamIndex >= 0) {
-            var uniqueLegacyForcedIsFirst =
-                    legacyFrenchForcedTextSubtitleStreamIndex >= 0 &&
-                    legacyFrenchForcedTextSubtitleStreamIndex === firstInternalSubtitleStreamIndex
-            hasImplicitFirstInternalSubtitleRisk = !uniqueLegacyForcedIsFirst
-        }
-
-        // Même si le SRT français forcé est correctement balisé, Qt peut ouvrir
-        // la première piste interne physique. Si le Forced sûr est situé après une
-        // piste complète, le démarrage doit obligatoirement passer par Jellyfin.
-        var preferredFrenchForcedSubtitleNeedsServerSelection = !!(
-            strictFrenchForcedDefaultTextSubtitleStreamIndex >= 0 &&
-            firstInternalSubtitleStreamIndex >= 0 &&
-            strictFrenchForcedDefaultTextSubtitleStreamIndex !== firstInternalSubtitleStreamIndex
-        )
-
-        var strictFrenchAutoDirectPlayEligible = !!(
-            effectiveDefaultAudioFrench &&
-            defaultForcedInternalSubtitlesAreSafeFrenchForced &&
-            !preferredFrenchForcedSubtitleNeedsServerSelection &&
-            (strictFrenchForcedDefaultSubtitleStreamIndex >= 0 ||
-             legacyFrenchForcedTextSubtitleStreamIndex >= 0)
-        )
-
-        onSuccess && onSuccess({
-            runtimeTicks: j.RunTimeTicks || 0,
-            chapters: j.Chapters !== undefined ? j.Chapters : null,
-            audioLabels: aLabels,
-            subtitleLabels: sLabels,
-            audioMap: aMap,
-            audioCodecMap: aCodecMap,
-            audioChannelMap: aChannelMap,
-            audioBitrateMap: aBitrateMap,
-            subtitleMap: sMap,
-            subtitleIsText: sIsText,
-            subtitleCodecMap: sCodecMap,
-            defaultAudioStreamIndex: defaultAudioStreamIndex,
-            defaultSubtitleStreamIndex: defaultSubtitleStreamIndex,
-            firstAudioStreamIndex: firstAudioStreamIndex,
-            bestFrenchAudioStreamIndex: bestFrenchAudioStreamIndex,
-            preferredFrenchAudioNeedsServerSelection: preferredFrenchAudioNeedsServerSelection,
-            firstInternalSubtitleStreamIndex: firstInternalSubtitleStreamIndex,
-            preferredFrenchForcedSubtitleNeedsServerSelection: preferredFrenchForcedSubtitleNeedsServerSelection,
-            strictFrenchForcedDefaultTextSubtitleStreamIndex: strictFrenchForcedDefaultTextSubtitleStreamIndex,
-            strictFrenchForcedDefaultSubtitleStreamIndex: strictFrenchForcedDefaultSubtitleStreamIndex,
-            legacyFrenchForcedTextSubtitleStreamIndex: legacyFrenchForcedTextSubtitleStreamIndex,
-            strictFrenchAutoDirectPlayEligible: strictFrenchAutoDirectPlayEligible,
-            hasPriorityInternalSubtitleRisk: hasPriorityInternalSubtitleRisk,
-            hasImplicitFirstInternalSubtitleRisk: hasImplicitFirstInternalSubtitleRisk,
-            hasInternalDvdSubtitle: hasInternalDvdSubtitle,
-            safeFrenchForcedDvdSubtitleStreamIndex: safeFrenchForcedDvdSubtitleStreamIndex,
-            isDvdSource: isDvdSource,
-            requiresInterlacedTsTranscode: requiresInterlacedTsTranscode
+    _sendRequest("get", url, _headersWithToken(accessToken), null,
+        function(res) {
+            var item = _jsonNormalize(res.json) || {}
+            if (onSuccess) onSuccess(StreamRules.describeStreams(item))
+        },
+        function(err) {
+            if (onError) onError(err && err.code || "network_error")
         })
-    }, function (err) {
-        onError && onError(err && err.code || "network_error")
-    })
 }

@@ -353,6 +353,41 @@ function _parseRawHeaders(raw) {
     }
     return out;
 }
+// Contrôle defensif de l'origine finale des appels authentifies.
+// IMPORTANT : pour un XHR qui suit une 302 en natif, ce controle a lieu apres
+// le suivi. Le SDK Freebox ne documente pas ici de politique redirect configurable.
+// La preuve qu'aucun header ne part vers une autre origine demande donc un
+// test reseau Reel sur chaque firmware (voir SECURITE_PUBLICATION.md).
+function _authHeaderPresent(headers) {
+    if (!headers || typeof headers !== "object") return false;
+    for (var name in headers) {
+        if (!Object.prototype.hasOwnProperty.call(headers, name)) continue;
+        var key = _s(name).toLowerCase();
+        if (key === "authorization" || key === "x-emby-token" ||
+            key === "x-mediabrowser-token" || key === "x-emby-authorization" ||
+            key === "cookie" || key === "x-api-key") return true;
+    }
+    return false;
+}
+function _secureOrigin(url) {
+    var s = _s(url).trim();
+    // Pas de userinfo, ni schema non HTTP, ni hostname/port ambigus.
+    var m = /^(https?):\/\/(\[[0-9a-fA-F:.%]+\]|[a-zA-Z0-9._-]+)(?::([0-9]{1,5}))?(?=[\/?#]|$)/i.exec(s);
+    if (!m || s.substr(0, m[0].length).indexOf("@") >= 0) return "";
+    var scheme = m[1].toLowerCase();
+    var host = m[2].toLowerCase();
+    var port = m[3] ? Number(m[3]) : (scheme === "https" ? 443 : 80);
+    if (!isFinite(port) || port < 1 || port > 65535) return "";
+    return scheme + "://" + host + ":" + port;
+}
+function isSafeAuthenticatedResponseOrigin(requestUrl, finalUrl, headers) {
+    // Quand le backend natif n'expose pas d'URL finale, la preuve n'est pas
+    // disponible. Le bridge controle deja chaque redirection 3xx explicite.
+    if (!_authHeaderPresent(headers) || !finalUrl) return true;
+    var from = _secureOrigin(requestUrl);
+    var to = _secureOrigin(finalUrl);
+    return !!(from && to && from === to);
+}
 function _xhrSend(method, url, headers, body, onSuccess, onError, timeoutMs) {
     var xhr = null; var op = null;
     try {
@@ -378,6 +413,14 @@ function _xhrSend(method, url, headers, body, onSuccess, onError, timeoutMs) {
                     ? XMLHttpRequest.DONE
                     : 4;
                 if (xhr.readyState !== DONE) return;
+                // Refuser une reponse provenant d'une autre origine AVANT de
+                // manipuler ses headers/corps, sans jamais logger responseURL.
+                var finalUrl = "";
+                try { finalUrl = _s(xhr.responseURL || ""); } catch(eFinal) {}
+                if (!isSafeAuthenticatedResponseOrigin(url, finalUrl, headers)) {
+                    op.fail({ code: "redirect_refused", message: "redirect_refused" });
+                    return;
+                }
                 var status = xhr.status || 0; var rawTxt = (typeof xhr.responseText === "string") ? xhr.responseText : ""; var raw = (xhr.getAllResponseHeaders && xhr.getAllResponseHeaders()) || ""; var headersObj = _parseRawHeaders(raw);
                 if ((status | 0) === 0 && !rawTxt) {
                     op.fail({ code: "network_error", message: "network_error" });
@@ -426,6 +469,14 @@ function _xhrSend(method, url, headers, body, onSuccess, onError, timeoutMs) {
 function _bindNativeReply(op, promise, method, url, headers) {
     promise.then(function (response) {
         if (!op.isActive()) return;
+        var finalUrl = "";
+        // Certaines versions du backend exposent l'URL de reponse ; d'autres
+        // non. Ne jamais inventer cette information ni la journaliser.
+        try { finalUrl = _s(response.responseURL || response.url || ""); } catch(eFinal) {}
+        if (!isSafeAuthenticatedResponseOrigin(url, finalUrl, headers)) {
+            op.fail({ code: "redirect_refused", message: "redirect_refused" });
+            return;
+        }
         var status = response.status || 0;
         var rawText = response.responseText || response.body || "";
         var safe = _makeSafeHttpSuccessPayload(

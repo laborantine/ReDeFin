@@ -448,3 +448,103 @@ function windowCache_buildEntry(nowMs, windowStartIndex, nextStart, hasMore, has
     };
 }
 
+
+
+// Fenêtres de pages et caches de navigation bornés : cycle de vie du navigateur.
+
+function homeCacheEntryValid(entry, schemaVersion, freshMs, now) {
+    return !!entry && entry.schemaVersion === schemaVersion && !!entry.ts
+        && (now - Number(entry.ts || 0)) <= freshMs;
+}
+
+function touchHomeCache(store, key, schemaVersion, freshMs, now) {
+    var entry = store ? store[key] : null;
+    if (!homeCacheEntryValid(entry, schemaVersion, freshMs, now)) {
+        try { if (entry) delete store[key]; } catch (e) {}
+        return null;
+    }
+    entry.lastAccess = now;
+    return entry;
+}
+
+function trimHomeCacheStore(store, keepKey, schemaVersion, freshMs, maxEntries, now) {
+    if (!store) return;
+    var entries = [];
+    for (var key in store) {
+        try {
+            if (!Object.prototype.hasOwnProperty.call(store, key)) continue;
+            var entry = store[key];
+            if (!homeCacheEntryValid(entry, schemaVersion, freshMs, now)) {
+                delete store[key];
+                continue;
+            }
+            entries.push({ key:key, touch:Number(entry.lastAccess || entry.ts || 0) });
+        } catch (e) {}
+    }
+    entries.sort(function(a, b) { return a.touch - b.touch; });
+    while (entries.length > maxEntries) {
+        var victim = entries.shift();
+        if (!victim) break;
+        if (victim.key === keepKey && entries.length > 0) {
+            entries.push(victim);
+            continue;
+        }
+        try { delete store[victim.key]; } catch (e2) {}
+    }
+}
+
+function catalogPageWindowStart(pages) {
+    pages = MediaCatalog.safeArray(pages);
+    return pages.length ? Math.max(0, pages[0].start | 0) : 0;
+}
+
+function catalogPageWindowEnd(pages) {
+    pages = MediaCatalog.safeArray(pages);
+    if (!pages.length) return 0;
+    var last = pages[pages.length - 1] || ({});
+    return Math.max(0, (last.start | 0) + MediaCatalog.safeArray(last.items).length);
+}
+
+function catalogPageStartForItemId(pages, id) {
+    pages = MediaCatalog.safeArray(pages);
+    id = MediaCatalog.safeString(id);
+    for (var pageIndex = 0; id && pageIndex < pages.length; ++pageIndex) {
+        var page = pages[pageIndex] || ({}), items = MediaCatalog.safeArray(page.items);
+        if (MediaCatalog.findItemIndexById(items, id) >= 0) return Math.max(0, page.start | 0);
+    }
+    return catalogPageWindowStart(pages);
+}
+
+function appendCatalogPageWindow(pages, items, start, limit, direction, maxItems) {
+    pages = MediaCatalog.safeArray(pages).slice(0);
+    items = MediaCatalog.safeArray(items);
+    var replaced = false;
+    for (var i = 0; i < pages.length; ++i) {
+        if ((pages[i].start | 0) !== (start | 0)) continue;
+        pages[i] = { start:start, limit:limit, items:items, full:items.length >= limit };
+        replaced = true;
+        break;
+    }
+    if (!replaced && items.length)
+        pages.push({ start:start, limit:limit, items:items, full:items.length >= limit });
+    pages.sort(function(a, b) { return Number(a.start || 0) - Number(b.start || 0); });
+    var rawCount = function() {
+        var count = 0;
+        for (var pageIndex = 0; pageIndex < pages.length; ++pageIndex)
+            count += MediaCatalog.safeArray(pages[pageIndex] && pages[pageIndex].items).length;
+        return count;
+    };
+    while (pages.length > 1 && rawCount() > Number(maxItems || 0)) {
+        if (direction === "backward") pages.pop();
+        else pages.shift();
+    }
+    if (!items.length && pages.length) {
+        if (direction === "backward") pages[0].start = 0;
+        else pages[pages.length - 1].full = false;
+    }
+    return {
+        pages: pages,
+        hasMoreBefore: pages.length > 0 && Number(pages[0].start || 0) > 0,
+        hasMoreAfter: pages.length > 0 && pages[pages.length - 1].full === true
+    };
+}

@@ -191,13 +191,3 @@ function plan(mode, audioStream) {
 }
 
 /** Résumé compact d'un plan audio. */
-function describe(p) {
-    if (!p) return "audio-plan=none";
-    return "mode=" + p.mode +
-           " srcCh=" + p.sourceChannels +
-           " downmix=" + (p.downmix ? "1" : "0") +
-           " codec=" + (p.codec || "-") +
-           " ch=" + (p.channels || 0) +
-           " br=" + (p.bitrate || 0) +
-           " maxCh=" + (p.maxChannels || 0);
-}

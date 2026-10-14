@@ -38,7 +38,9 @@ var MAX_PREFS_JSON_LEN = 32768;                 // garde-fou prefs par utilisate
 // sous forme obfusquée. L'implémentation Freebox peut journaliser la valeur du
 // Setting, mais jamais le token Jellyfin brut. Le mode sécurité maximale purge ce coffre.
 var PUBLIC_BUILD_ALLOW_SESSION_VAULT = true;
-var DEFAULT_REMEMBER_TOKEN = true;
+// Opt-in pour les nouvelles connexions seulement. Les profils deja memorises
+// conservent leur choix explicite (champ remember du store existant).
+var DEFAULT_REMEMBER_TOKEN = false;
 var MAX_VAULT_JSON_LEN = 131072;
 
 // Cache de session RAM, utilisé en priorité pendant le processus courant.
@@ -330,23 +332,23 @@ function _legacyVaultDeviceScopeCandidates() {
     return out;
 }
 
-function _vaultXorKeyV3(serverUrl, userId, nonce) {
+function _vaultXorKeyV3(serverUrl, userId, nonce, storedUrlExact) {
     var scope = _vaultStableDeviceScope();
     if (!scope) return "";
 
     return "ReDeFinSessionVaultV3:"
         + scope
-        + ":" + SafeLog.shortHash(_normalizeUrl(serverUrl))
+        + ":" + SafeLog.shortHash(storedUrlExact ? String(serverUrl || "") : _normalizeUrl(serverUrl))
         + ":" + SafeLog.shortHash(String(userId || ""))
         + ":" + String(nonce || "");
 }
 
-function _vaultXorKeyV2WithScope(serverUrl, userId, nonce, legacyScope) {
+function _vaultXorKeyV2WithScope(serverUrl, userId, nonce, legacyScope, storedUrlExact) {
     if (!legacyScope) return "";
 
     return "ReDeFinSessionVaultV2:"
         + legacyScope
-        + ":" + SafeLog.shortHash(_normalizeUrl(serverUrl))
+        + ":" + SafeLog.shortHash(storedUrlExact ? String(serverUrl || "") : _normalizeUrl(serverUrl))
         + ":" + SafeLog.shortHash(String(userId || ""))
         + ":" + String(nonce || "");
 }
@@ -411,23 +413,23 @@ function _vaultEncodeToken(serverUrl, userId, token) {
     return _vaultEncodeWithKey("v3:" + nonce, key, src);
 }
 
-function _vaultDecodeToken(serverUrl, userId, encoded) {
+function _vaultDecodeToken(serverUrl, userId, encoded, storedUrlExact) {
     var raw = String(encoded || "");
     var m = /^v3:([0-9a-f]{8}):([0-9a-f]{8}):([0-9a-f]+)$/i.exec(raw);
     if (!m) return "";
 
-    var key = _vaultXorKeyV3(serverUrl, userId, m[1]);
+    var key = _vaultXorKeyV3(serverUrl, userId, m[1], storedUrlExact === true);
     return _vaultDecodeWithKey(m[2], m[3], key);
 }
 
-function _vaultDecodeLegacyV2Token(serverUrl, userId, encoded) {
+function _vaultDecodeLegacyV2Token(serverUrl, userId, encoded, storedUrlExact) {
     var raw = String(encoded || "");
     var m = /^v2:([0-9a-f]{8}):([0-9a-f]{8}):([0-9a-f]+)$/i.exec(raw);
     if (!m) return "";
 
     var scopes = _legacyVaultDeviceScopeCandidates();
     for (var i = 0; i < scopes.length; i++) {
-        var key = _vaultXorKeyV2WithScope(serverUrl, userId, m[1], scopes[i]);
+        var key = _vaultXorKeyV2WithScope(serverUrl, userId, m[1], scopes[i], storedUrlExact === true);
         var token = _vaultDecodeWithKey(m[2], m[3], key);
         if (token) return token;
     }
@@ -468,7 +470,88 @@ function _writeVaultMap(map) {
     return false;
 }
 
+// Migration de casse des anciennes URLs (T17).
+// IMPORTANT : l'ancien coffre V3 derivait son index et sa cle XOR de l'URL
+// avec la casse saisie. Il faut decoder avec CETTE ancienne identite puis
+// encoder sous la nouvelle, avant de normaliser usersJson. Jamais de token
+// en clair dans les Settings, et aucune purge si le contexte est indisponible.
+function migrateStoredServerIdentities() {
+    var b = _getBackend();
+    if (!b || !b.persistent) return false;
+    var raw = b.getString(NS_KEY_USERS, "[]");
+    if (raw && raw.length > MAX_USERS_JSON_LEN) return false;
+    var list;
+    try { list = JSON.parse(raw || "[]"); } catch(e0) { return false; }
+    if (!Array.isArray(list)) return false;
+
+    var vault = _readVaultMap();
+    var vaultDirty = false;
+    var userDirty = false;
+    var transitions = [];
+    for (var i = 0; i < list.length; i++) {
+        var row = list[i];
+        if (!row || typeof row !== "object") continue;
+        var oldUrl = String(row.serverUrl || "");
+        var nextUrl = _normalizeUrl(oldUrl);
+        var uid = String(row.userId || "");
+        if (!oldUrl || !nextUrl || !uid || oldUrl === nextUrl) continue;
+
+        var legacyKey = "u#" + SafeLog.shortHash(oldUrl + "|" + uid)
+                           + SafeLog.shortHash(uid + "|" + oldUrl);
+        var newKey = _vaultEntryKey(nextUrl, uid);
+        if (legacyKey !== newKey && Object.prototype.hasOwnProperty.call(vault, legacyKey)) {
+            var oldEncoded = String(vault[legacyKey] || "");
+            var oldToken = _vaultDecodeToken(oldUrl, uid, oldEncoded, true)
+                        || _vaultDecodeLegacyV2Token(oldUrl, uid, oldEncoded, true);
+            if (!oldToken) return false; // Ne pas perdre une session illisible.
+            var fresh = _vaultEncodeToken(nextUrl, uid, oldToken);
+            if (!fresh) return false;
+            // Ne jamais ecraser un coffre canonique existant et potentiellement
+            // plus recent. Le jeton ancien est conserve si la migration echoue.
+            if (!Object.prototype.hasOwnProperty.call(vault, newKey))
+                vault[newKey] = fresh;
+            delete vault[legacyKey];
+            vaultDirty = true;
+        }
+        transitions.push({ from: oldUrl, to: nextUrl, userId: uid });
+        row.serverUrl = nextUrl;
+        userDirty = true;
+    }
+
+    // Commit dans l'ordre : coffre -> profils -> cle active. En cas d'echec
+    // d'ecriture, garder l'ancienne representation des profils pour retenter.
+    if (vaultDirty) {
+        // _writeVaultMap() borne a "{}" si la taille est excessive : ne
+        // jamais accepter cette reduction destructive durant une migration.
+        try { if (JSON.stringify(vault).length > MAX_VAULT_JSON_LEN) return false; }
+        catch(e2) { return false; }
+        if (!_writeVaultMap(vault)) return false;
+    }
+    if (userDirty) {
+        try {
+            // Toujours appliquer la sanitation de profils avant l'ecriture :
+            // une vieille entree ne doit pas reutiliser son accessToken brut.
+            var nextRaw = JSON.stringify(_sanitizeStoredUsersList(list, true));
+            if (nextRaw.length > MAX_USERS_JSON_LEN || !b.setString(NS_KEY_USERS, nextRaw))
+                return false;
+        } catch(e1) { return false; }
+    }
+    if (transitions.length) {
+        var active = _getActiveKey();
+        for (var j = 0; j < transitions.length; j++) {
+            var tr = transitions[j];
+            var oldPlain = tr.from + "|" + tr.userId;
+            if (active === oldPlain || active === "active#" + SafeLog.shortHash(oldPlain)) {
+                _setActiveKey(_activeKey(tr.to, tr.userId));
+                break;
+            }
+        }
+    }
+    return true;
+}
+
 function _persistentTokenFor(serverUrl, userId) {
+    if (_isWanHttpUrl(serverUrl)) return "";
     if (PUBLIC_BUILD_ALLOW_SESSION_VAULT !== true || maximumSecurityModeEnabled())
         return "";
 
@@ -709,11 +792,15 @@ function addOrUpdateServer(v) {
     var rec = _sanitizeServerEntry(v);
     if (!rec) return false;
 
+    // _sanitizeServerEntry() remplit un nom absent avec l'hote:port.
+    // Ce fallback ne doit jamais ecraser un nom Jellyfin deja memorise.
+    var providedName = String((v && (v.name || v.serverName)) || "").trim();
     var list = _readServersArr();
     var found = false;
     for (var i = 0; i < list.length; i++) {
         if (list[i] && list[i].serverUrl === rec.serverUrl) {
-            list[i].name = rec.name || list[i].name || _serverLabelFromUrl(rec.serverUrl);
+            list[i].name = (providedName ? rec.name : "")
+                         || list[i].name || _serverLabelFromUrl(rec.serverUrl);
             list[i].version = rec.version || list[i].version || "";
             list[i].id = rec.id || list[i].id || "";
             list[i].url = rec.serverUrl;
@@ -983,7 +1070,11 @@ function _safeStoredToken(value) {
 
 
 function _isSensitivePrefsKey(key) {
-    var k = String(key || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    var raw = String(key || "").toLowerCase();
+    // Refuser ces proprietes AVANT normalisation : __proto__ devient "proto".
+    if (raw === "__proto__" || raw === "constructor" || raw === "prototype")
+        return true;
+    var k = raw.replace(/[^a-z0-9]/g, "");
     return k === "token" || k === "accesstoken" || k === "lastaccesstoken" ||
            k === "refreshtoken" || k === "apikey" || k === "xapikey" ||
            k === "xembytoken" || k === "xmediabrowsertoken" ||
@@ -1045,8 +1136,12 @@ function _mergePrefs(base, patch) {
 
     var merged = {};
     var p;
-    for (p in base) merged[p] = base[p];
-    for (p in patch) merged[p] = patch[p];
+    for (p in base) {
+        if (_hasOwn(base, p) && !_isSensitivePrefsKey(p)) merged[p] = base[p];
+    }
+    for (p in patch) {
+        if (_hasOwn(patch, p) && !_isSensitivePrefsKey(p)) merged[p] = patch[p];
+    }
 
     return _sanitizePrefsObject(merged);
 }
@@ -1200,7 +1295,8 @@ function addOrUpdateUser(u) {
     var uid = String(u.userId || "");
     if (!srv || !uid) return;
 
-    var tokenTransportAllowed = !_isWanHttpUrl(srv);
+    var tokenTransportAllowed = !_isWanHttpUrl(srv)
+            || (JellyfinBridge.hasWanHttpConsent && JellyfinBridge.hasWanHttpConsent(srv));
     var hasTokenField = _hasOwn(u, "accessToken");
     var incomingToken = hasTokenField ? _safeStoredToken(u.accessToken) : "";
 
@@ -1220,7 +1316,9 @@ function addOrUpdateUser(u) {
     var idx = _listKeyIdx(list, srv, uid);
     var cur = idx >= 0 ? (list[idx] || {}) : {};
     var previousRemember = cur.remember === true;
-    var nextRemember = tokenTransportAllowed && _shouldRememberUser(u, previousRemember);
+    // Meme apres consentement, jamais de token HTTP WAN sur disque.
+    var nextRemember = tokenTransportAllowed && !_isWanHttpUrl(srv)
+            && _shouldRememberUser(u, previousRemember);
 
     if (hasTokenField) {
         if (incomingToken && nextRemember)

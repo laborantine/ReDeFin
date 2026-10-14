@@ -506,31 +506,69 @@ function restoreCastFocus(block) {
 }
 
 // Projection du bloc NextUp pour les métadonnées affichées par la fiche série.
-function nextUpEpisodeFromBlock(block) {
-    if (!block || block.hasContent === false) return null;
-    var directKeys = ["currentItem", "currentEpisode", "episode", "nextUpItem", "nextUpEpisode", "item"];
-    for (var i = 0; i < directKeys.length; ++i) {
-        var key = directKeys[i];
-        try {
-            if (block[key]) return block[key];
-        } catch (e0) {}
-    }
 
-    var index = block.currentIndex !== undefined ? (block.currentIndex | 0) : 0;
-    var arrayKeys = ["items", "episodes", "nextUpItems"];
-    for (var j = 0; j < arrayKeys.length; ++j) {
-        try {
-            var list = block[arrayKeys[j]];
-            if (list && list.length !== undefined)
-                return list[index] || list[0] || null;
-        } catch (e1) {}
-    }
+function resumeRealTargetX(list, idx, items, layout, revealMargin) {
+    if (!list || idx < 0) return NaN
+    var real = homeRowRealDelegateGeometry(list, idx)
+    if (!real) return NaN
+    var arr = items || []
+    var bleed = homeRowItemBleedAt(arr, idx, "resume", layout)
+    var pad = revealMargin
+    var visualLeft = real.viewportX - bleed
+    var visualRight = real.viewportX + real.width + bleed
+    var delta = 0
+    if (visualLeft < pad) delta = visualLeft - pad
+    else if (visualRight > list.width - pad) delta = visualRight - (list.width - pad)
+    return nativeListClampX(list, Number(list.contentX || 0) + delta)
+}
 
-    try {
-        if (block.model) {
-            if (typeof block.model.get === "function") return block.model.get(index);
-            if (block.model.length !== undefined) return block.model[index] || block.model[0] || null;
+function resumeDirectionalTargetX(list, fromIdx, toIdx, direction, items, layout, revealMargin) {
+    if (!list || direction === 0 || fromIdx < 0 || toIdx < 0) return NaN
+    var arr = items || []
+    if (toIdx >= arr.length || fromIdx >= arr.length) return NaN
+    var spacing = Number(list.spacing || 0)
+    if (!isFinite(spacing) || isNaN(spacing)) spacing = 0
+    var currentReal = homeRowRealDelegateGeometry(list, fromIdx)
+    var targetWidth = homeRowItemWidthAt(arr, toIdx, "resume", layout)
+    var currentWidth = homeRowItemWidthAt(arr, fromIdx, "resume", layout)
+    var targetBleed = homeRowItemBleedAt(arr, toIdx, "resume", layout)
+    var pad = revealMargin
+    if (currentReal) {
+        var predictedViewportX
+        if (direction < 0) predictedViewportX = currentReal.viewportX - spacing - targetWidth
+        else predictedViewportX = currentReal.viewportX + currentReal.width + spacing
+        var visualLeft = predictedViewportX - targetBleed
+        var visualRight = predictedViewportX + targetWidth + targetBleed
+        var delta = 0
+        if (visualLeft < pad) delta = visualLeft - pad
+        else if (visualRight > list.width - pad) delta = visualRight - (list.width - pad)
+        return nativeListClampX(list, Number(list.contentX || 0) + delta)
+    }
+    var step = direction < 0 ? -(targetWidth + spacing) : (currentWidth + spacing)
+    return nativeListClampX(list, Number(list.contentX || 0) + step)
+}
+
+function homeListTargetX(list, arr, idx, sectionKind, layout, revealMargin) {
+    if (!list) return 0
+    if (!arr || idx < 0 || idx >= arr.length) return homeListMinX(list)
+
+    var bleed = homeRowItemBleedAt(arr, idx, sectionKind, layout)
+    var pad = revealMargin
+    if (sectionKind === "resume") {
+        var real = homeRowRealDelegateGeometry(list, idx)
+        if (real) {
+            var realVisualLeft = real.viewportX - bleed
+            var realVisualRight = real.viewportX + real.width + bleed
+            var delta = 0
+            if (realVisualLeft < pad) delta = realVisualLeft - pad
+            else if (realVisualRight > list.width - pad)
+                delta = realVisualRight - (list.width - pad)
+            return homeListClampX(list, Number(list.contentX || 0) + delta)
         }
-    } catch (e2) {}
-    return null;
+    }
+
+    return homeRowTargetX(arr, idx, sectionKind, list.spacing,
+                                         list.contentX, list.width, pad,
+                                         homeListMinX(list), homeListMaxX(list),
+                                         layout)
 }

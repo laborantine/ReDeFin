@@ -1,5 +1,6 @@
 .pragma library
 .import "JellyfinPlaybackCore.js" as Core
+.import "JellyfinStreamRules.js" as StreamRules
 
 /* JellyfinPlaybackDevialet.js
  * Policy Devialet importée statiquement. Aucun inclusion dynamique réseau, donc aucune
@@ -7,7 +8,7 @@
  */
 
 var DEVIALET_POLICY_ID = "devialet"
-var DEVIALET_POLICY_REVISION = 10
+var DEVIALET_POLICY_REVISION = 11
 
 // Devialet : AV1 doit sortir en H.264. Le chemin AV1 -> HEVC/H.265 est moins fiable
 // avec QtMultimedia/Freebox et peut provoquer Loading/Stalled selon les médias.
@@ -36,9 +37,9 @@ function _codec(v) {
 }
 
 function _selectedAudioCodecSafe(src, audioIndex) {
-    var c = Core._selectedAudioCodec(src, audioIndex)
+    var c = StreamRules.selectedAudioCodec(src, audioIndex)
     if (c && String(c).length) return _codec(c)
-    var a = Core._firstStream(src, "Audio")
+    var a = StreamRules.firstStream(src, "Audio")
     return _codec(a && a.Codec)
 }
 
@@ -105,7 +106,7 @@ function _isHlsAudioCopySafe(c) {
 function _videoNeedsRealTranscode(src) {
     if (!src) return false
 
-    var v = Core._firstStream(src, "Video")
+    var v = StreamRules.firstStream(src, "Video")
     var videoCodec = _codec(v && v.Codec)
     var width      = _num(v && v.Width)
     var height     = _num(v && v.Height)
@@ -131,7 +132,10 @@ function _devialetProfile(mode) {
     var videoAll    = videoCommon + "," + videoLegacy + "," + videoWebm
 
     var audioCommon = "aac,ac3,eac3,mp3,mp2"
-    var audioMore   = "dts,dca,opus,vorbis,flac,truehd"
+    // Ne pas annoncer le TrueHD comme DirectPlay/DirectStream universel :
+    // certains amplis/TV Devialet restent silencieux, y compris en 7.1 Atmos.
+    // Core convertit les pistes multicanaux en AC3 5.1 ou AAC 2.0.
+    var audioMore   = "dts,dca,opus,vorbis,flac"
     var audioAll    = audioCommon + "," + audioMore
 
     // HLS TS : on limite aux codecs audio plus sûrs pour éviter les masters/segments
@@ -211,7 +215,7 @@ function _devialetPreferredContainer(ctx, src) {
     try {
         var path = (src && src.Path) ? src.Path : ""
         var ext  = Core._extFrom(path)
-        var v    = Core._firstStream(src, "Video")
+        var v    = StreamRules.firstStream(src, "Video")
         var vCdc = v ? String(v.Codec || "").toLowerCase() : ""
 
         if (ext === "webm" || vCdc === "vp8" || vCdc === "vp9")
@@ -271,24 +275,36 @@ function _cloneCtxForDevialet(ctx) {
         String(out.audioOutputMode || "") === "stereo" &&
         out.trackSwitchRebase === true &&
         out.currentPlaybackVideoTranscodeByPolicy !== true
-    if (activeStereoAudioOnly) {
+    // T15 : essai progressif STRICTEMENT limité au downmix Devialet sans
+    // transcodage video de policy. Les gels T12-T14 affectent H264 ET HEVC
+    // copies dans le MPEG-TS HLS. Un MediaError ou un watchdog remettra HLS
+    // pour toute la suite de cette session (preferStereoAudioOnlyHls=true).
+    // Jamais outrepasser un HLS explicite (qualite, ST burn-in, fallback).
+    var stereoTrial = String(out.audioOutputMode || "") === "stereo" &&
+        !strictVideoTranscode && out.currentPlaybackVideoTranscodeByPolicy !== true &&
+        out.preferStereoAudioOnlyHls !== true && out.forceHls !== true &&
+        out.forceHlsProfileInPlaybackInfo !== true &&
+        out.forcePolicyTranscodeHls !== true && out.forceSubtitleEncode !== true;
+    if (activeStereoAudioOnly || stereoTrial) {
         strictVideoTranscode = false
         out.forceVideoStreamCopyInPlaybackInfo = true
-        out.forceDirectStreamInPlaybackInfo = true
-        // QtMultimedia Devialet refuse le MKV progressif live observé dans les logs.
-        // HLS/TS reste stable et Jellyfin peut y copier la vidéo H.264 telle quelle.
-        out.forceHlsProfileInPlaybackInfo = true
-        out.preferStereoAudioOnlyHls = true
+        out.forceAudioStreamCopyInPlaybackInfo = false
         out.forcePlaybackInfoColdStart = false
         out.forcePlaybackInfoVideoCodec = ""
+        if (stereoTrial) {
+            out.forceHlsProfileInPlaybackInfo = false
+            out.preferStereoAudioOnlyHls = false
+        } else {
+            // HLS explicite ou fallback : conserver le comportement T14.
+            out.forceHlsProfileInPlaybackInfo = true
+            out.preferStereoAudioOnlyHls = true
+        }
     }
-
-    // Les retries après une erreur ne portent plus forcément trackSwitchRebase.
-    // Garder le même protocole tant que le mode stéréo reste demandé ; cela évite
-    // l'oscillation HTTP -> HLS -> HTTP vue dans les traces.
+    // Un retry HLS demande explicitement le profil Jellyfin HLS, y compris
+    // sans trackSwitchRebase (reprise apres gel ou erreur QtMultimedia).
     if (String(out.audioOutputMode || "") === "stereo" &&
-            out.currentPlaybackVideoTranscodeByPolicy !== true) {
-        out.preferStereoAudioOnlyHls = true
+            out.preferStereoAudioOnlyHls === true) {
+        out.forceHlsProfileInPlaybackInfo = true
     }
 
     // Nécessaire avec JellyfinPlaybackCore actuel : sans ce flag, forceTranscodeByPolicy
@@ -317,7 +333,7 @@ function _cloneCtxForDevialet(ctx) {
 }
 
 function _devialetPreferredTranscodeProtocol(ctx, src) {
-    var v = Core._firstStream(src, "Video")
+    var v = StreamRules.firstStream(src, "Video")
     var vc = _codec(v && v.Codec)
 
     // AV1 : HLS reste le chemin le plus cadré pour éviter le copy vidéo.
@@ -331,7 +347,7 @@ function _devialetPreferredTranscodeVideoCodec(ctx, src) {
     return DEVIALET_TRANSCODE_VIDEO_CODEC
 }
 function _devialetPreferredTranscodeDimensions(ctx, src) {
-    var v = Core._firstStream(src, "Video")
+    var v = StreamRules.firstStream(src, "Video")
     var w = _num(v && v.Width)
     var h = _num(v && v.Height)
     if (w <= 0) w = 1920

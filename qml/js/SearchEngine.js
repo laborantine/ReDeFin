@@ -738,11 +738,11 @@ function start(root, state, seq, searchTerm, startIndex, limit, onSuccess, onErr
         }
         common = "Recursive=true&" + common +
                  "&ExcludeLocationTypes=Virtual&EnableUserData=false" +
-                 "&EnableTotalRecordCount=true&Fields=" + _searchEnc(fields) +
+                 "&EnableTotalRecordCount=false&Fields=" + _searchEnc(fields) +
                  (mode === 2 ? "&IncludeItemTypes=" + generalTypes : "")
         return Jellyfin.searchItemsUrl(srv, uid, common)
     }
-    function finishFromPartial(route, status, budgetHit) {
+    function finishFromPartial(budgetHit) {
         emitSuccess({
             items: lastPartialItems,
             folderSections: [],
@@ -756,7 +756,7 @@ function start(root, state, seq, searchTerm, startIndex, limit, onSuccess, onErr
         if (!current()) return
         var code = SafeLog.safeErrorCode(err, "network_error")
         if (budgetExpired() || code === "budget_exhausted") {
-            if (partialSent) finishFromPartial(routeName(), 0, true)
+            if (partialSent) finishFromPartial(true)
             else emitError({
                 code: "timeout",
                 message: "search_budget_exhausted",
@@ -776,10 +776,13 @@ function start(root, state, seq, searchTerm, startIndex, limit, onSuccess, onErr
             attempt()
             return
         }
+        var status = Number(err && err.status);
+        if (!isFinite(status) || status < 100 || status > 599 || Math.floor(status) !== status)
+            status = 0;
         emitError({
             code: code,
-            message: _s(err && err.message) || code,
-            status: (err && err.status) || 0,
+            message: code, // Aucun message libre du serveur/transport dans le payload UI.
+            status: status,
             requestId: seq,
             route: routeName()
         })
@@ -825,7 +828,11 @@ function start(root, state, seq, searchTerm, startIndex, limit, onSuccess, onErr
                 if (seedMap[seedIds[p]]) partial.push(seedMap[seedIds[p]])
             }
             lastPartialItems = partial
-            lastTotal = isFinite(total) && total >= 0 ? Math.floor(total) : partial.length
+            // SearchPage affiche le nombre de cartes effectivement retenues.
+            // /Items peut omettre le total exact sans influencer la pagination
+            // des bibliothèques (gérée séparément via hasMoreLibraries).
+            lastTotal = Math.max(lastTotal, partial.length,
+                                 isFinite(total) && total >= 0 ? Math.floor(total) : 0)
             if (partial.length) {
                 partialSent = true
                 emitSuccess({

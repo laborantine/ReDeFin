@@ -1,5 +1,6 @@
 .pragma library
 .import "JellyfinPlaybackCore.js" as Core
+.import "JellyfinStreamRules.js" as StreamRules
 
 /* JellyfinPlaybackRevolution.js
  * Wrapper statique Freebox Revolution.
@@ -52,9 +53,9 @@ function _revCanonicalAudioCodec(codec) {
 }
 
 function _selectedAudioCodecSafe(src, audioIndex) {
-    var coreCodec = Core._selectedAudioCodec(src, audioIndex);
+    var coreCodec = StreamRules.selectedAudioCodec(src, audioIndex);
     if (coreCodec) return _revCanonicalAudioCodec(coreCodec);
-    var first = Core._firstStream(src, "Audio");
+    var first = StreamRules.firstStream(src, "Audio");
     return _revCanonicalAudioCodec(first && first.Codec);
 }
 
@@ -101,7 +102,7 @@ function _subtitleStreamByIndexSafe(src, streamIndex) {
         return null;
 
     try {
-        var coreStream = Core._subtitleStreamByIndex(src, streamIndex);
+        var coreStream = StreamRules.subtitleStreamByIndex(src, streamIndex);
         if (coreStream) return coreStream;
     } catch (e) {}
 
@@ -121,12 +122,12 @@ function _audioStreamByIndexSafe(src, streamIndex) {
 
     if (typeof streamIndex === "number" && streamIndex >= 0) {
         try {
-            var coreStream = Core._audioStreamByIndex(src, streamIndex);
+            var coreStream = StreamRules.audioStreamByIndex(src, streamIndex);
             if (coreStream) return coreStream;
         } catch (e) {}
     }
 
-    return Core._firstStream(src, "Audio");
+    return StreamRules.firstStream(src, "Audio");
 }
 
 function _isPgsSubtitleStream(st) {
@@ -149,7 +150,7 @@ function _revPgsRemuxEligible(ctx, src) {
     if (!_selectedPgsSubtitle(ctx, src)) return false;
     if (_revRequiresHardVideoTranscode(ctx, src)) return false;
 
-    var v = Core._firstStream(src, "Video");
+    var v = StreamRules.firstStream(src, "Video");
     if (!_revVideoCopySafe(v && v.Codec)) return false;
 
     var selectedAudioIndex = (ctx && typeof ctx.selectedAudioStream === "number" && ctx.selectedAudioStream >= 0)
@@ -329,7 +330,7 @@ function _revPreferredContainer(ctx, src) {
 
     if (!needServerSelect) return null;
 
-    var v = Core._firstStream(src, "Video");
+    var v = StreamRules.firstStream(src, "Video");
     var ext = _containerOf(src);
     var videoCodec = _codec(v && v.Codec);
 
@@ -352,7 +353,7 @@ function _revPreferredContainer(ctx, src) {
 }
 
 function _revPreferredTranscodeProtocol(ctx, src) {
-    var v = Core._firstStream(src, "Video");
+    var v = StreamRules.firstStream(src, "Video");
     var vc = _codec(v && v.Codec);
 
     // Conserver le traitement AV1 historique en HLS/TS. Pour HEVC 4K et les
@@ -370,8 +371,8 @@ function _revPreferredTranscodeVideoCodec(ctx, src) {
 
 function _revPreferredTranscodeAudioCodec(ctx, src, audioIndex, useHls) {
     var sourceCodec = _selectedAudioCodecSafe(src, audioIndex);
-    var a = Core._audioStreamByIndex(src, audioIndex);
-    if (!a) a = Core._firstStream(src, "Audio");
+    var a = StreamRules.audioStreamByIndex(src, audioIndex);
+    if (!a) a = StreamRules.firstStream(src, "Audio");
 
     if (_revAudioStreamCopySafe(a)) {
         if (useHls === true && !_revTsAudioCopySafe(sourceCodec))
@@ -384,8 +385,8 @@ function _revPreferredTranscodeAudioCodec(ctx, src, audioIndex, useHls) {
 }
 
 function _revAllowTranscodeAudioStreamCopy(ctx, src, audioIndex, useHls) {
-    var a = Core._audioStreamByIndex(src, audioIndex);
-    if (!a) a = Core._firstStream(src, "Audio");
+    var a = StreamRules.audioStreamByIndex(src, audioIndex);
+    if (!a) a = StreamRules.firstStream(src, "Audio");
     if (!_revAudioStreamCopySafe(a)) return false;
 
     var sourceCodec = _selectedAudioCodecSafe(src, audioIndex);
@@ -394,7 +395,7 @@ function _revAllowTranscodeAudioStreamCopy(ctx, src, audioIndex, useHls) {
 }
 
 function _revPreferredTranscodeDimensions(ctx, src) {
-    var v = Core._firstStream(src, "Video");
+    var v = StreamRules.firstStream(src, "Video");
     var w = _num(v && v.Width);
     var h = _num(v && v.Height);
     if (w <= 0) w = 1920;
@@ -411,7 +412,7 @@ function _revPreferredTranscodeDimensions(ctx, src) {
 /* ================== Force transcode ? ================== */
 function _revRequiresHardVideoTranscode(ctx, src) {
     if (!src) return false;
-    var v = Core._firstStream(src, "Video");
+    var v = StreamRules.firstStream(src, "Video");
     var width     = _num(v && v.Width);
     var height    = _num(v && v.Height);
     var bitDepth  = _num(v && v.BitDepth);
@@ -431,12 +432,12 @@ function _revRequiresHardVideoTranscode(ctx, src) {
 function _revForceTranscode(ctx, src) {
     if (!src) {  return false; }
 
-    var v = Core._firstStream(src, "Video");
+    var v = StreamRules.firstStream(src, "Video");
     var selectedPgs = _selectedPgsSubtitle(ctx, src);
     var selectedAudioIndex = ((selectedPgs || (ctx && ctx.audioOutputMode === "stereo")) && ctx && typeof ctx.selectedAudioStream === "number" && ctx.selectedAudioStream >= 0)
                            ? ctx.selectedAudioStream : -1;
     var a = (selectedPgs || (ctx && ctx.audioOutputMode === "stereo")) ? _audioStreamByIndexSafe(src, selectedAudioIndex)
-                        : Core._firstStream(src, "Audio");
+                        : StreamRules.firstStream(src, "Audio");
 
     var width     = _num(v && v.Width);
     var height    = _num(v && v.Height);
@@ -538,7 +539,7 @@ function _cloneCtxForRevolution(ctx) {
         out.forceDirectStreamInPlaybackInfo = false;
         out.forcePlaybackInfoVideoCodec = REVOLUTION_TRANSCODE_VIDEO_CODEC;
 
-        var v = Core._firstStream(src, "Video");
+        var v = StreamRules.firstStream(src, "Video");
         var vc = _codec(v && v.Codec);
         if (vc === "av1" || vc === "aom" || vc === "av01")
             out.forceHlsProfileInPlaybackInfo = true;

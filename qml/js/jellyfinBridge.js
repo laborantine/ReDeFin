@@ -36,7 +36,15 @@ function freeboxContext() { return _fbx; }
 var IMG_TYPES_NAV_STANDARD = "&EnableImageTypes=Primary,Thumb,Backdrop&ImageTypeLimit=1";
 var IMG_TYPES_NAV_NEXTUP = "&EnableImageTypes=Primary,Thumb,Backdrop&ImageTypeLimit=1";
 var IMG_TYPES_NAV_PRIMARY_ONLY = "&EnableImageTypes=Primary&ImageTypeLimit=1";
-var _apiGetCache = {}; var _apiGetInflight = {}; var _apiGetFailUntil = {}; var _apiLatestParentFailUntil = {}; var _apiGetMaxEntries = 64; var _apiCooldownMaxEntries = 96; var _apiSweepTick = 0; var _apiCacheEpoch = 1;
+var _apiGetCache = {}; var _apiGetInflight = {}; var _apiGetFailUntil = {}; var _apiLatestParentFailUntil = {}; var _apiGetMaxEntries = 48; var _apiCooldownMaxEntries = 96; var _apiSweepTick = 0; var _apiCacheEpoch = 1;
+// T7 : budget borné selon le Player. Aucune invalidation des GET en vol.
+function configureApiCacheBudget(playbackMode) {
+    var mode = _s(playbackMode).toLowerCase();
+    var cap = mode === "devialet" ? 64 : (mode === "revolution" ? 40 : 48);
+    if (_apiGetMaxEntries === cap) return;
+    _apiGetMaxEntries = cap;
+    _apiGetTrimCache();
+}
 function _apiHashHex(h) {
     var out = (h >>> 0).toString(16);
     while (out.length < 8) out = "0" + out;
@@ -437,6 +445,11 @@ function _isLikelyLanHostForUrl(value) {
     return !!(h && SafeLog && SafeLog.isLocalHost && SafeLog.isLocalHost(h));
 }
 function isWanHttpUrl(value){ return !!(SafeLog && SafeLog.isWanHttpUrl && SafeLog.isWanHttpUrl(_s(value).trim())); }
+// Un consentement ne transforme PAS une connexion WAN HTTP en LAN/HTTPS.
+function hasWanHttpConsent(value){ return !!(SafeLog && SafeLog.hasWanHttpConsent && SafeLog.hasWanHttpConsent(value)); }
+function grantWanHttpConsent(value){ return !!(SafeLog && SafeLog.grantWanHttpConsent && SafeLog.grantWanHttpConsent(value)); }
+function clearWanHttpConsent(){ if (SafeLog && SafeLog.clearWanHttpConsent) SafeLog.clearWanHttpConsent(); }
+function isWanHttpBlocked(value){ return isWanHttpUrl(value) && !hasWanHttpConsent(value); }
 function isValidPublicSystemInfo(info) {
     if (!info || typeof info !== "object") return false;
     var version = _s(info.Version || info.version).trim();
@@ -446,7 +459,7 @@ function isValidPublicSystemInfo(info) {
     if (version.length > 64 || identity.length > 256) return false;
     return true;
 }
-// ===== Sécurité transport : aucun secret Jellyfin sur HTTP hors LAN =====
+// ===== Sécurité transport : HTTP WAN interdit sans consentement explicite =====
 function _normalizedHeaderName(name){ return _s(name).toLowerCase().replace(/[^a-z0-9]/g, ""); }
 function _headersContainAuthSecret(headers) {
     if (!headers || typeof headers !== "object") return false;
@@ -497,7 +510,7 @@ function isSensitiveRequestAllowed(url, headers, body) {
     var s = _s(url).trim();
     // Un secret ne doit jamais partir vers une URL relative ou un schéma inattendu.
     if (!/^https?:\/\//i.test(s)) return false;
-    return !isWanHttpUrl(s);
+    return !isWanHttpBlocked(s);
 }
 function _insecureTransportPayload() {
     return {
@@ -538,8 +551,14 @@ function normalizeServerUrl(input, preferHttps) {
     if (!_isHttpLike(u)) {
         if (_hasInvalidSchemeLikeForUrl(u))
             return "";
-        // preferHttps garde sa sémantique historique, mais LAN sans schéma reste en HTTP.
-        u = (_isLikelyLanHostForUrl(u) ? "http://" : "https://") + u;
+        // Saisie sans schema : conserver le choix historique HTTP pour les
+        // noms courts / .local / .home.arpa de decouverte. Ceci N'ACCORDE
+        // AUCUNE confiance de transport : le controle isWanHttpBlocked reste
+        // obligatoire avant tout secret (adresse IP de destination inconnue).
+        var enteredHost = _hostFromServerUrlLike(u);
+        var lanNameHint = SafeLog.isShortLanHostName(enteredHost) ||
+                /\.(?:local|home\.arpa)$/i.test(enteredHost);
+        u = ((_isLikelyLanHostForUrl(u) || lanNameHint) ? "http://" : "https://") + u;
     }
     if (!_isHttpLike(u))
         return "";
@@ -550,6 +569,9 @@ function normalizeServerUrl(input, preferHttps) {
         return "";
     if (/\s/.test(authority))
         return "";
+    // Seuls schema et autorite sont insensibles a la casse. Le chemin d'un
+    // reverse proxy (ex. /Jellyfin) doit rester strictement identique.
+    u = u.replace(/^https?:\/\/[^\/?#]*/i, function(head) { return head.toLowerCase(); });
     u = HttpTransport.stripQueryAndFragment(u);
     u = u.replace(/\/web\/index\.html.*$/i, "");
     u = u.replace(/\/web\/?$/i, "");
@@ -616,21 +638,6 @@ function _resolveRedirect(currentUrl, location) {
     var path = m[2] || "/"; var slash = path.lastIndexOf("/"); var dir = slash >= 0 ? path.substring(0, slash + 1) : "/";
     return HttpTransport.stripAuthQueryFromUrl(origin + dir + loc);
 }
-function _redirectHost(url) {
-    var s = _s(url); var m = s.match(/^[a-zA-Z][a-zA-Z0-9+\-.]*:\/\/([^\/\?#]+)/);
-    if (!m) return "";
-    var hostPort = _s(m[1]).toLowerCase();
-    if (hostPort.charAt(0) === "[") {
-        var end = hostPort.indexOf("]");
-        if (end > 0)
-            return hostPort.substr(1, end - 1);
-        return hostPort;
-    }
-    var colon = hostPort.indexOf(":");
-    if (colon >= 0)
-        return hostPort.substr(0, colon);
-    return hostPort;
-}
 function _redirectOrigin(url) {
     var s = _s(url).trim();
     var m = s.match(/^(https?):\/\/(\[[^\]]+\]|[^\/:?#]+)(?::(\d+))?(?:[\/?#]|$)/i);
@@ -649,25 +656,6 @@ function _sameHostRedirect(fromUrl, toUrl) {
               a.host === b.host &&
               a.port === b.port);
 }
-function _hostFromAuthority(authority) {
-    var s = _s(authority).toLowerCase();
-    if (!s) return "";
-    var m = s.match(/^[a-zA-Z][a-zA-Z0-9+\-.]*:\/\/([^\/\?#]+)/);
-    if (m) s = m[1];
-    if (s.charAt(0) === "[") {
-        var end = s.indexOf("]");
-        if (end > 0)
-            return s.substr(1, end - 1);
-        return s;
-    }
-    var slash = s.indexOf("/");
-    if (slash >= 0)
-        s = s.substr(0, slash);
-    var colon = s.indexOf(":");
-    if (colon >= 0)
-        return s.substr(0, colon);
-    return s;
-}
 function _authorityForSwap(authority) {
     var s = _s(authority);
     if (!s) return "";
@@ -678,19 +666,31 @@ function _authorityForSwap(authority) {
         s = s.substr(0, slash);
     return s;
 }
-function _isLocalAuthHost(host){ return _isLikelyLanHostForUrl(_hostFromAuthority(host)); }
-function _safeAltUrlForAuth(url, altHost) {
-    var altAuthority = _authorityForSwap(altHost); var alt = _hostFromAuthority(altAuthority);
-    if (!altAuthority || !alt) return "";
-    var current = _redirectHost(url);
-    if (current && alt === _hostFromAuthority(current))
-        return _swapHost(url, altAuthority);
-    if (_isLocalAuthHost(alt))
-        return _swapHost(url, altAuthority);
-    return "";
+function _safeAltUrlForAuth(url, altHost, boundServerOrigin) {
+    var authority = _authorityForSwap(altHost);
+    if (!authority || authority.length > 128 ||
+            /[@\/\\?#\s\u0000-\u001F\u007F]/.test(authority) ||
+            !/^(?:\[[0-9a-fA-F:.]+\]|[a-z0-9._-]+)(?::\d{1,5})?$/i.test(authority))
+        return "";
+    var swapped = _swapHost(url, authority);
+    var original = _redirectOrigin(url);
+    var alternate = _redirectOrigin(swapped);
+    if (!original || !alternate) return "";
+    // Une IP privée quelconque n'est PAS une preuve d'identité Jellyfin.
+    // Réessai même origine autorisé ; changement d'origine uniquement si
+    // l'association explicite concerne exactement cette origine initiale.
+    if (_sameHostRedirect(url, swapped)) return swapped;
+    if (!boundServerOrigin || !_sameHostRedirect(url, boundServerOrigin)) return "";
+    // Le schéma n'est pas abaissé et les règles HTTP/HTTPS restent appliquées
+    // à la nouvelle URL par sendRequest() AVANT tout envoi de secrets.
+    return original.scheme === alternate.scheme ? swapped : "";
 }
 function _computeAltHost() {
     try { return _s(ClientId.ipv4AltHost()); }
+    catch(e0) { return ""; }
+}
+function _computeAltBoundOrigin() {
+    try { return _s(ClientId.ipv4AltServerOrigin()); }
     catch(e0) { return ""; }
 }
 function _probeHeaderValue(headers, name) {
@@ -922,8 +922,10 @@ function sendRequest(method, url, headers, body, onSuccess, onError, _state) { /
         var altHost = canRetryHost ? _computeAltHost() : "";
         if (!_state.disableAlt && altHost && !_state.usedAlt) {
             _state.usedAlt = true;
-            var alt = _safeAltUrlForAuth(url, altHost);
-            if (alt) {
+            var alt = _safeAltUrlForAuth(url, altHost, _computeAltBoundOrigin());
+            // Pas de transfert du token vers un HTTP externe non approuvé.
+            // Un fallback refusé laisse remonter l'erreur réseau initiale.
+            if (alt && isSensitiveRequestAllowed(alt, headers, body)) {
                 sendRequest(method, alt, headers, body, onSuccess, onError, _state);
                 return;
             }
@@ -1006,7 +1008,7 @@ function authenticate(serverUrl, username, password, onSuccess, onError) {
         return;
     }
     // Le mot de passe est un secret au même titre qu'un token : aucun pré-ping WAN HTTP.
-    if (isWanHttpUrl(serverUrl)) {
+    if (isWanHttpBlocked(serverUrl)) {
         if (onError) onError("insecure_transport");
         return;
     }
@@ -1088,7 +1090,7 @@ function postRemoteControlCapabilities(serverUrl, accessToken, enabled, onSucces
         if (onError) onError("missing_params");
         return;
     }
-    if (isWanHttpUrl(serverUrl)) {
+    if (isWanHttpBlocked(serverUrl)) {
         if (onError) onError("insecure_transport");
         return;
     }
@@ -1331,35 +1333,43 @@ function fetchHomeLatestItemsForParent(serverUrl, accessToken, userId, parentId,
         onError && onError("missing_params");
         return HttpTransport.completedHttpHandle();
     }
-
-    var safeLimit = MediaCatalog.homeSectionLimit(limit);
+    var controller = _newRequestController();
     var shouldGroup = groupItems === true;
-
-    var url = _u(serverUrl,
-        "/Items/Latest?UserId=" + enc(userId) +
-        "&ParentId=" + enc(parentId) +
-        "&Limit=" + enc(safeLimit) +
-        // Bibliothèque Séries : on laisse Jellyfin regrouper les épisodes
-        // récents sous leur Season. Les autres bibliothèques restent non
-        // groupées pour conserver des cartes média individuelles.
-        "&GroupItems=" + (shouldGroup ? "true" : "false") +
-        "&IncludeItemTypes=Episode,Movie,Video,MusicVideo,Photo" +
-        "&EnableImages=true" +
-        "&EnableUserData=true" +
-        "&Fields=" + homeMediaFields(
-            "BackdropImageTags,SeriesPrimaryImageTag,ParentId,Type,CollectionType"
-        ) +
-        IMG_TYPES_NAV_STANDARD
-    );
-
-    return sendRequest("get", url, headersWithToken(accessToken), null, function(res) {
-        var items = homeItemsFromResponse(res);
-        // Si GroupItems=true pour une bibliothèque Séries, Season et Series
-        // sont des résultats attendus. Les autres conteneurs restent filtrés.
-        onSuccess && onSuccess(MediaCatalog.filterHomeLatestItems(items, safeLimit, shouldGroup));
-    }, function(err) {
-        onError && onError(_errCode(err, "network_error"));
-    });
+    var currentLimit = MediaCatalog.homeSectionLimit(limit);
+    // T3 : préserver la borne globale 256 Kio. En cas de réponse Latest
+    // anormalement volumineuse, essayer 25 puis 12 entrées plutôt qu'échouer.
+    function fetchPart() {
+        if (!controller.isActive()) return;
+        var url = _u(serverUrl,
+            "/Items/Latest?UserId=" + enc(userId) +
+            "&ParentId=" + enc(parentId) +
+            "&Limit=" + enc(currentLimit) +
+            "&GroupItems=" + (shouldGroup ? "true" : "false") +
+            "&IncludeItemTypes=Episode,Movie,Video,MusicVideo,Photo" +
+            "&EnableImages=true&EnableUserData=true" +
+            "&Fields=" + homeMediaFields(
+                "BackdropImageTags,SeriesPrimaryImageTag,ParentId,Type,CollectionType") +
+            IMG_TYPES_NAV_STANDARD
+        );
+        var handle = sendRequest("get", url, headersWithToken(accessToken), null, function(res) {
+            if (!controller.isActive()) return;
+            controller._finish();
+            var items = homeItemsFromResponse(res);
+            onSuccess && onSuccess(MediaCatalog.filterHomeLatestItems(items, currentLimit, shouldGroup));
+        }, function(err) {
+            if (!controller.isActive()) return;
+            if (_errCode(err, "network_error") === "too_large" && currentLimit > 12) {
+                currentLimit = Math.max(12, Math.floor(currentLimit / 2));
+                _laterBridge(fetchPart);
+                return;
+            }
+            controller._finish();
+            onError && onError(_errCode(err, "network_error"));
+        });
+        controller._setTransport(handle);
+    }
+    fetchPart();
+    return controller;
 }
 function fetchFolderItems(serverUrl, accessToken, userId, folderId, onSuccess, onError) {
     var fields = _folderListFields();
@@ -1414,6 +1424,15 @@ function _folderListFields(typeName) {
     // ImageTags, UserData, RunTimeTicks, etc.) restent renvoyées normalement.
     var types = _s(typeName).toLowerCase();
     if (!types) return _homeListFields();
+
+    // Le mode personnel mêle Folder et Photo : garder les dimensions pour
+    // la visionneuse tout en demandant les compteurs légers des dossiers.
+    if (types.indexOf("photo") >= 0 && types.indexOf("folder") >= 0) {
+        return _modernItemFields(
+            "PrimaryImageAspectRatio,CustomRating,ParentId,Width,Height," +
+            "ChildCount,RecursiveItemCount,ItemCounts"
+        );
+    }
 
     // Dossiers, séries et collections utilisent les compteurs dans l'UI.
     if (types.indexOf("folder") >= 0 || types.indexOf("series") >= 0 ||
@@ -1472,7 +1491,7 @@ function _folderPagePayload(startIndex, limit, rawLen, filteredItems, sortMode,
         error: errorCode || ""
     };
 }
-function _fetchFolderItemsByTypePage(serverUrl, accessToken, userId, folderId, typeName, recursive, startIndex, limit, sortMode, onSuccess, onError, _controller, _finishController) {
+function _fetchFolderItemsByTypePage(serverUrl, accessToken, userId, folderId, typeName, recursive, startIndex, limit, sortMode, onSuccess, onError, _controller, _finishController, _untypedRequest) {
     var controller = _controller || HttpTransport.createPagedRequestController(); var finishController = (_finishController !== false);
     if (!serverUrl || !accessToken || !userId || !folderId || !typeName) {
         if (finishController) controller._finish();
@@ -1483,11 +1502,17 @@ function _fetchFolderItemsByTypePage(serverUrl, accessToken, userId, folderId, t
     var chunk = Math.min(80, limit), minChunk = 20, consumed = 0, out = [], seen = {};
     var scopeRecursive = recursive !== false;
     function makeUrl(localStart, pageLimit) {
+        var isVirtualBoxsets = MediaCatalog.isVirtualCollectionsFolderId(folderId) && typeName === "BoxSet";
         var query = "/Items?UserId=" + enc(userId) +
-                    "&ParentId=" + enc(folderId) +
-                    "&Recursive=" + (scopeRecursive ? "true" : "false");
-        query += "&IncludeItemTypes=" + _encItemTypeList(typeName) +
-                 "&EnableTotalRecordCount=false&SortBy=" + enc(_folderServerSortBy(sortMode)) +
+                    (isVirtualBoxsets ? "" : ("&ParentId=" + enc(folderId))) +
+                    "&Recursive=" + (isVirtualBoxsets || scopeRecursive ? "true" : "false");
+        if (isVirtualBoxsets) query += "&CollapseBoxSetItems=false";
+        // Les vues Films regroupées et les bibliothèques mixtes peuvent
+        // contenir des BoxSet/containers substitués par Jellyfin. Conserver
+        // le périmètre ParentId + Recursive + pagination côté serveur, mais
+        // ne pas filtrer le Type AVANT l'application du regroupement.
+        if (_untypedRequest !== true) query += "&IncludeItemTypes=" + _encItemTypeList(typeName);
+        query += "&EnableTotalRecordCount=false&SortBy=" + enc(_folderServerSortBy(sortMode)) +
                  "&SortOrder=" + enc(_folderServerSortOrder(sortMode)) +
                  "&StartIndex=" + localStart + "&Limit=" + pageLimit +
                  "&Fields=" + _folderListFields(typeName) +
@@ -1542,7 +1567,7 @@ function _fetchFolderItemsByTypePage(serverUrl, accessToken, userId, folderId, t
     next();
     return controller;
 }
-function _fetchFolderItemsByTypePageWithDirectFallback(serverUrl, accessToken, userId, folderId, typeName, recursive, startIndex, limit, sortMode, onSuccess, onError) {
+function _fetchFolderItemsByTypePageWithDirectFallback(serverUrl, accessToken, userId, folderId, typeName, recursive, startIndex, limit, sortMode, onSuccess, onError, untypedRequest) {
     var controller = HttpTransport.createPagedRequestController();
     function complete(page) {
         if (!controller.isActive()) return;
@@ -1570,22 +1595,32 @@ function _fetchFolderItemsByTypePageWithDirectFallback(serverUrl, accessToken, u
             function(err2) {
                 if (errForFinal) failFinal(errForFinal || err2);
                 else complete(_folderPagePayload(startIndex, limit, 0, [], sortMode, "direct-parent", false));
-            }, controller, false);
+            }, controller, false, untypedRequest === true);
     }
     _fetchFolderItemsByTypePage(serverUrl, accessToken, userId, folderId, typeName, recursive, startIndex, limit, sortMode,
         function(page) { accept(page, function() { finishDirect(null); }); },
-        function(err) { finishDirect(err); }, controller, false);
+        function(err) { finishDirect(err); }, controller, false, untypedRequest === true);
     return controller;
 }
 function fetchMovieFolderItemsPage(serverUrl, accessToken, userId, folderId,
                                    startIndex, limit, sortMode, onSuccess, onError) {
+    // T16 : la vue Films utilise la même logique de regroupement que le
+    // serveur Jellyfin (BoxSet au milieu des films si l'option est active).
+    // Ne pas forcer CollapseBoxSetItems=true : respecter la préférence serveur.
+    // Ne pas filtrer IncludeItemTypes avant la substitution des BoxSet.
+    // Le filtre local refuse toujours les séries, épisodes et dossiers étrangers.
     return _fetchFolderItemsByTypePageWithDirectFallback(
         serverUrl, accessToken, userId, folderId,
         "Movie,Video,MusicVideo", true,
-        startIndex, limit, sortMode, onSuccess, onError
+        startIndex, limit, sortMode, onSuccess, onError, true
     );
 }
-var _PM_MEDIA_TYPES = "Photo,Video,Movie,MusicVideo";
+// Liste NON récursive : chaque sous-dossier est une entrée navigable,
+// pas un flatten de toute la médiathèque (important pour la Révolution).
+// Jellyfin peut renvoyer un repertoire de photos comme PhotoAlbum (IsFolder=true),
+// y compris au deuxieme ou troisieme niveau. Garder les conteneurs dans le filtre
+// serveur plutot que rendre la requete non typee, couteuse sur les gros NAS.
+var _PM_MEDIA_TYPES = "Folder,PhotoAlbum,CollectionFolder,Photo,Video,Movie,MusicVideo";
 function fetchPersonalMediaFolderItemsPage(serverUrl, accessToken, userId, folderId,
                                            startIndex, limit, sortMode,
                                            onSuccess, onError) {
@@ -1599,13 +1634,17 @@ function fetchPersonalMediaFolderItemsPage(serverUrl, accessToken, userId, folde
         onError
     );
 }
-// CollectionType=mixed : films + séries uniquement. Folder reste autorisé afin
-// de pouvoir descendre dans un éventuel sous-dossier sans aplatir toute la
-// bibliothèque. Video/MusicVideo/Episode/Season sont exclus de ce mode.
+// CollectionType=mixed : la composition est hétérogène. Ne pas imposer
+// IncludeItemTypes au serveur : certains Jellyfin omettent alors les dossiers,
+// vidéos ou films. On ne parcourt QUE les enfants directs (Recursive=false),
+// puis on élimine localement les types hors vidéo/conteneur, avec pagination
+// et annulation inchangées. Aucun épisode isolé n'est montré comme un film.
+var _MIXED_MEDIA_TYPES = "Series,Folder,Movie,Video,MusicVideo,BoxSet,CollectionFolder,PhotoAlbum";
 function fetchMixedFolderItemsPage(serverUrl, accessToken, userId, folderId, startIndex, limit, sortMode, onSuccess, onError) {
     return _fetchFolderItemsByTypePage(serverUrl, accessToken, userId, folderId,
-                                       "Series,Folder,Movie", false,
-                                       startIndex, limit, sortMode, onSuccess, onError);
+                                       _MIXED_MEDIA_TYPES, false,
+                                       startIndex, limit, sortMode, onSuccess, onError,
+                                       null, true, true);
 }
 // Navigation hiérarchique des bibliothèques Séries. Une Series ouvre sa fiche
 // dédiée, donc Season/Episode n'ont pas à être remontés dans cette grille. On
@@ -1618,8 +1657,34 @@ function fetchMediaBrowserItemsPage(serverUrl, accessToken, userId, folderId,
         startIndex, limit, sortMode, onSuccess, onError
     );
 }
+// Sonde unique et légère, jamais une indexation ni un scan de la médiathèque.
+// La présence du premier BoxSet accessible justifie la vue locale de secours.
+function probeAccessibleCollections(serverUrl, accessToken, userId, onSuccess, onError) {
+    if (!serverUrl || !accessToken || !userId) {
+        onError && onError("missing_params");
+        return null;
+    }
+    var query = "/Items?UserId=" + enc(userId) +
+                "&Recursive=true&CollapseBoxSetItems=false&IncludeItemTypes=BoxSet" +
+                "&StartIndex=0&Limit=1&EnableImages=false" +
+                "&EnableUserData=false&EnableTotalRecordCount=false";
+    return sendRequest("get", _u(serverUrl, query), headersWithToken(accessToken), null,
+        function(res) {
+            var items = _folderItemsFromResponse(res);
+            if (!items) { onError && onError("bad_response"); return; }
+            onSuccess && onSuccess(MediaCatalog.filterRealTypedMediaItems(items, "BoxSet").length > 0);
+        }, function(err) { onError && onError(_errCode(err, "network_error")); });
+}
 function fetchCollectionFolderItemsPage(serverUrl, accessToken, userId, folderId,
                                         startIndex, limit, sortMode, onSuccess, onError) {
+    if (MediaCatalog.isVirtualCollectionsFolderId(folderId)) {
+        // Vue Collections masquée/absente de /UserViews : les BoxSet sont
+        // demandés au niveau racine, toujours avec les droits de cet utilisateur.
+        return _fetchFolderItemsByTypePage(
+            serverUrl, accessToken, userId, folderId,
+            "BoxSet", true, startIndex, limit, sortMode, onSuccess, onError
+        );
+    }
     return _fetchFolderItemsByTypePageWithDirectFallback(
         serverUrl, accessToken, userId, folderId,
         "BoxSet", true,
@@ -1664,7 +1729,7 @@ function _folderItemsFromResponse(res) {
     return null;
 }
 function _folderAppendTypedUnique(out, seen, items, typeName) {
-    items = MediaCatalog.filterRealTypedMediaItems(items || [], typeName);
+    items = MediaCatalog.filterRealTypedMediaItems(items || [], typeName, true);
     for (var i = 0; i < items.length; i++) {
         var it = items[i];
         var id = it && it.Id ? _s(it.Id) : "";
@@ -1776,9 +1841,10 @@ function fetchUserItem(serverUrl, accessToken, userId, itemId, onSuccess, onErro
 // COMPLÈTE (/Items/{id} : People, MediaSources, Chapters, Overview...) pour
 // n'en lire que ces deux champs. Cette fonction ne demande que ce qui est
 // réellement lu, sur le même endpoint de liste que fetchMovieFolderItemsPage
-// (poids et forme de réponse déjà éprouvés), en gardant EnableImages=false
-// (aucune image n'est affichée par ce détail) et EnableTotalRecordCount=false
-// (un seul item attendu, le compteur est inutile).
+// (poids et forme de réponse déjà éprouvés), en demandant MediaSources
+// uniquement pour l'item focalisé : certains Jellyfin donnent une résolution
+// ou une piste audio différente dans le résumé MediaStreams. Jamais en masse.
+// Pas d'images, de compteur global ni de décodage supplémentaire côté Player.
 function fetchUserItemTechSummary(serverUrl, accessToken, userId, itemId, onSuccess, onError) {
     if (!serverUrl || !accessToken || !userId || !itemId) {
         onError && onError("missing_params");
@@ -1786,7 +1852,7 @@ function fetchUserItemTechSummary(serverUrl, accessToken, userId, itemId, onSucc
     }
     var url = _u(serverUrl, "/Items?UserId=" + enc(userId) +
         "&Ids=" + enc(itemId) +
-        "&Fields=MediaStreams,Genres" +
+        "&Fields=MediaStreams,MediaSources,Genres" +
         "&EnableImages=false&EnableTotalRecordCount=false");
     return sendRequest("get", url, headersWithToken(accessToken), null, function(res) {
         var j = jsonNormalize(res && res.json);
@@ -1841,7 +1907,7 @@ function fetchRandomEpisode(serverUrl, accessToken, userId, parentId, preferUnpl
         var path = "/Items?IncludeItemTypes=Episode&Recursive=true"
             + "&UserId=" + enc(userId)
             + "&ParentId=" + enc(parentId)
-            + "&Limit=1&SortBy=Random"
+            + "&Limit=1&SortBy=Random&EnableTotalRecordCount=false"
             + (unplayed ? "&Filters=IsUnplayed" : "");
         controller._setTransport(sendRequest("get", _u(serverUrl, path), headersWithToken(accessToken), null, function(res) {
             if (controller.cancelled || controller.done) return;

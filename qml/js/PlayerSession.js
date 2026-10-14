@@ -1079,6 +1079,18 @@ function sendStopped(root, bridge, done) {
     return sendStoppedAtPosition(root, bridge, positionMs, done);
 }
 
+// EndOfMedia ne signifie pas qu'une nouvelle source doit être relancée.
+// Retourner un index uniquement si la playlist contient vraiment un successeur.
+// Fonction pure réutilisée dans le lecteur et vérifiable sans backend Qt.
+function naturalEndNextIndex(currentId, ids, autoplay) {
+    if (autoplay !== true || !currentId || !ids || !ids.length) return -1;
+    var id = String(currentId);
+    for (var i = 0; i < ids.length - 1; ++i) {
+        if (String(ids[i]) === id && String(ids[i + 1] || "").length) return i + 1;
+    }
+    return -1;
+}
+
 /* ================== Cycle de vie : resets et destruction ================== */
 
 // Ordre des écritures conservé : les bindings QML peuvent réagir à chaque étape.
@@ -1105,6 +1117,8 @@ function resetPlaybackState(root, resetScrub) {
     root._frozenPlaybackWatchActive = false
     root._frozenPlaybackNoProgressSinceWallMs = 0
     root._frozenPlaybackRecoveryCount = 0
+    root._hlsStallRecoveryCount = 0
+    root._hlsStallLastRecoveryWallMs = 0
     root._frozenPlaybackLastLocalMs = -1
     root._frozenPlaybackLastUiMs = -1
     try {
@@ -1144,6 +1158,11 @@ function resetPlaybackState(root, resetScrub) {
     root._stoppedPendingSessionId = ""
     root._lastProgressSentMs = 0
     root._lastUserDataSentMs = 0
+    // Invalider les callbacks des rapports de l'ancien media / session.
+    root._periodicProgressSequence = (root._periodicProgressSequence || 0) + 1
+    root._periodicProgressInFlight = false
+    root._periodicProgressStartedMs = 0
+    root._checkpointWriteSeq = (root._checkpointWriteSeq || 0) + 1
     root._playbackExitInProgress = false
     root._finalExitPositionMs = -1
     root._lastPersistableUiMs = 0
@@ -1338,7 +1357,10 @@ function seekRestoreAttemptLimit(root) {
 }
 
 function seekRestoreDeadlineMs(root) {
-    return trackSwitchFragileHevc(root) ? root.trackSwitchSeekHevcMaxTotalMs : root.trackSwitchSeekMaxTotalMs;
+    var deadline = trackSwitchFragileHevc(root) ? root.trackSwitchSeekHevcMaxTotalMs : root.trackSwitchSeekMaxTotalMs;
+    // Seul le HLS stéréo Devialet avec seek local reçoit le budget de
+    // priming T14. Evite d'expirer la verification pendant les 900 ms initiaux.
+    return root._devialetStereoHlsLocalResume === true ? deadline + 900 : deadline;
 }
 
 function seekRestoreIsTrueTrackSwitch(root) {
@@ -1373,6 +1395,15 @@ function completeSeekRestoreVerified(root, seekTimer, resumeTimer, targetUi) {
     root._seekRestorePauseWallMs = 0;
     root._seekRestorePhase = 0;
     root.baseOffsetMs = 0;
+    if (isStereoHlsWatch(root)) {
+        // QtMultimedia peut annoncer la position demandee immediatement apres
+        // mp.seek(), meme quand le flux reste fige. Ce retour valide seulement
+        // l'acceptation du seek, jamais la progression du decodage.
+        root._hlsSeekProgressPending = true;
+        root._hlsSeekProgressConfirmed = false;
+        root._hlsSeekProgressAnchorMs = root._clampUi(targetUi);
+        root._hlsSeekProgressIssuedWallMs = root._nowMs();
+    }
     if (track) {
         root._trackSwitchVerificationActive = false;
         root._trackSwitchTimebaseVerified = true;
@@ -1390,6 +1421,30 @@ function completeSeekRestoreVerified(root, seekTimer, resumeTimer, targetUi) {
     // Restauration vérifiée sans reprise de lecture : la gate armée par
     // mediaUrlSwap/beginFreshDirectPlayReset n'a plus aucun chemin de sortie.
     releaseVideoLoadingWhenPaused(root, "seek-restore-verified-paused");
+}
+
+// Verification legere du seek HLS, sur les notifications de position existantes.
+// Un simple changement instantane vers la cible n'est PAS une reprise. Exiger
+// au moins 1,5 s de temps reel et 1,2 s de progression de l'horloge MediaPlayer.
+// Ne jamais lancer de Timer ni de requete reseau supplementaire.
+function observeHlsSeekProgress(root, mp) {
+    if (!root._hlsSeekProgressPending || !isStereoHlsWatch(root)) return false;
+    if (root._tearingDownPlayer || root._sourceResetActive ||
+            mp.playbackState !== root._mpPlayingState) return false;
+    var now = root._nowMs();
+    var local = Math.max(0, Math.floor(Number(mp.position || 0)));
+    var anchor = Math.max(0, root._hlsSeekProgressAnchorMs || 0);
+    // Certains decoders reviennent au keyframe precedent apres le seek.
+    // Replacer la base sans y voir une progression (pas de faux positif).
+    if (local + 1500 < anchor) {
+        root._hlsSeekProgressAnchorMs = local;
+        return false;
+    }
+    if (now - root._hlsSeekProgressIssuedWallMs < 1500 || local < anchor + 1200)
+        return false;
+    root._hlsSeekProgressPending = false;
+    root._hlsSeekProgressConfirmed = true;
+    return true;
 }
 
 function abandonBootSeekRestoreWithoutReload(root, seekTimer, targetUi, reason) {
@@ -1457,6 +1512,18 @@ function finishTrackSwitchRebase(root, settleTimer) {
     } catch (e0) {}
 }
 
+// T14 : donner au pipeline HLS AAC 2.0 Devialet l'occasion de demarrer
+// avant son seek de reprise. Pas de pause asynchrone autour de seek() : sur
+// certains backends Freebox elle arrive APRES play() et fige l'image.
+// S'applique uniquement au chemin de reprise locale confirme par le Core,
+// jamais a la Revolution, ni au vrai HLS positionne par l'URL serveur.
+function _devialetStereoHlsSeekNeedsPrime(root, now, local, isPlaying) {
+    if (root._devialetStereoHlsLocalResume !== true ||
+            root._seekRestoreAttempts > 0 || isPlaying !== true) return false;
+    if (!(root._seekRestorePrimeWallMs > 0)) root._seekRestorePrimeWallMs = now;
+    return local < 250 && (now - root._seekRestorePrimeWallMs) < 900;
+}
+
 function tickSeekRestore(root, mp, timer) {
     if (root._pendingSeekMs < 0) {
         timer.stop();
@@ -1479,7 +1546,9 @@ function tickSeekRestore(root, mp, timer) {
     root._seekRestoreStableSamples = 0;
     if (now - root._seekRestoreReadyWallMs >= seekRestoreDeadlineMs(root)) {
         if (root._seekRestoreBestDiffMs <= tol && root._seekRestoreBestLocalMs >= 0) root._completeSeekRestoreVerified(target, root._seekRestoreBestLocalMs, root._seekRestoreBestDiffMs, "best-sample-at-timeout");
-        else root._retrySeekRestoreWithJellyfinCopyRemux(target, "local-seek-timeout");
+        else {
+            root._retrySeekRestoreWithJellyfinCopyRemux(target, "local-seek-timeout");
+        }
         return;
     }
     if (root._seekRestoreAwaitingResult) {
@@ -1502,9 +1571,11 @@ function tickSeekRestore(root, mp, timer) {
         // le DirectPlay statique demandé manuellement, on garde le pipeline en
         // PlayingState pendant la restauration et on seek directement après le
         // court priming. Les autres cas conservent l'ancien protocole prudent.
-        var keepPlayingStaticDp = root.manualDirectPlayMode === true &&
-            root._trackSwitchWasPlaying === true &&
-            isStaticDirectPlaySource(root);
+        var keepPlayingThroughSeek = root._devialetStereoHlsLocalResume === true &&
+            root._trackSwitchWasPlaying === true;
+        if (!keepPlayingThroughSeek)
+            keepPlayingThroughSeek = root.manualDirectPlayMode === true &&
+                root._trackSwitchWasPlaying === true && isStaticDirectPlaySource(root);
         if (root._seekRestorePhase === 0) {
             root._seekRestorePhase = 1;
             root._seekRestorePrimeWallMs = now;
@@ -1517,7 +1588,9 @@ function tickSeekRestore(root, mp, timer) {
             return;
         }
         if (root._seekRestorePhase === 1) {
-            if (now - root._seekRestorePrimeWallMs < root.trackSwitchPrimeMinMs && local < 80) {
+            var needsStereoPrime = _devialetStereoHlsSeekNeedsPrime(root, now, local,
+                mp.playbackState === root._mpPlayingState);
+            if ((now - root._seekRestorePrimeWallMs < root.trackSwitchPrimeMinMs && local < 80) || needsStereoPrime) {
                 if (mp.playbackState !== root._mpPlayingState) {
                     try {
                         mp.play();
@@ -1525,7 +1598,7 @@ function tickSeekRestore(root, mp, timer) {
                 }
                 return;
             }
-            if (keepPlayingStaticDp) {
+            if (keepPlayingThroughSeek) {
                 // Pas de pause intermédiaire : évite qu'un pause asynchrone du
                 // backend intelce ne rattrape la commande play après le seek.
                 root._seekRestorePhase = 3;
@@ -1540,6 +1613,11 @@ function tickSeekRestore(root, mp, timer) {
         }
         if (root._seekRestorePhase === 2 && now - root._seekRestorePauseWallMs < root.trackSwitchPauseGraceMs) return;
     }
+    // Démarrage hors track-switch (reprise initiale ou recovery) : utiliser
+    // le meme court priming non bloquant sur le HLS Devialet stereo.
+    if (!root._trackSwitchVerificationActive &&
+            _devialetStereoHlsSeekNeedsPrime(root, now, local,
+                mp.playbackState === root._mpPlayingState)) return;
     root._seekRestoreAttempts++;
     root._seekRestoreAwaitingResult = true;
     root._seekRestoreLastCallWallMs = now;
@@ -2036,6 +2114,14 @@ function recoveryCandidateUiMs(root, mp) {
         target = cur;
     var stable = root._pauseWatchLastStableUiMs,
         pause = root._pauseWatchStartedUiMs;
+    // En HLS local, ne pas sauter a un ancien lastUiTargetMs situe en AVANT
+    // du point ou la lecture s'est figee. Le checkpoint prime lorsque le
+    // lecteur vient de retomber a zero lors d'un chargement.
+    if (isStereoHlsWatch(root)) {
+        if (mp.position > 0 && cur > 0) return cur;
+        if (stable > 0) return root._clampUi(stable);
+        return root._clampUi(root.lastUiTargetMs > 0 ? root.lastUiTargetMs : cur);
+    }
     var reset = !!(root._serverTimedLike() && mp.position <= 1000 && cur <= root.baseOffsetMs + 1500);
     if (root.lastUiTargetMs > 0) target = Math.max(target, root._clampUi(root.lastUiTargetMs));
     if (stable > 0 && (reset || stable > cur + 2500)) target = Math.max(target, root._clampUi(stable));
@@ -2076,20 +2162,39 @@ function recoverSameModeAt(root, targetUi, reason) {
     var f = sameModeRecoveryFlags(root);
     markMediaRecoveryPosition(root, targetUi, reason || "sameModeRetry");
     root._resumeWantedAfterNegotiation = true;
-    root.negotiatePlayback(safe, f.keepHls, true, false, false, {
+    var stereoProgressive = root._devialetStereoProgressiveDownmix === true;
+    if (stereoProgressive) root._devialetStereoProgressiveFailed = true;
+    var stereoHls = isStereoHlsWatch(root) || stereoProgressive;
+    // IMPORTANT : forceHls=true court-circuite le chemin PlaybackInfo audio-only
+    // (AAC 2.0 + HEVC copy + TranscodingUrl Jellyfin) et bascule en HLS generique.
+    // Sur Devialet stereo, demander le profil HLS sans forcer ce fallback.
+    root.negotiatePlayback(safe, stereoHls ? false : f.keepHls, true, false, false, {
         forceRetry: true,
         forceServerSeek: false,
         forceServerRemux: f.keepServerRemux,
-        forceHlsOnDpSeekFallback: false
+        forceHlsOnDpSeekFallback: false,
+        preferStereoAudioOnlyHls: stereoHls ? true : undefined,
+        forceVideoStreamCopyInPlaybackInfo: stereoHls ? true : undefined,
+        forceAudioStreamCopyInPlaybackInfo: stereoHls ? false : undefined
     });
 }
 
+// Le downmix HLS utilise un seek LOCAL et n'est pas serverTimed : ne pas
+// l'exclure du watchdog comme le faisait l'ancienne condition.
+function isStereoHlsWatch(root) {
+    return root.isHls === true && root.audioOutputMode === "stereo";
+}
+
 function armFrozenPlaybackWatch(root, mp, timer, reason, windowMs) {
-    if (!root._serverTimedLike() && !root.lastUsedServerRemux) return;
+    if (!root._serverTimedLike() && !root.lastUsedServerRemux && !isStereoHlsWatch(root) &&
+            root._devialetStereoProgressiveDownmix !== true) return;
     var now = root._nowMs();
     root._frozenPlaybackWatchActive = true;
     root._frozenPlaybackWatchArmedWallMs = now;
-    root._frozenPlaybackWatchUntilWallMs = now + Math.max(8000, windowMs || root.frozenPlaybackWatchWindowMs);
+    // Sur HLS stereo, surveiller aussi les gels tardifs (apres plusieurs minutes).
+    root._frozenPlaybackWatchUntilWallMs =
+        (isStereoHlsWatch(root) || root._devialetStereoProgressiveDownmix === true) ? 0 :
+        now + Math.max(8000, windowMs || root.frozenPlaybackWatchWindowMs);
     root._frozenPlaybackNoProgressSinceWallMs = 0;
     root._frozenPlaybackLastLocalMs = Math.max(0, mp.position || 0);
     root._frozenPlaybackLastUiMs = root._clampUi(root.uiPositionMs());
@@ -2105,16 +2210,35 @@ function stopFrozenPlaybackWatch(root, timer) {
 }
 
 function recoverFromFrozenPlayback(root, mp, watchTimer, guardTimer, reason) {
-    if (root._mediaErrorRecoveryArmed || root._mediaErrorRecoveryInProgress) return;
+    if (root._mediaErrorRecoveryArmed || root._mediaErrorRecoveryInProgress ||
+            root._tearingDownPlayer || root._sourceResetActive) return;
+    var now = root._nowMs();
+    var stereoHls = isStereoHlsWatch(root);
+    if (stereoHls) {
+        // La relecture d'un HLS mal seekable ne doit pas boucler a l'infini.
+        if (root._hlsStallRecoveryCount >= root.hlsStallRecoveryMaxAttempts) {
+            stopFrozenPlaybackWatch(root, watchTimer);
+            return;
+        }
+        if (root._hlsStallLastRecoveryWallMs > 0 &&
+                now - root._hlsStallLastRecoveryWallMs < root.hlsStallRecoveryCooldownMs) {
+            _timerRestart(watchTimer);
+            return;
+        }
+        root._hlsStallRecoveryCount++;
+        root._hlsStallLastRecoveryWallMs = now;
+    }
     root._frozenPlaybackRecoveryCount++;
     root._mediaErrorRecoveryArmed = true;
     _timerRestart(guardTimer);
-    if (root._frozenPlaybackRecoveryCount > 3) {
+    if (!stereoHls && root._frozenPlaybackRecoveryCount > 3) {
         stopFrozenPlaybackWatch(root, watchTimer);
         return;
     }
     var target = root._clampUi(recoveryCandidateUiMs(root, mp));
     stopFrozenPlaybackWatch(root, watchTimer);
+    // Refaire une seule negociation dans le MEME mode ; ne jamais reconstruire
+    // une URL HLS en perdant les parametres renvoyes par Jellyfin.
     recoverSameModeAt(root, target, "frozenPlaybackSameModeRetry");
     armFrozenPlaybackWatch(root, mp, watchTimer, "postFrozenRecovery", root.frozenPlaybackWatchWindowMs);
 }
@@ -2126,25 +2250,46 @@ function tickFrozenPlaybackWatch(root, mp, watchTimer, guardTimer) {
         stopFrozenPlaybackWatch(root, watchTimer);
         return;
     }
-    if (!root._serverTimedLike() && !root.lastUsedServerRemux) {
+    var stereoHls = isStereoHlsWatch(root);
+    // Une reprise qui n'a jamais progressee ne doit pas bloquer indefiniment
+    // le watchdog : on attend l'expiration du garde (45 s) avant un seul retry.
+    if (stereoHls && root._mediaErrorRecoveryInProgress &&
+            !root._mediaErrorRecoveryArmed &&
+            root._mediaErrorProgressGuardUntilWallMs > 0 &&
+            now >= root._mediaErrorProgressGuardUntilWallMs) {
+        root._mediaErrorRecoveryInProgress = false;
+    }
+    if (!root._serverTimedLike() && !root.lastUsedServerRemux && !stereoHls &&
+            root._devialetStereoProgressiveDownmix !== true) {
         stopFrozenPlaybackWatch(root, watchTimer);
         return;
     }
-    if (root._mediaErrorRecoveryInProgress || root._mediaErrorRecoveryArmed || root._gateArmed || root._startupPlayWanted || root.scrubActive) {
+    // Ne pas interférer avec un seek, un rechargement, une pause ou le pre-roll.
+    if (root.serverPrerollBlocking || root._tearingDownPlayer || root._sourceResetActive ||
+            root._trackSwitchVerificationActive || root._pendingSeekMs >= 0 ||
+            root._mediaErrorRecoveryInProgress || root._mediaErrorRecoveryArmed ||
+            root._gateArmed || root._startupPlayWanted || root.scrubActive) {
         root._frozenPlaybackLastLocalMs = Math.max(0, mp.position || 0);
         root._frozenPlaybackLastUiMs = root._clampUi(root.uiPositionMs());
         root._frozenPlaybackNoProgressSinceWallMs = 0;
         _timerRestart(watchTimer);
         return;
     }
-    if (mp.playbackState !== root._mpPlayingState || !(mp.status === root._mpBuffered || mp.status === root._mpLoaded)) {
+    var running = mp.playbackState === root._mpPlayingState;
+    var ready = mp.status === root._mpBuffered || mp.status === root._mpLoaded;
+    var awaiting = (stereoHls || root._devialetStereoProgressiveDownmix === true) &&
+        (mp.status === root._mpStalled || mp.status === root._mpLoading ||
+         mp.status === root._mpBuffering);
+    if (!running || (!ready && !awaiting)) {
         root._frozenPlaybackLastLocalMs = Math.max(0, mp.position || 0);
         root._frozenPlaybackLastUiMs = root._clampUi(root.uiPositionMs());
         root._frozenPlaybackNoProgressSinceWallMs = 0;
         _timerRestart(watchTimer);
         return;
     }
-    if (root._frozenPlaybackWatchArmedWallMs > 0 && now - root._frozenPlaybackWatchArmedWallMs < root.frozenPlaybackStartupGraceMs) {
+    var grace = (stereoHls || root._devialetStereoProgressiveDownmix === true) ?
+        root.hlsStallStartupGraceMs : root.frozenPlaybackStartupGraceMs;
+    if (root._frozenPlaybackWatchArmedWallMs > 0 && now - root._frozenPlaybackWatchArmedWallMs < grace) {
         _timerRestart(watchTimer);
         return;
     }
@@ -2158,6 +2303,8 @@ function tickFrozenPlaybackWatch(root, mp, watchTimer, guardTimer) {
         root._frozenPlaybackLastUiMs = ui;
         root._frozenPlaybackNoProgressSinceWallMs = 0;
         root._frozenPlaybackRecoveryCount = 0;
+        // Le budget HLS ne se remet jamais a zero sur quelques images :
+        // sinon les gels intermittents provoquent des dizaines de renegociations.
         if (ui > 0 && local > 0) {
             root._pauseWatchLastStableUiMs = Math.max(root._pauseWatchLastStableUiMs, ui);
             root._pauseWatchLastStableWallMs = now;
@@ -2170,8 +2317,10 @@ function tickFrozenPlaybackWatch(root, mp, watchTimer, guardTimer) {
         _timerRestart(watchTimer);
         return;
     }
-    if (Math.floor(now - root._frozenPlaybackNoProgressSinceWallMs) >= root.frozenPlaybackNoProgressMs) {
-        recoverFromFrozenPlayback(root, mp, watchTimer, guardTimer, "playingBufferedNoProgress");
+    var threshold = (stereoHls || root._devialetStereoProgressiveDownmix === true) ?
+        root.hlsStallThresholdMs : root.frozenPlaybackNoProgressMs;
+    if (Math.floor(now - root._frozenPlaybackNoProgressSinceWallMs) >= threshold) {
+        recoverFromFrozenPlayback(root, mp, watchTimer, guardTimer, "playingNoProgress");
         return;
     }
     _timerRestart(watchTimer);
@@ -2179,6 +2328,11 @@ function tickFrozenPlaybackWatch(root, mp, watchTimer, guardTimer) {
 
 function recoverFromMediaError(root, mp, watchTimer, guardTimer) {
     if (root._mediaErrorRecoveryArmed) return;
+
+    // T15 : premiere erreur du MKV progressif Devialet 2.0 -> repli HLS/TS
+    // existant. Une seule tentative HTTP par lecture, sans boucle de protocoles.
+    if (root._devialetStereoProgressiveDownmix === true)
+        root._devialetStereoProgressiveFailed = true;
 
     // Un MediaError HLS stéréo ne prouve pas que le codec demandé est fautif.
     // Le profil 2.0 cible désormais AAC-LC dès la première négociation ; on
@@ -2611,4 +2765,89 @@ function seekBy(root, mp, timers, subtitleItem, deltaMs) {
     }
     if (root._queueCoalescedLocalSeek(deltaMs)) return
     root._localSeekTo(nowUi + deltaMs, "seekBy")
+}
+
+// Checkpoints Progress/UserData : une seule responsabilité de reporting.
+function sendPlaybackCheckpoint(root, bridge, reason, isPaused, includeSessionProgress){
+    if (root.serverPrerollBlocking)
+        return false
+    if (root._tearingDownPlayer || root._playbackExitInProgress || !root.scrobbleEnabled ||
+            root._trackSwitchVerificationActive || root._sourceResetActive || root._gateArmed ||
+            !root.serverUrl || !root.accessToken || !root.userId || !root.itemId)
+        return false
+
+    var periodic = reason === "periodic"
+    var now = root._nowMs()
+    // Eviter d'empiler des Progress si Jellyfin ou le reseau devient lent.
+    // La limite ne concerne jamais les checkpoints evenementiels.
+    if (periodic && root._periodicProgressInFlight &&
+            now - root._periodicProgressStartedMs < 30000)
+        return false
+
+    var pos = root._capturePersistablePositionMs(reason || "checkpoint")
+    if (pos <= 0) return false
+    root._rememberPersistablePositionMs(pos, reason || "checkpoint")
+    root._sendStartIfNeeded(pos)
+
+    // Une ecriture UserData toutes les 60s en lecture continue, et toujours
+    // lors d'une pause/reprise ou d'une commande distante. La premiere
+    // ecriture periodique arrive au premier tick utile (10s).
+    var persistUserData = !periodic || root._lastUserDataSentMs <= 0 ||
+                          now - root._lastUserDataSentMs >= Math.max(10000, root.userDataEveryMs)
+    var capturedServer = root.serverUrl
+    var capturedToken = root.accessToken
+    var capturedUser = root.userId
+    var capturedItem = root.itemId
+    var capturedSession = root.playSessionId
+    var writeSeq = -1
+    if (persistUserData) {
+        writeSeq = ++root._checkpointWriteSeq
+        // La cadence est basee sur la programmation, pas sur la latence HTTP.
+        root._lastUserDataSentMs = now
+    }
+    function contextStillCurrent(){
+        return !root._tearingDownPlayer && !root._playbackExitInProgress &&
+               root.serverUrl === capturedServer && root.accessToken === capturedToken &&
+               root.userId === capturedUser && root.itemId === capturedItem &&
+               root.playSessionId === capturedSession
+    }
+    function persistExactUserData(){
+        // Une reponse Progress ancienne ne doit pas sauvegarder une position
+        // precedente apres une pause, une commande ou un changement d'episode.
+        if (!persistUserData || !contextStillCurrent() ||
+                writeSeq !== root._checkpointWriteSeq ||
+                (periodic && root._nowMs() - now > 30000)) return
+        bridge.updateUserPlaybackPosition(capturedServer, capturedToken,
+                                       capturedUser, capturedItem, root._ticks(pos),
+                                       function(){}, function(){})
+    }
+    if (includeSessionProgress === true && capturedSession) {
+        var periodicSeq = -1
+        if (periodic) {
+            periodicSeq = ++root._periodicProgressSequence
+            root._periodicProgressInFlight = true
+            root._periodicProgressStartedMs = now
+        }
+        try {
+            root._sendProgress(!!isPaused, pos, function(){
+                if (periodic && root._periodicProgressSequence === periodicSeq) {
+                    root._periodicProgressInFlight = false
+                    root._periodicProgressStartedMs = 0
+                }
+                persistExactUserData()
+            })
+            root._lastProgressSentMs = now
+        } catch(e) {
+            if (periodic && root._periodicProgressSequence === periodicSeq) {
+                root._periodicProgressInFlight = false
+                root._periodicProgressStartedMs = 0
+            }
+            // Ne pas perdre une sauvegarde exacte si le rapport de session
+            // echoue avant meme d'etre envoye.
+            persistExactUserData()
+        }
+    } else {
+        persistExactUserData()
+    }
+    return true
 }

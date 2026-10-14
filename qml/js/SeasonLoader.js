@@ -1,7 +1,7 @@
 .pragma library
 .import "SeasonUtils.js" as SeasonUtils
-.import "MediaCatalog.js" as MediaCatalog
 .import "GuestCredits.js" as GuestCredits
+.import "SafeLog.js" as SafeLog
 
 // Chargement de la saison et de ses épisodes, sans rendu ni navigation.
 // API : load(ctx, Jellyfin), cancel(ctx, reason), refreshSelectedTags(ctx, force).
@@ -31,13 +31,8 @@ function _fallbackSeasonItem(seasonId, seriesId) {
 }
 
 function _seasonErrCode(err) {
-    try {
-        if (!err) return "network_error";
-        if (typeof err === "string") return String(err || "network_error");
-        if (err.code !== undefined && err.code !== null) return String(err.code || "network_error");
-        if (err.status !== undefined && err.status !== null) return "http_" + (err.status | 0);
-    } catch (e0) {}
-    return "network_error";
+    // Codes publics uniquement : ne jamais afficher err.code / err.message bruts.
+    return SafeLog.safeErrorCode(err, "network_error");
 }
 
 function _seasonLoadErrorMessage(err) {
@@ -122,7 +117,7 @@ function load(ctx, Jellyfin) {
 
 // Publier les résultats dans le même ordre pour les deux types de saison.
 function _publishPlaylistAndPoster(ctx, Jellyfin) {
-    try { ctx.fallbackPosterUrl = MediaCatalog.seasonPosterFallbackUrl(Jellyfin, ctx); } catch(e) {}
+    try { ctx.fallbackPosterUrl = SeasonUtils.seasonPosterFallbackUrl(Jellyfin, ctx); } catch(e) {}
     SeasonUtils.updatePlaylistFromEpisodes(ctx);
 }
 
@@ -288,7 +283,7 @@ function refreshSelectedTags(ctx, force) {
     try { oldUseDetails = !!ctx._tagsSrcIsDetails; } catch (e4) {}
     if (!force && srcId === oldSrcId && useDetails === oldUseDetails)
         return;
-    var t = MediaCatalog.episodeTechChips(src); var sig = t.join("\u001f");
+    var t = SeasonUtils.episodeTechChips(src); var sig = t.join("\u001f");
     try { ctx._tagsSrcId = srcId; } catch (e5) {}
     try { ctx._tagsSrcIsDetails = useDetails; } catch (e6) {}
     try {

@@ -3,7 +3,7 @@
 .pragma library
 
 // ⚙️ Configuration de base (valeurs par défaut)
-var APP_VERSION = "0.9.9";
+var APP_VERSION = "0.9.9.1";
 var DEVICE_ID_PREFIX = "rdf-";
 var LEGACY_SHARED_DEVICE_ID = "redefin-freebox";
 
@@ -57,6 +57,7 @@ var JF_CLIENT = {
     deviceId: _startupDeviceId,
     version:  APP_VERSION,
     ipv4AlternateHost: "",   // ex: "v4.jellyfin.example.fr"
+    ipv4AlternateForServerUrl: "", // association explicite serveur -> hôte IPv4
 
     // Info modèle détecté (ex: "fbx7hd-delta", "Freebox Player Devialet", etc.)
     deviceModel: ""
@@ -96,6 +97,17 @@ function _headerValue(v, fallback, maxLen) {
     s = s.replace(/^\s+|\s+$/g, "");
 
     return s || (fallback || "");
+}
+
+// Ne conserve que l'origine, sans identifiants, query ni chemin.
+// Utilisé uniquement pour la liaison explicite du fallback IPv4.
+function _cleanServerOriginValue(url) {
+    var s = _boundedString(url, 512);
+    var m = /^(https?):\/\/(\[[0-9a-f:.]+\]|[a-z0-9._-]+)(?::(\d{1,5}))?(?:\/[^?#\s]*)?$/i.exec(s);
+    if (!m) return "";
+    var port = m[3] ? Number(m[3]) : (m[1].toLowerCase() === "https" ? 443 : 80);
+    if (!isFinite(port) || port < 1 || port > 65535) return "";
+    return m[1].toLowerCase() + "://" + m[2].toLowerCase() + ":" + port;
 }
 
 function _cleanHostValue(host) {
@@ -218,8 +230,17 @@ function initFromQmlDevice(deviceObj) {
         if (deviceObj.version !== undefined && deviceObj.version !== null && deviceObj.version !== "")
             JF_CLIENT.version = _headerValue(deviceObj.version, APP_VERSION, 32);
 
-        if (deviceObj.ipv4AlternateHost !== undefined && deviceObj.ipv4AlternateHost !== null && deviceObj.ipv4AlternateHost !== "")
-            JF_CLIENT.ipv4AlternateHost = _cleanHostValue(deviceObj.ipv4AlternateHost);
+        if (deviceObj.ipv4AlternateHost !== undefined && deviceObj.ipv4AlternateHost !== null) {
+            var newHost = _cleanHostValue(deviceObj.ipv4AlternateHost);
+            // Un changement d'hôte invalide l'ancienne association.
+            if (newHost !== JF_CLIENT.ipv4AlternateHost)
+                JF_CLIENT.ipv4AlternateForServerUrl = "";
+            JF_CLIENT.ipv4AlternateHost = newHost;
+        }
+        if (deviceObj.ipv4AlternateForServerUrl !== undefined &&
+                deviceObj.ipv4AlternateForServerUrl !== null)
+            JF_CLIENT.ipv4AlternateForServerUrl =
+                _cleanServerOriginValue(deviceObj.ipv4AlternateForServerUrl);
     } catch (e0) {
         // no-op
     }
@@ -279,6 +300,10 @@ function authorizationHeader(accessToken) {
 // 🔹 Accès à l’alternate host IPv4 (évite les accès directs à la var)
 function ipv4AltHost() {
     return _cleanHostValue(JF_CLIENT.ipv4AlternateHost);
+}
+
+function ipv4AltServerOrigin() {
+    return _cleanServerOriginValue(JF_CLIENT.ipv4AlternateForServerUrl);
 }
 
 // 🔹 Initialise/recharge l'identifiant persistant de CETTE installation.
@@ -351,7 +376,8 @@ function applicationVersion() {
 //
 // SÉCURITÉ PUBLICATION :
 // - ne jamais logger ce retour en brut ;
-// - deviceId, ipv4AlternateHost et deviceModel peuvent aider à corréler un appareil ;
+// - deviceId, ipv4AlternateHost, ipv4AlternateForServerUrl et deviceModel
+//   peuvent aider à corréler un appareil ;
 // - les diagnostics ne doivent journaliser que des champs explicitement anonymisés.
 function info() {
     return {
@@ -360,6 +386,7 @@ function info() {
         deviceId:          clientId(),
         version:           clientVersion(),
         ipv4AlternateHost: ipv4AltHost(),
+        ipv4AlternateForServerUrl: ipv4AltServerOrigin(),
         deviceModel:       deviceModel()
     };
 }

@@ -3,15 +3,16 @@
 /*
  * ReDeFin - SafeLog.js
  *
- * Malgré son nom historique, ce module ne journalise plus rien dans le build
- * public. Il conserve uniquement les primitives de sécurité réellement
+ * Le build public reste silencieux sur les donnees sensibles. Les evenements
+ * de diagnostic sont filtres par liste blanche, sans messages externes.
+ * Ce module conserve aussi les primitives de securite reellement
  * partagées par le bridge Jellyfin, le playback et le stockage utilisateur :
  *
  * - hash court non cryptographique pour clés/cache anonymisées ;
  * - normalisation des codes d'erreur publics ;
  * - validation des hôtes IPv4/IPv6 locaux ;
- * - registre borné des noms LAN courts explicitement approuvés ;
- * - détection HTTP WAN afin d'interdire l'envoi de secrets en clair.
+ * - registre borné de noms courts connus (pas une preuve de transport LAN) ;
+ * - détection HTTP WAN avec exception explicite, temporaire et mono-origine.
  *
  * Garder ce fichier léger est important sur Freebox Révolution : l'ancien
  * moteur de redaction/sérialisation de logs était définitivement neutralisé
@@ -179,8 +180,9 @@ function isShortLanHostName(value) {
 
 function trustLanHost(value) {
     var h = _hostKey(value);
-    // Réservé aux noms LAN courts validés auparavant via /System/Info/Public.
-    // Les IP privées, .local et .home.arpa sont déjà locales par définition.
+    // Registre de compatibilite/navigation uniquement. Une reponse publique
+    // valide ne donne pas l'IP TCP de destination : isLocalHost NE consulte
+    // plus ce registre pour exempter un nom DNS de consentement HTTP.
     if (!_isTrustableShortLanHost(h)) return false;
     if (_trustedLanHosts[h] === true) return true;
 
@@ -218,10 +220,15 @@ function isLocalHost(host) {
         h = h.substring(0, h.length - 1);
 
     if (!h) return false;
+    // Une reponse /System/Info/Public ou une entree du navigateur LAN de
+    // FreeboxOS NE garantit pas l'IP reellement jointe pour cette URL DNS.
+    // Le SDK QML public n'expose pas de resolution liee a la connexion HTTP.
+    // En l'absence de cette preuve, seules les adresses IP litterales locales
+    // et localhost sont exemptes du consentement. Les noms courts, .local et
+    // .home.arpa gardent le probe public de decouverte, mais pas un bypass auth.
     if (h === "localhost" || h === "127.0.0.1" || h === "::1") return true;
     if (isPrivateIpv4Literal(h) || isLocalIpv6Literal(h)) return true;
-    if (/\.local$/.test(h) || /\.home\.arpa$/.test(h)) return true;
-    return isTrustedLanHost(h);
+    return false;
 }
 
 function normalizeHostLike(value, maxLen) {
@@ -262,6 +269,51 @@ function isWanHttpUrl(url) {
     var host = extractHost(url);
     return isHttpUrl(url) && !isLocalHost(host);
 }
+
+// Consentement HTTP externe : UN SEUL origin approuve, en RAM uniquement.
+// Jamais de persistance dans Settings, dans le vault, ni dans l'URL.
+var _approvedWanHttpOrigin = "";
+function _wanHttpOrigin(url) {
+    var s = String(url || "").trim();
+    if (!s || s.length > 8192 || /[\r\n\t]/.test(s)) return "";
+    var m = /^http:\/\/([^\/?#]+)(?:[\/?#]|$)/i.exec(s);
+    if (!m) return "";
+    var authority = m[1];
+    if (authority.length > 255 || authority.indexOf("@") >= 0 || /\s/.test(authority)) return "";
+    var host = "", port = 80;
+    if (authority.charAt(0) === "[") {
+        var rb = authority.indexOf("]");
+        if (rb <= 1) return "";
+        host = authority.substring(1, rb).toLowerCase();
+        if (!isValidIpv6Literal(host)) return "";
+        var tail = authority.substring(rb + 1);
+        if (tail && !/^:\d{1,5}$/.test(tail)) return "";
+        if (tail) port = Number(tail.substring(1));
+        host = "[" + host + "]";
+    } else {
+        var pm = /^([a-zA-Z0-9._-]+)(?::(\d{1,5}))?$/.exec(authority);
+        if (!pm) return "";
+        host = pm[1].toLowerCase().replace(/\.+$/, "");
+        if (!host || host.length > 253) return "";
+        if (pm[2]) port = Number(pm[2]);
+    }
+    if (!isFinite(port) || Math.floor(port) !== port || port < 1 || port > 65535)
+        return "";
+    var origin = "http://" + host + ":" + port;
+    return isWanHttpUrl(origin) ? origin : "";
+}
+function hasWanHttpConsent(url) {
+    var origin = _wanHttpOrigin(url);
+    return !!(origin && _approvedWanHttpOrigin === origin);
+}
+function grantWanHttpConsent(url) {
+    var origin = _wanHttpOrigin(url);
+    if (!origin) return false;
+    _approvedWanHttpOrigin = origin; // toute autre approbation est revoquee
+    return true;
+}
+function clearWanHttpConsent() { _approvedWanHttpOrigin = ""; }
+function isWanHttpBlocked(url) { return isWanHttpUrl(url) && !hasWanHttpConsent(url); }
 
 /* ------------------------------------------------------------------------- */
 /* Codes d'erreur publics                                                    */
@@ -310,3 +362,11 @@ function safeErrorCode(value, fallback) {
 
     return fb;
 }
+
+// Utilitaires de masquage conserves pour les contrats de securite.
+// Aucune sortie de journal n'est emise dans le build public.
+function redactUrl(value) { return value ? "[SERVER_URL]" : ""; }
+function redactToken(value) { return value ? "[TOKEN]" : ""; }
+function redactUserId(value) { return value ? "[USER_ID]" : ""; }
+function redactItemId(value) { return value ? "[ITEM_ID]" : ""; }
+function redactPath(value) { return value ? "[MEDIA_PATH]" : ""; }

@@ -176,32 +176,48 @@ function _pushUniqueUpper(list, value) {
     var v = String(value === undefined || value === null ? "" : value).toUpperCase();
     if (v && list.indexOf(v) < 0) list.push(v);
 }
+// Resolution commune aux affiches et aux fiches. Combiner largeur et hauteur :
+// les films cinemas 3840x1608 restent 4K, 1920x800 restent 1080p,
+// mais un 2560x1080 ultralarge ne doit pas devenir artificiellement 1440p.
+function mediaVideoResolutionLabel(width, height) {
+    var w = Math.max(0, Number(width) || 0);
+    var h = Math.max(0, Number(height) || 0);
+    if (w >= 3800 || h >= 2000) return "4K";
+    if (h >= 1350 || (w >= 2500 && h >= 1200)) return "1440p";
+    if (w >= 1900 || h >= 1000) return "1080p";
+    if (w >= 1200 || h >= 700) return "720p";
+    if (w >= 700 || h >= 450) return "480p";
+    if (h > 0) return Math.floor(h) + "p";
+    return w > 0 ? Math.floor(w) + "p" : "";
+}
 function movieStreamInfo(it) {
     var out = { res:"", vcodec:"", acodec:"", channels:"", audioProfile:"", multiAudio:"", subs:"" };
-    var streams = it && it.MediaStreams ? it.MediaStreams : [];
+    var source = it && it.MediaSources && it.MediaSources.length ? it.MediaSources[0] : null;
+    var streams = (it && it.MediaStreams && it.MediaStreams.length) ? it.MediaStreams
+                : (source && source.MediaStreams ? source.MediaStreams : []);
     var audioLangs = [], subLangs = [], hasSubtitle = false;
+    var video = null, audio = null;
     for (var i = 0; streams && i < streams.length; i++) {
         var st = streams[i];
         if (!st) continue;
-        var typ = String(st.Type || "").toLowerCase();
-        if (typ === "video") {
-            if (!out.res && st.Width) {
-                var w = Number(st.Width) || 0;
-                if (w >= 1900) out.res = "1080p";
-                else if (w >= 1200) out.res = "720p";
-                else if (w >= 700) out.res = "480p";
-                else if (w > 0) out.res = w + "p";
-            }
-            if (!out.vcodec && st.Codec) out.vcodec = mediaCodecLabel(st.Codec);
-        } else if (typ === "audio") {
-            if (!out.audioProfile) out.audioProfile = _mediaFrenchAudioFlavor(st);
-            if (!out.acodec && st.Codec) out.acodec = mediaCodecLabel(st.Codec);
-            if (!out.channels) out.channels = mediaChannelLabel(st);
+        var typ = mediaStreamTypeLower(st);
+        if (typ === "video" && (!video || (!video.IsDefault && st.IsDefault))) video = st;
+        else if (typ === "audio") {
+            if (!audio || (!audio.IsDefault && st.IsDefault)) audio = st;
             _pushUniqueUpper(audioLangs, st.Language);
         } else if (typ === "subtitle") {
             hasSubtitle = true;
             _pushUniqueUpper(subLangs, st.Language);
         }
+    }
+    if (video) {
+        out.res = mediaVideoResolutionLabel(video.Width, video.Height);
+        out.vcodec = mediaCodecLabel(video.Codec);
+    }
+    if (audio) {
+        out.audioProfile = _mediaFrenchAudioFlavor(audio);
+        out.acodec = mediaCodecLabel(audio.Codec);
+        out.channels = mediaChannelLabel(audio);
     }
     if (audioLangs.length > 1) out.multiAudio = "AUDIO: " + audioLangs.join("/");
     if (subLangs.length > 0) out.subs = "ST: " + subLangs.join("/");
@@ -304,10 +320,17 @@ function isRealTypedMediaItem(it, typeName) {
     }
     return true;
 }
-function filterRealTypedMediaItems(items, typeName) {
+function filterRealTypedMediaItems(items, typeName, preserveServerBoxSets) {
     var out = [], types = mediaTypeNameList(typeName);
+    // L'API peut substituer un BoxSet aux films d'une bibliothèque regroupée.
+    // Ne pas activer nous-mêmes le regroupement ; conserver l'ordre API.
+    var allowGroupedBoxSets = preserveServerBoxSets === true && typeName === "Movie,Video,MusicVideo";
     items = items || [];
     for (var i = 0; i < items.length; i++) {
+        if (allowGroupedBoxSets && items[i] && items[i].Id && itemTypeLower(items[i]) === "boxset") {
+            out.push(items[i]);
+            continue;
+        }
         for (var t = 0; t < types.length; t++) {
             if (isRealTypedMediaItem(items[i], types[t])) {
                 out.push(items[i]);
@@ -388,7 +411,7 @@ function isSeries(it) {
 function isFolder(it) {
     if (!it || isSeries(it)) return false;
     var t = _mediaLibraryTypeLower(it);
-    return t === "folder" || t === "collectionfolder" || t === "season" || it.IsFolder === true;
+    return t === "folder" || t === "photoalbum" || t === "collectionfolder" || t === "season" || it.IsFolder === true;
 }
 function clampBlur(v) {
     return Math.max(1, Math.min(50, Number(v) | 0));
@@ -484,10 +507,23 @@ function isMixedLibraryFolder(lib) {
     var ct = _libraryField(lib, "CollectionType", "ct").toLowerCase();
     var t = _libraryField(lib, "Type", "t").toLowerCase();
     var n = _libraryNormName(_libraryField(lib, "Name", "name"));
-    return _libraryEqAny(ct, ["mixed", "moviesandshows", "moviesandtvshows"])
-        || _libraryEqAny(t, ["mixed", "mixedfolder"])
-        || ((_libraryHas(n, "serie") || _libraryHas(n, "series"))
-            && (_libraryHas(n, "film") || _libraryHas(n, "movie")));
+    // CollectionType fait foi lorsqu'il est fourni par Jellyfin. Certaines vues
+    // mixtes anciennes arrivent toutefois avec un CollectionFolder sans type.
+    if (_libraryEqAny(ct, ["mixed", "moviesandshows", "moviesandtvshows"]) ||
+            _libraryEqAny(t, ["mixed", "mixedfolder"])) return true;
+    if (ct && ct !== "folders") return false; // ne jamais reclassifier tvshows/movies/music/boxsets
+    if ((_libraryHas(n, "serie") || _libraryHas(n, "series")) &&
+            (_libraryHas(n, "film") || _libraryHas(n, "movie"))) return true;
+    // Route de secours pour les vues Jellyfin génériques dépourvues de type.
+    // Les médiathèques Films/Séries/Collections/Photos/Musique gardent leur route.
+    if (t !== "collectionfolder" && t !== "userview") return false;
+    if (_libraryHas(n, "serie") || _libraryHas(n, "series") ||
+            _libraryHas(n, "film") || _libraryHas(n, "movie") ||
+            _libraryHas(n, "collection") || n === "saga" || n === "sagas" ||
+            _libraryHas(n, "photo") || _libraryHas(n, "video") ||
+            _libraryHas(n, "music") || _libraryHas(n, "musique") ||
+            _libraryHas(n, "clip")) return false;
+    return true;
 }
 function isSeriesLibraryFolder(lib) {
     if (!lib || isKnownUnsupportedLibraryFolder(lib) || isMixedLibraryFolder(lib)) return false;
@@ -499,13 +535,42 @@ function isSeriesLibraryFolder(lib) {
         || _libraryHas(n, "serie")
         || _libraryHas(n, "series");
 }
+// Identifiant local réservé : ce n'est JAMAIS un vrai item Jellyfin.
+function virtualCollectionsFolderId() { return "redefin.virtual.boxsets"; }
+function isVirtualCollectionsFolderId(id) { return _rdfS(id) === virtualCollectionsFolderId(); }
+function hasCollectionsLibrary(views) {
+    for (var i = 0; views && i < views.length; ++i)
+        if (isCollectionsLibraryFolder(views[i])) return true;
+    return false;
+}
+// Ne créer une vue de secours sur l’accueil que si le profil autorise
+// explicitement l’affichage des Collections. /Items (BoxSet) seul ne prouve
+// jamais que l’utilisateur souhaite voir ce dossier sur son accueil.
+// Une exclusion MyMediaExcludes non vide reste ambiguë sans consulter les
+// vues cachées : privilégier l’absence de raccourci au contournement d’un choix.
+function mayOfferVirtualCollectionsLibrary(user, expectedUserId) {
+    if (!user || !expectedUserId || _rdfS(user.Id) !== _rdfS(expectedUserId)) return false;
+    var config = user.Configuration;
+    if (!config || config.DisplayCollectionsView !== true) return false;
+    var excludes = config.MyMediaExcludes;
+    if (excludes !== undefined && excludes !== null) {
+        if (!Array.isArray(excludes) || excludes.length > 0) return false;
+    }
+    return true;
+}
+function virtualCollectionsLibrary() {
+    return { Id: virtualCollectionsFolderId(), Name: "Collections",
+             CollectionType: "boxsets", Type: "CollectionFolder", IsFolder: true,
+             _redefinVirtualCollections: true };
+}
 function isCollectionsLibraryFolder(lib) {
     if (!lib || isKnownUnsupportedLibraryFolder(lib)) return false;
     var ct = _libraryField(lib, "CollectionType", "ct").toLowerCase();
     var t = _libraryField(lib, "Type", "t").toLowerCase();
     var n = _libraryNormName(_libraryField(lib, "Name", "name"));
     return ct === "boxsets" || t === "boxsets" || n === "collections" || n === "collection"
-        || _libraryHas(n, "collection");
+        || _libraryHas(n, "collection")
+        || ((!ct || ct === "boxsets") && (n === "saga" || n === "sagas"));
 }
 function folderShouldOpenOnMoviePage(lib) {
     if (!lib || isKnownUnsupportedLibraryFolder(lib)) return false;
@@ -835,18 +900,13 @@ function collectionTechChips(src, genreSrc) {
         else if (type === "subtitle") hasSubs = true;
     }
     if (video) {
-        var width = Number(video.Width || 0);
-        var res = width >= 1900 ? "1080p"
-                : width >= 1200 ? "720p"
-                : width >= 700 ? "480p"
-                : width > 0 ? width + "p"
-                : video.Height ? Number(video.Height) + "p" : "";
+        var res = mediaVideoResolutionLabel(video.Width, video.Height);
         if (res) chips.push({ t: res, c: "#232373", px: 14 });
         if (video.Codec) chips.push({ t: String(video.Codec).toUpperCase(), c: "#5a45b6", px: 14 });
     }
     if (audio) {
         if (audio.Codec) chips.push({ t: String(audio.Codec).toUpperCase(), c: "#295393", px: 14 });
-        if (Number(audio.Channels) > 0) chips.push({ t: Number(audio.Channels) + ".0", c: "#234", px: 14 });
+        if (mediaChannelLabel(audio)) chips.push({ t: mediaChannelLabel(audio), c: "#234", px: 14 });
     }
     var audioLangs = uniqueUpperStreamLanguages(streams, "audio");
     if (audioLangs.length > 1)
@@ -879,50 +939,6 @@ function collectionLogoImageUrl(Jellyfin, serverUrl, it, options) {
     if (!Jellyfin || !it || !it.Id || !serverUrl) return "";
     var tag = collectionLogoImageTag(it);
     return tag ? Jellyfin.itemImageUrl(serverUrl, it.Id, "Logo", tag, options || {}) : "";
-}
-
-/* ===== Helpers PersonPage ===== */
-function personCreditsSortKey(it) {
-    return safeString(it && (it.SortName || it.Name)).toLowerCase();
-}
-function personCreditsSortItems(a, b) {
-    var aa = personCreditsSortKey(a), bb = personCreditsSortKey(b);
-    if (aa < bb) return -1;
-    if (aa > bb) return 1;
-    return safeString(a && a.Id) < safeString(b && b.Id) ? -1 : 1;
-}
-function personEpisodeCode(it) {
-    if (!it) return "";
-    var season = Number(it.ParentIndexNumber), episode = Number(it.IndexNumber);
-    season = isFinite(season) ? season : -1;
-    episode = isFinite(episode) ? episode : -1;
-    if (season < 0 && episode < 0) return "";
-    function pad2(n) { return n < 10 ? ("0" + n) : String(n); }
-    if (season >= 0 && episode >= 0) return "S" + pad2(season) + "E" + pad2(episode);
-    if (episode >= 0) return "E" + pad2(episode);
-    return "S" + pad2(season);
-}
-function personEpisodeMeta(it) {
-    if (!it) return "";
-    var seriesName = safeString(it.SeriesName || "");
-    var code = personEpisodeCode(it);
-    return seriesName.length && code.length ? seriesName + " • " + code
-         : seriesName.length ? seriesName : code;
-}
-function personEpisodeSortItems(a, b) {
-    var sa = safeString(a && (a.SeriesName || a.Series || "")).toLowerCase();
-    var sb = safeString(b && (b.SeriesName || b.Series || "")).toLowerCase();
-    if (sa < sb) return -1;
-    if (sa > sb) return 1;
-    var sea = Number(a && a.ParentIndexNumber), seb = Number(b && b.ParentIndexNumber);
-    sea = isFinite(sea) ? sea : 99999;
-    seb = isFinite(seb) ? seb : 99999;
-    if (sea !== seb) return sea - seb;
-    var ea = Number(a && a.IndexNumber), eb = Number(b && b.IndexNumber);
-    ea = isFinite(ea) ? ea : 99999;
-    eb = isFinite(eb) ? eb : 99999;
-    if (ea !== eb) return ea - eb;
-    return personCreditsSortItems(a, b);
 }
 
 /* ===== Helpers PosterGrid ===== */
@@ -967,7 +983,7 @@ function isMusicLibraryFolder(lib) {
 }
 function posterGridBackdropImageSpec(it) {
     if (!it) return ({ id:"", type:"", tag:"" });
-    var itemType = itemTypeLower(it), ownTags = it.ImageTags || {};
+    var itemType = itemTypeLower(it);
     var ownBackdrop = (it.BackdropImageTags && it.BackdropImageTags.length) ? String(it.BackdropImageTags[0] || "") : "";
     var parentBackdrop = (it.ParentBackdropImageTags && it.ParentBackdropImageTags.length) ? String(it.ParentBackdropImageTags[0] || "") : "";
     var parentId = safeString(it.ParentBackdropItemId), seriesId = safeString(it.SeriesId);
@@ -1033,44 +1049,6 @@ function posterGridLatestGroupIndexFromSnapshot(groups, snap) {
     }
     return (!gid && !name && snap.currentLatestGroup !== undefined)
          ? clampIndex(snap.currentLatestGroup, groups.length) : -1;
-}
-function homeCacheEntryValid(entry, schemaVersion, freshMs, now) {
-    return !!entry && entry.schemaVersion === schemaVersion && !!entry.ts
-        && (now - Number(entry.ts || 0)) <= freshMs;
-}
-function touchHomeCache(store, key, schemaVersion, freshMs, now) {
-    var entry = store ? store[key] : null;
-    if (!homeCacheEntryValid(entry, schemaVersion, freshMs, now)) {
-        try { if (entry) delete store[key]; } catch (e) {}
-        return null;
-    }
-    entry.lastAccess = now;
-    return entry;
-}
-function trimHomeCacheStore(store, keepKey, schemaVersion, freshMs, maxEntries, now) {
-    if (!store) return;
-    var entries = [];
-    for (var key in store) {
-        try {
-            if (!Object.prototype.hasOwnProperty.call(store, key)) continue;
-            var entry = store[key];
-            if (!homeCacheEntryValid(entry, schemaVersion, freshMs, now)) {
-                delete store[key];
-                continue;
-            }
-            entries.push({ key:key, touch:Number(entry.lastAccess || entry.ts || 0) });
-        } catch (e) {}
-    }
-    entries.sort(function(a, b) { return a.touch - b.touch; });
-    while (entries.length > maxEntries) {
-        var victim = entries.shift();
-        if (!victim) break;
-        if (victim.key === keepKey && entries.length > 0) {
-            entries.push(victim);
-            continue;
-        }
-        try { delete store[victim.key]; } catch (e2) {}
-    }
 }
 
 /* Comparaison et filtrage des rails Home, sans dépendance réseau. */
@@ -1161,7 +1139,9 @@ function homeLatestGroupsEqual(a, b) {
     if (a.length !== b.length) return false;
     for (var i = 0; i < a.length; i++) {
         var ga = a[i] || {}, gb = b[i] || {};
-        if (_rdfS(ga.id) !== _rdfS(gb.id) || !homeItemsEqual(ga.items || [], gb.items || [])) return false;
+        if (_rdfS(ga.id) !== _rdfS(gb.id) || _rdfS(ga.name) !== _rdfS(gb.name) ||
+            !!ga._evicted !== !!gb._evicted || !!ga._hadItems !== !!gb._hadItems ||
+            !homeItemsEqual(ga.items || [], gb.items || [])) return false;
     }
     return true;
 }
@@ -1218,8 +1198,14 @@ function compactHeaderItemDetails(detail) {
         Width: detail.Width, Height: detail.Height,
         Bitrate: detail.Bitrate, Container: detail.Container
     })
-    if (detail.MediaStreams !== undefined && detail.MediaStreams !== null)
-        out.MediaStreams = compactHeaderStreams(detail.MediaStreams)
+    if (detail.Genres && detail.Genres.length) out.Genres = detail.Genres.slice(0, 12)
+    var source = detail.MediaSources && detail.MediaSources.length ? detail.MediaSources[0] : null
+    // Pour un film multiversion, le MediaSource réellement exposé par Jellyfin
+    // fait autorité pour le format vidéo/audio ; ne conserver que les champs
+    // techniques compacts dans le cache QML (jamais de Path ni d'URL).
+    var streams = source && source.MediaStreams && source.MediaStreams.length ? source.MediaStreams
+                : (detail.MediaStreams && detail.MediaStreams.length ? detail.MediaStreams : null)
+    if (streams) out.MediaStreams = compactHeaderStreams(streams)
     return out
 }
 
@@ -1254,33 +1240,6 @@ function compactCollectionDetails(value) {
              MediaStreams:compactCollectionStreams(value.MediaStreams || []) };
 }
 
-function personOverviewPresent(person) {
-    return !!person && plainOverview(person.Overview || "").length > 0;
-}
-
-function personBirthDatePresent(person) {
-    return !!person && safeString(person.BirthDate || person.PremiereDate || "").length > 0;
-}
-
-function personMetadataNeedsRefresh(person) {
-    return !person || !personOverviewPresent(person) || !personBirthDatePresent(person);
-}
-
-function mergePersonMetadata(richPerson, userScopedPerson) {
-    var rich = richPerson || null, scoped = userScopedPerson || null;
-    if (!rich) return scoped;
-    if (!scoped) return rich;
-    if (scoped.UserData) rich.UserData = scoped.UserData;
-    if (!personOverviewPresent(rich) && personOverviewPresent(scoped)) rich.Overview = scoped.Overview;
-    if (!personBirthDatePresent(rich) && personBirthDatePresent(scoped)) {
-        if (scoped.BirthDate) rich.BirthDate = scoped.BirthDate;
-        else rich.PremiereDate = scoped.PremiereDate;
-    }
-    if (!rich.DeathDate && scoped.DeathDate) rich.DeathDate = scoped.DeathDate;
-    if (!rich.EndDate && scoped.EndDate) rich.EndDate = scoped.EndDate;
-    return rich;
-}
-
 function navigationIdsForEpisodeLike(item) {
     if (!item) return { seriesId: "", seasonId: "", episodeId: "" };
     var typeName = itemTypeLower(item);
@@ -1309,92 +1268,7 @@ function collectionRailsFromPages(pages) {
     return { seen: seen, films: films, series: series };
 }
 
-function catalogPageWindowStart(pages) {
-    pages = safeArray(pages);
-    return pages.length ? Math.max(0, pages[0].start | 0) : 0;
-}
-
-function catalogPageWindowEnd(pages) {
-    pages = safeArray(pages);
-    if (!pages.length) return 0;
-    var last = pages[pages.length - 1] || ({});
-    return Math.max(0, (last.start | 0) + safeArray(last.items).length);
-}
-
-function catalogPageStartForItemId(pages, id) {
-    pages = safeArray(pages);
-    id = safeString(id);
-    for (var pageIndex = 0; id && pageIndex < pages.length; ++pageIndex) {
-        var page = pages[pageIndex] || ({}), items = safeArray(page.items);
-        if (findItemIndexById(items, id) >= 0) return Math.max(0, page.start | 0);
-    }
-    return catalogPageWindowStart(pages);
-}
-
-function appendCatalogPageWindow(pages, items, start, limit, direction, maxItems) {
-    pages = safeArray(pages).slice(0);
-    items = safeArray(items);
-    var replaced = false;
-    for (var i = 0; i < pages.length; ++i) {
-        if ((pages[i].start | 0) !== (start | 0)) continue;
-        pages[i] = { start:start, limit:limit, items:items, full:items.length >= limit };
-        replaced = true;
-        break;
-    }
-    if (!replaced && items.length)
-        pages.push({ start:start, limit:limit, items:items, full:items.length >= limit });
-    pages.sort(function(a, b) { return Number(a.start || 0) - Number(b.start || 0); });
-    var rawCount = function() {
-        var count = 0;
-        for (var pageIndex = 0; pageIndex < pages.length; ++pageIndex)
-            count += safeArray(pages[pageIndex] && pages[pageIndex].items).length;
-        return count;
-    };
-    while (pages.length > 1 && rawCount() > Number(maxItems || 0)) {
-        if (direction === "backward") pages.pop();
-        else pages.shift();
-    }
-    if (!items.length && pages.length) {
-        if (direction === "backward") pages[0].start = 0;
-        else pages[pages.length - 1].full = false;
-    }
-    return {
-        pages: pages,
-        hasMoreBefore: pages.length > 0 && Number(pages[0].start || 0) > 0,
-        hasMoreAfter: pages.length > 0 && pages[pages.length - 1].full === true
-    };
-}
-
-function personCreditBuckets(pages) {
-    pages = safeArray(pages).slice(0);
-    pages.sort(function(a, b) { return Number(a.start || 0) - Number(b.start || 0); });
-    var seen = ({}), movies = [], series = [], episodes = [];
-    for (var pageIndex = 0; pageIndex < pages.length; ++pageIndex) {
-        var items = safeArray(pages[pageIndex] && pages[pageIndex].items);
-        for (var itemIndex = 0; itemIndex < items.length; ++itemIndex) {
-            var item = items[itemIndex], id = item && item.Id ? String(item.Id) : "";
-            if (!item || !id || seen[id]) continue;
-            seen[id] = true;
-            var typeName = itemTypeLower(item);
-            if (typeName === "movie") movies.push(item);
-            else if (typeName === "series") series.push(item);
-            else if (typeName === "episode") episodes.push(item);
-        }
-    }
-    try { episodes.sort(personEpisodeSortItems); } catch (sortError) {}
-    return { movies:movies, series:series, episodes:episodes };
-}
-
-function personCreditsPageContains(items, railKind) {
-    if (!railKind) return true;
-    var wanted = railKind === "movies" ? "movie" : (railKind === "series" ? "series" : "episode");
-    items = safeArray(items);
-    for (var i = 0; i < items.length; ++i)
-        if (itemTypeLower(items[i]) === wanted) return true;
-    return false;
-}
-
-// Métadonnées d’épisode, chapitres et choix d’images de saison.
+// Métadonnées de chapitres. Les épisodes et saisons sont dans SeasonUtils.
 // Les constructeurs d’URL reçoivent le bridge explicitement : aucun import réseau.
 function pad2(n) {
     n = +n;
@@ -1450,435 +1324,6 @@ function formatRatingFr(n) {
         return "";
     return Number(n).toLocaleString(Qt.locale(), "f", 1);
 }
-
-function _seasonBackdropBlur(v) {
-    var n = (v === undefined || v === null) ? 25 : (v | 0);
-    if (n < 1) n = 1;
-    if (n > 50) n = 50;
-    return n;
-}
-
-function _seasonBackdropImageUrl(Jellyfin, serverUrl, id, tag, w, h, q, blur) {
-    return Jellyfin.itemImageUrl(serverUrl, id, "Backdrop", tag, {
-        fillWidth: w, fillHeight: h, quality: q, blur: blur
-    });
-}
-
-function _seasonPrimaryImageUrl(Jellyfin, serverUrl, id, tag, w, h, q, blur) {
-    return Jellyfin.itemImageUrl(serverUrl, id, "Primary", tag, {
-        fillWidth: w, fillHeight: h, quality: q, blur: blur
-    });
-}
-
-function seasonBackdropUrl(Jellyfin, a, seasonItem, episodes, seriesId, seasonId, bgBlur, backdropQuality) {
-    var ctx = null; var serverUrl = ""; var blur = 13; var q = 70; var w = 1280, h = 720;
-    if (a && typeof a === "object") {
-        ctx = a;
-        serverUrl = ctx.serverUrl || "";
-        seasonItem = ctx.seasonItem || null;
-        episodes = ctx.episodes || null;
-        seriesId = ctx.seriesId || "";
-        seasonId = ctx.seasonId || "";
-        bgBlur = (ctx.bgBlur !== undefined) ? ctx.bgBlur : bgBlur;
-        backdropQuality = (ctx.backdropQuality !== undefined) ? ctx.backdropQuality : backdropQuality;
-    } else {
-        serverUrl = a || "";
-    }
-    var baseNoSlash = serverUrl;
-    if (!baseNoSlash)
-        return "";
-    blur = _seasonBackdropBlur(bgBlur);
-    q = (backdropQuality !== undefined && backdropQuality !== null) ? (backdropQuality | 0) : 70;
-    function firstTag(arr) { return (arr && arr.length) ? String(arr[0] || "") : ""; }
-    var parentId = ""; var parentTag = "";
-    if (seasonItem && seasonItem.ParentBackdropItemId
-        && seasonItem.ParentBackdropImageTags
-        && seasonItem.ParentBackdropImageTags.length > 0) {
-        parentId = seasonItem.ParentBackdropItemId;
-        parentTag = firstTag(seasonItem.ParentBackdropImageTags);
-    } else if (episodes && episodes.length > 0) {
-        var e0 = episodes[0];
-        if (e0 && e0.ParentBackdropItemId
-            && e0.ParentBackdropImageTags
-            && e0.ParentBackdropImageTags.length > 0) {
-            parentId = e0.ParentBackdropItemId;
-            parentTag = firstTag(e0.ParentBackdropImageTags);
-        }
-    }
-    if (parentId)
-        return _seasonBackdropImageUrl(Jellyfin, baseNoSlash, parentId, parentTag, w, h, q, blur);
-    if (seriesId)
-        return _seasonBackdropImageUrl(Jellyfin, baseNoSlash, seriesId, "", w, h, q, blur);
-    if (seasonItem && seasonItem.Id) {
-        if (seasonItem.BackdropImageTags && seasonItem.BackdropImageTags.length > 0)
-            return _seasonBackdropImageUrl(Jellyfin, baseNoSlash, seasonItem.Id, firstTag(seasonItem.BackdropImageTags), w, h, q, blur);
-        if (seasonItem.ImageTags && seasonItem.ImageTags.Primary)
-            return _seasonPrimaryImageUrl(Jellyfin, baseNoSlash, seasonItem.Id, seasonItem.ImageTags.Primary, w, h, q, blur);
-    }
-    if (seasonId)
-        return _seasonBackdropImageUrl(Jellyfin, baseNoSlash, seasonId, "", w, h, q, blur);
-    return "";
-}
-
-function episodeCode(ep, seasonItem) {
-    if (!ep)
-        return "";
-    var s = (ep.ParentIndexNumber !== null && ep.ParentIndexNumber !== undefined)
-          ? ep.ParentIndexNumber
-          : ((seasonItem && seasonItem.IndexNumber !== null && seasonItem.IndexNumber !== undefined)
-                ? seasonItem.IndexNumber
-                : "");
-    var e = (ep.IndexNumber !== null && ep.IndexNumber !== undefined)
-          ? ep.IndexNumber
-          : "";
-    if (s === "" && e === "")
-        return "";
-    return "S" + (s === "" ? "?" : s) + ":" + "E" + (e === "" ? "?" : e);
-}
-
-function _episodeNameLooksLikeFilename(name) {
-    if (!name)
-        return false;
-    var n = String(name);
-    if (/\.(mkv|mp4|avi|mov|wmv|m4v|flv|ts|m2ts)$/i.test(n))
-        return true;
-    return (n.indexOf(".") >= 0 && n.split(".").length > 2) || /[_-]\d{3,}/.test(n);
-}
-
-function episodeDisplayTitle(ep) {
-    if (!ep)
-        return "";
-
-    var name = (ep.Name !== undefined && ep.Name !== null)
-             ? String(ep.Name).replace(/^\s+|\s+$/g, "")
-             : "";
-    var originalTitle = (ep.OriginalTitle !== undefined && ep.OriginalTitle !== null)
-                      ? String(ep.OriginalTitle).replace(/^\s+|\s+$/g, "")
-                      : "";
-
-    // Préférer les métadonnées propres sans jamais jeter un titre Jellyfin valide.
-    if (name.length && !_episodeNameLooksLikeFilename(name))
-        return name;
-    if (originalTitle.length && !_episodeNameLooksLikeFilename(originalTitle))
-        return originalTitle;
-
-    // Un Name imparfait reste plus informatif que le fallback générique "Épisode N".
-    if (name.length)
-        return name;
-    if (originalTitle.length)
-        return originalTitle;
-
-    if (ep.IndexNumber !== null && ep.IndexNumber !== undefined)
-        return "Épisode " + ep.IndexNumber;
-
-    return "Épisode";
-}
-
-function _seasonSeriesId(seriesId, selectedEpisode, seasonItem) {
-    var sid = String(seriesId || "");
-    if (!sid && selectedEpisode) {
-        try {
-            if (selectedEpisode.SeriesId) sid = String(selectedEpisode.SeriesId);
-        } catch (e0) {}
-    }
-    if (!sid && seasonItem) {
-        try {
-            if (seasonItem.SeriesId) sid = String(seasonItem.SeriesId);
-        } catch (e1) {}
-    }
-    if (!sid && seasonItem) {
-        try {
-            if (seasonItem.Id) sid = String(seasonItem.Id);
-        } catch (e2) {}
-    }
-    return sid;
-}
-
-function _seasonSeriesPrimaryTag(selectedEpisode, seasonItem, ctxSeriesItem) {
-    try {
-        if (ctxSeriesItem && ctxSeriesItem.ImageTags && ctxSeriesItem.ImageTags.Primary)
-            return String(ctxSeriesItem.ImageTags.Primary);
-    } catch (e0) {}
-    try {
-        if (seasonItem && seasonItem.SeriesPrimaryImageTag)
-            return String(seasonItem.SeriesPrimaryImageTag);
-    } catch (e1) {}
-    try {
-        if (selectedEpisode && selectedEpisode.SeriesPrimaryImageTag)
-            return String(selectedEpisode.SeriesPrimaryImageTag);
-    } catch (e2) {}
-    try {
-        if (seasonItem && seasonItem.ImageTags && seasonItem.ImageTags.Primary && seasonItem.Type === "Series")
-            return String(seasonItem.ImageTags.Primary);
-    } catch (e3) {}
-    return "";
-}
-
-function _seasonSeriesPosterUrl(Jellyfin, serverUrl, seriesId, tag, w, h, q) {
-    return Jellyfin.itemImageUrl(serverUrl, seriesId, "Primary", tag, {
-        format: "jpg", quality: q, fillWidth: w, fillHeight: h
-    });
-}
-
-function seasonPosterFallbackUrl(Jellyfin, a, seriesId, selectedEpisode, seasonItem,
-                                       cardW, cardH, posterRequestScale, posterRequestQuality) {
-    var ctx = null; var serverUrl = ""; var episodes = null;
-    if (a && typeof a === "object") {
-        ctx = a;
-        serverUrl = ctx.serverUrl || "";
-        seriesId = ctx.seriesId || seriesId || "";
-        selectedEpisode = ctx.selectedEpisode || selectedEpisode || null;
-        seasonItem = ctx.seasonItem || seasonItem || null;
-        cardW = ctx.episodeCardW || ctx.cardW || cardW || 360;
-        cardH = ctx.episodeCardH || ctx.cardH || cardH || 240;
-        posterRequestScale = (ctx.posterRequestScale !== undefined) ? ctx.posterRequestScale : posterRequestScale;
-        posterRequestQuality = (ctx.posterRequestQuality !== undefined) ? ctx.posterRequestQuality : posterRequestQuality;
-        episodes = ctx.episodes || null;
-    } else {
-        serverUrl = a || "";
-    }
-    if (!serverUrl)
-        return "";
-    if (!selectedEpisode && episodes && episodes.length) selectedEpisode = episodes[0];
-    var sid = _seasonSeriesId(seriesId, selectedEpisode, seasonItem);
-    if (!sid)
-        return "";
-    var base = serverUrl;
-    if (!base)
-        return "";
-    var scale = (posterRequestScale !== undefined && posterRequestScale !== null) ? Number(posterRequestScale) : 1.0;
-    if (!(scale > 0)) scale = 1.0;
-    var reqW = Math.max(200, Math.round((cardW || 360) * scale)); var reqH = Math.max(140, Math.round((cardH || 240) * scale)); var q = (posterRequestQuality !== undefined && posterRequestQuality !== null) ? (posterRequestQuality | 0) : 72;
-    var ctxSeriesItem = null;
-    try { if (ctx && ctx.seriesItem) ctxSeriesItem = ctx.seriesItem; } catch (e0) { ctxSeriesItem = null; }
-    var tag = _seasonSeriesPrimaryTag(selectedEpisode, seasonItem, ctxSeriesItem);
-    return _seasonSeriesPosterUrl(Jellyfin, base, sid, tag, reqW, reqH, q);
-}
-
-function _episodeStreamTags(it) {
-    if (!it)
-        return [];
-    var ms = (it.MediaStreams || []); var v = null; var aud = [];
-    var i;
-    for (i = 0; i < ms.length; i++) {
-        var s = ms[i];
-        if (s && s.Type === "Video" && !v)
-            v = s;
-        if (s && s.Type === "Audio")
-            aud.push(s);
-    }
-    var tags = []; var hasSub = false;
-    if (it.SubtitleFiles && it.SubtitleFiles.length)
-        hasSub = true;
-    else {
-        for (i = 0; i < ms.length; i++) {
-            if (ms[i] && ms[i].Type === "Subtitle") { hasSub = true; break; }
-        }
-    }
-    if (hasSub)
-        tags.push("ST");
-    if (v) {
-        if (v.Width && v.Height) {
-            var hh = v.Height;
-            if (hh >= 2160)      tags.push("2160p");
-            else if (hh >= 1440) tags.push("1440p");
-            else if (hh >= 1080) tags.push("1080p");
-            else if (hh >= 720)  tags.push("720p");
-            else                 tags.push(hh + "p");
-        }
-        if (v.Codec)
-            tags.push(String(v.Codec).toUpperCase());
-        if (v.VideoRange)
-            tags.push(String(v.VideoRange).toUpperCase());
-    }
-    if (aud.length > 0) {
-        var a = aud[0];
-        if (a.Codec)
-            tags.push(String(a.Codec).toUpperCase());
-        if (a.ChannelLayout)
-            tags.push(String(a.ChannelLayout).toUpperCase());
-        else if (a.Channels) {
-            if (a.Channels >= 6)       tags.push("5.1");
-            else if (a.Channels === 2) tags.push("STEREO");
-        }
-    }
-    if (it.Container) {
-        var c = String(it.Container).toUpperCase(); var found = false;
-        for (i = 0; i < tags.length; i++) {
-            if (tags[i] === c) { found = true; break; }
-        }
-        if (!found)
-            tags.push(c);
-    }
-    return tags;
-}
-
-function seasonLogoUrl(Jellyfin, serverUrl, seriesId, selectedEpisode, seasonItem,
-                              maxW, seriesLogoMaxW) {
-    var sid = seriesId ||
-              (selectedEpisode &&
-                (selectedEpisode.SeriesId ||
-                 (selectedEpisode.SeriesPrimaryImageTag && selectedEpisode.SeriesId))) ||
-              (seasonItem &&
-                (seasonItem.SeriesId || seasonItem.Id)) ||
-              "";
-    if (!serverUrl || !sid)
-        return "";
-    var baseW = seriesLogoMaxW || 320;
-    var w = Math.max(64, Math.round((maxW || baseW) * 2));
-    return Jellyfin.itemImageUrl(serverUrl, sid, "Logo", "", { quality: 85, maxWidth: w });
-}
-
-function episodeOverviewPayload(Jellyfin, ep, serverUrl) {
-    if (!ep || !ep.Overview)
-        return null;
-    var posterUrl = "";
-    if (serverUrl && ep.ImageTags && ep.ImageTags.Primary) {
-        posterUrl = Jellyfin.itemImageUrl(serverUrl, ep.Id, "Primary", ep.ImageTags.Primary,
-                                           { quality: 88 });
-    }
-    return {
-        posterUrl: posterUrl,
-        overview: ep.Overview
-    };
-}
-
-function _episodeTagFold(v) {
-    var s = String(v || "").toLowerCase();
-    s = s.replace(/[àáâãäåā]/g, "a");
-    s = s.replace(/[ç]/g, "c");
-    s = s.replace(/[èéêëēėę]/g, "e");
-    s = s.replace(/[îïíīįì]/g, "i");
-    s = s.replace(/[ôöòóõøō]/g, "o");
-    s = s.replace(/[ùúûüū]/g, "u");
-    s = s.replace(/[ÿ]/g, "y");
-    s = s.replace(/\s+/g, " ");
-    s = s.replace(/^\s+/, "").replace(/\s+$/, "");
-    return s;
-}
-
-function _episodeStreamType(st) {
-    if (!st) return "";
-    if (st.Type === 0) return "Audio";
-    if (st.Type === 1) return "Video";
-    if (st.Type === 2) return "Subtitle";
-    var t = String(st.Type || st.type || "").toLowerCase();
-    if (t === "audio") return "Audio";
-    if (t === "video") return "Video";
-    if (t === "subtitle") return "Subtitle";
-    return "";
-}
-
-function _episodeTagHasAny(s, arr) {
-    for (var i = 0; i < arr.length; i++) {
-        if (s.indexOf(arr[i]) >= 0) return true;
-    }
-    return false;
-}
-
-function _episodeStreamLangCode(st) {
-    var raw = _episodeTagFold((st && (st.Language || st.language)) || ""); var blob = _episodeTagFold((st && (st.DisplayTitle || st.Title || st.displayTitle || st.title)) || "");
-    if (raw === "fr" || raw === "fra" || raw === "fre" || raw === "french" || raw === "francais" || _episodeTagHasAny(blob, ["francais", "french"])) return "FR";
-    if (raw === "en" || raw === "eng" || raw === "english" || _episodeTagHasAny(blob, ["anglais", "english"])) return "EN";
-    if (raw === "ja" || raw === "jp" || raw === "jpn" || raw === "japanese" || _episodeTagHasAny(blob, ["japonais", "japanese"])) return "JP";
-    if (raw === "es" || raw === "spa" || raw === "esp" || raw === "spanish" || _episodeTagHasAny(blob, ["espagnol", "spanish"])) return "ES";
-    if (raw === "de" || raw === "ger" || raw === "deu" || raw === "german" || _episodeTagHasAny(blob, ["allemand", "german"])) return "DE";
-    if (raw === "it" || raw === "ita" || raw === "italian" || _episodeTagHasAny(blob, ["italien", "italian"])) return "IT";
-    if (raw === "pt" || raw === "por" || raw === "portuguese" || _episodeTagHasAny(blob, ["portugais", "portuguese"])) return "PT";
-    if (raw === "ko" || raw === "kor" || raw === "korean" || _episodeTagHasAny(blob, ["coreen", "korean"])) return "KO";
-    if (raw === "zh" || raw === "chi" || raw === "zho" || raw === "chinese" || _episodeTagHasAny(blob, ["chinois", "chinese"])) return "ZH";
-    if (raw === "ru" || raw === "rus" || raw === "russian" || _episodeTagHasAny(blob, ["russe", "russian"])) return "RU";
-    if (raw.length >= 2) return raw.substr(0, 2).toUpperCase();
-    return "";
-}
-
-function _episodeTagPushUnique(arr, value) {
-    value = String(value || "");
-    if (!value.length) return;
-    for (var i = 0; i < arr.length; i++) {
-        if (arr[i] === value) return;
-    }
-    arr.push(value);
-}
-
-function _episodeStreamLangListTag(src, streamType, prefix) {
-    if (!src || !src.MediaStreams) return "";
-    var langs = []; var count = 0;
-    for (var i = 0; i < src.MediaStreams.length; i++) {
-        var st = src.MediaStreams[i];
-        if (!st || _episodeStreamType(st) !== streamType) continue;
-        count++;
-        _episodeTagPushUnique(langs, _episodeStreamLangCode(st));
-    }
-    if (count <= 0) return "";
-    if (langs.length > 0) return prefix + " " + langs.join(" / ");
-    return prefix + " " + count + " piste" + (count > 1 ? "s" : "");
-}
-
-function _isGenericEpisodeTrackTag(tag) {
-    var s = _episodeTagFold(tag);
-    if (!s || /^\+[0-9]+$/.test(s)) return true;
-    if (s === "st" || s === "sub" || s === "subs" || s === "subtitle" || s === "subtitles" || s === "sous titres" || s === "sous-titres") return true;
-    if (s === "multi" || s === "multi audio" || s === "multiaudio" || s === "audio multi") return true;
-    return false;
-}
-
-function _episodeLanguageTags(src, baseTags) {
-    var out = [];
-    baseTags = baseTags || [];
-    for (var i = 0; i < baseTags.length; i++) {
-        var tag = String(baseTags[i] || "");
-        if (!_isGenericEpisodeTrackTag(tag)) _episodeTagPushUnique(out, tag);
-    }
-    var audioTag = _episodeStreamLangListTag(src, "Audio", "AUDIO"); var subTag = _episodeStreamLangListTag(src, "Subtitle", "ST");
-    if (audioTag.length > 0) _episodeTagPushUnique(out, audioTag);
-    if (subTag.length > 0) _episodeTagPushUnique(out, subTag);
-    return out;
-}
-
-function episodeTechChips(src) {
-    if (!src) return [];
-    var t = [];
-    try { t = _episodeStreamTags(src) || []; } catch (e0) { t = []; }
-    return _episodeLanguageTags(src, t);
-}
-
-function compactEpisodeDetails(details) {
-    if (!details) return null;
-    var streams = [], sourceStreams = details.MediaStreams || [];
-    for (var i = 0; i < sourceStreams.length; ++i) {
-        var stream = sourceStreams[i];
-        if (!stream) continue;
-        streams.push({
-            Type: stream.Type, Codec: stream.Codec || "", Width: Number(stream.Width || 0),
-            Height: Number(stream.Height || 0), VideoRange: stream.VideoRange || "",
-            ChannelLayout: stream.ChannelLayout || "", Channels: Number(stream.Channels || 0),
-            Language: stream.Language || "", DisplayTitle: stream.DisplayTitle || "",
-            Title: stream.Title || ""
-        });
-    }
-    var directors = [], people = details.People || [];
-    for (var p = 0; p < people.length; ++p) {
-        var person = people[p] || {};
-        var role = String(person.Type || person.Role || person.Job || "");
-        if (/director/i.test(role)) {
-            directors.push({ Name: person.Name || "", Type: person.Type || "",
-                               Role: person.Role || "", Job: person.Job || "" });
-        }
-    }
-    var tags = details.ImageTags || {};
-    return {
-        Id: details.Id || "", Name: details.Name || "", Type: details.Type || "Episode",
-        Overview: details.Overview || "", CommunityRating: details.CommunityRating,
-        OfficialRating: details.OfficialRating || "", ProductionYear: details.ProductionYear,
-        PremiereDate: details.PremiereDate || "", RunTimeTicks: Number(details.RunTimeTicks || 0),
-        Container: details.Container || "", UserData: details.UserData || null,
-        ImageTags: tags.Primary ? { Primary: tags.Primary } : {}, People: directors,
-        SubtitleFiles: (details.SubtitleFiles && details.SubtitleFiles.length) ? [true] : [],
-        MediaStreams: streams
-    };
-}
-
 
 // Titres des cartes Home/Search : séries groupées, saisons et épisodes.
 function _posterPad2(v) {
