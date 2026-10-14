@@ -904,7 +904,7 @@ Item {
             }
         }
     }
-    readonly property int homeCacheSchemaVersion: 19; readonly property int homeCacheMaxEntries: 2
+    readonly property int homeCacheSchemaVersion: 20; readonly property int homeCacheMaxEntries: 2
     property string _lastHomeCacheRestoreKey: ""
     property double _lastHomeCacheRestoreCacheTs: 0
     function _homeCacheKey(){ return "home|" + SafeLog.shortHash(serverUrl) + "|" + SafeLog.shortHash(userId) + "|" + SafeLog.shortHash("") }
@@ -1008,7 +1008,13 @@ Item {
             _latestAllComplete = true
             _latestInitialComplete = true
             _latestHadFailures = false
-            var cachedLibrary = MediaCatalog.safeArray(c.libraryItems); var cachedResume  = MediaRailLayout.prepareHomeRowMetrics(MediaCatalog.safeArray(c.resumeItems), "resume", homeCardLayout); var cachedNextUp  = MediaCatalog.safeArray(c.nextUpItems)
+            // Défense supplémentaire contre un ancien snapshot contenant une
+            // vue synthétique : seules les bibliothèques réelles sont restaurées.
+            var cachedLibrary = MediaCatalog.safeArray(c.libraryItems).filter(function(i) {
+                return i && !MediaCatalog.isVirtualCollectionsFolderId(i.Id)
+            })
+            var cachedResume = MediaRailLayout.prepareHomeRowMetrics(MediaCatalog.safeArray(c.resumeItems), "resume", homeCardLayout)
+            var cachedNextUp = MediaCatalog.safeArray(c.nextUpItems)
             var cachedLatest  = MediaRailLayout.prepareHomeLatestGroups(MediaCatalog.safeArray(c.latestByFolder), homeCardLayout)
             if (!MediaCatalog.homeItemsEqual(libraryItems || [], cachedLibrary)) libraryItems = cachedLibrary
             if (!MediaCatalog.homeItemsEqual(resumeItems  || [], cachedResume))  resumeItems  = cachedResume
@@ -1688,32 +1694,9 @@ Item {
             var raw = (items && items.length !== undefined) ? items : []
             var safe = raw.filter(function(i){ return i && i.Name !== "Playlists" })
             root._setListIfChanged("libraryItems", safe)
-            if (!MediaCatalog.hasCollectionsLibrary(safe) && Jellyfin.probeAccessibleCollections) {
-                // /UserViews reste la référence de la Home. Si elle omet
-                // Collections, ne pas déduire la visibilité du simple fait
-                // que /Items renvoie un BoxSet : la vue peut être masquée.
-                // Un raccourci de secours n’est créé qu’avec l’accord explicite
-                // du profil, et uniquement si un BoxSet est réellement présent.
-                Jellyfin.fetchUser(root.serverUrl, root.accessToken, root.userId,
-                    function(user) {
-                        if (!postergrid._safeCanTouch(seq) ||
-                                !MediaCatalog.mayOfferVirtualCollectionsLibrary(user, root.userId)) return
-                        Jellyfin.probeAccessibleCollections(root.serverUrl, root.accessToken, root.userId,
-                            function(hasBoxsets) {
-                                if (!hasBoxsets || !postergrid._safeCanTouch(seq)) return
-                                var current = root.libraryItems || []
-                                if (MediaCatalog.hasCollectionsLibrary(current)) return
-                                root._setListIfChanged("libraryItems", current.concat([MediaCatalog.virtualCollectionsLibrary()]))
-                                root._resetHydration()
-                                root.updateBackdrop()
-                                root.scheduleFocusRestore()
-                            }, function() {
-                                // La sonde a échoué : ne rien ajouter à l’accueil.
-                            })
-                    }, function() {
-                        // Préférences indisponibles : comportement conservateur.
-                    })
-            }
+            // Accueil : /UserViews fait autorité. Ne jamais recréer un dossier
+            // Collections absent ou masqué côté Jellyfin à partir des BoxSet.
+            // Les sagas restent accessibles dans les bibliothèques Films.
             root.currentFolderIndex = MediaCatalog.clampIndex(root.currentFolderIndex, Math.min(root.libraryItems.length, root.sectionMaxItems))
             Jellyfin.fetchHomeResumeItems( root.serverUrl, root.accessToken, root.userId, root.sectionMaxItems, function(it) {
                     if (!postergrid._safeCanTouch(seq)) return
