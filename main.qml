@@ -18,6 +18,8 @@ Application {
     // Flag interne : Settings prêts avant ShellPage ?
     property bool _settingsReady: false
     readonly property var settingsRef: settings
+    // Version publique unique (clientId.js), synchronisée avec manifest.json.
+    readonly property string appVersion: ClientId.applicationVersion()
 
 
     // Limites défensives légères pour éviter de persister accidentellement un dump énorme
@@ -49,10 +51,16 @@ Application {
         // Purge seulement les anciennes copies de token qui auraient pu rester
         // dans fbx.application.Settings. La métadonnée `remember` reste autorisée.
         try {
-            var current = settings.usersJson || "[]"
-            var safe = UserStore.sanitizeUsersJsonForStorage(current, settings.maximumSessionSecurity === true)
-            if (String(current) !== String(safe))
-                settings.usersJson = safe
+            // Les anciennes URLs en majuscules sont liees aux cles du coffre V3.
+            // Migrer ces identites AVANT de reecrire usersJson, sans purger un
+            // coffre qui ne pourrait pas etre decode pendant l'initialisation.
+            UserStore.init(fbx)
+            if (UserStore.migrateStoredServerIdentities() !== false) {
+                var current = settings.usersJson || "[]"
+                var safe = UserStore.sanitizeUsersJsonForStorage(current, settings.maximumSessionSecurity === true)
+                if (String(current) !== String(safe))
+                    settings.usersJson = safe
+            }
         } catch (e0) {}
         try {
             if (settings.lastAccessToken)
@@ -127,26 +135,51 @@ Application {
                 settings.rememberJellyfinSession = nextRememberSession
         }
 
-        if (payload.serverUrl !== undefined && payload.serverUrl !== null)
-            settings.serverUrl = _normalizeServerUrl(payload.serverUrl)
+        // Evite les ecritures persistantes et les notifications Settings si la
+        // valeur effective est deja celle stockee. Toujours normaliser / assainir
+        // les valeurs recues AVANT de les comparer (notamment les profils JSON).
+        if (payload.serverUrl !== undefined && payload.serverUrl !== null) {
+            var nextServerUrl = _normalizeServerUrl(payload.serverUrl)
+            if (settings.serverUrl !== nextServerUrl)
+                settings.serverUrl = nextServerUrl
+        }
 
-        if (payload.lastUserId !== undefined && payload.lastUserId !== null)
-            settings.lastUserId = _safeString(payload.lastUserId, _maxUserIdLen, "")
+        if (payload.lastUserId !== undefined && payload.lastUserId !== null) {
+            var nextLastUserId = _safeString(payload.lastUserId, _maxUserIdLen, "")
+            if (settings.lastUserId !== nextLastUserId)
+                settings.lastUserId = nextLastUserId
+        }
 
-        if (payload.lastUserName !== undefined && payload.lastUserName !== null)
-            settings.lastUserName = _safeString(payload.lastUserName, _maxUserNameLen, "")
+        if (payload.lastUserName !== undefined && payload.lastUserName !== null) {
+            var nextLastUserName = _safeString(payload.lastUserName, _maxUserNameLen, "")
+            if (settings.lastUserName !== nextLastUserName)
+                settings.lastUserName = nextLastUserName
+        }
 
-        if (payload.lastAccessToken !== undefined && payload.lastAccessToken !== null)
+        // Aucun token brut n'est conserve, meme si le payload en contient un.
+        if (payload.lastAccessToken !== undefined && payload.lastAccessToken !== null
+                && settings.lastAccessToken !== "")
             settings.lastAccessToken = ""
 
-        if (payload.usersJson !== undefined && payload.usersJson !== null)
-            settings.usersJson = UserStore.sanitizeUsersJsonForStorage(payload.usersJson, settings.maximumSessionSecurity === true)
+        if (payload.usersJson !== undefined && payload.usersJson !== null) {
+            var nextUsersJson = UserStore.sanitizeUsersJsonForStorage(
+                        payload.usersJson, settings.maximumSessionSecurity === true)
+            if (settings.usersJson !== nextUsersJson)
+                settings.usersJson = nextUsersJson
+        }
 
-        if (payload.usersServersJson !== undefined && payload.usersServersJson !== null)
-            settings.usersServersJson = UserStore.sanitizeServersJsonForStorage(payload.usersServersJson)
+        if (payload.usersServersJson !== undefined && payload.usersServersJson !== null) {
+            var nextUsersServersJson = UserStore.sanitizeServersJsonForStorage(payload.usersServersJson)
+            if (settings.usersServersJson !== nextUsersServersJson)
+                settings.usersServersJson = nextUsersServersJson
+        }
 
-        if (payload.usersActiveKey !== undefined && payload.usersActiveKey !== null)
-            settings.usersActiveKey = _safeString(payload.usersActiveKey, _maxServerUrlLen + _maxUserIdLen + 8, "")
+        if (payload.usersActiveKey !== undefined && payload.usersActiveKey !== null) {
+            var nextUsersActiveKey = _safeString(payload.usersActiveKey,
+                                                 _maxServerUrlLen + _maxUserIdLen + 8, "")
+            if (settings.usersActiveKey !== nextUsersActiveKey)
+                settings.usersActiveKey = nextUsersActiveKey
+        }
 
     }
 
@@ -325,9 +358,6 @@ Application {
             }
         }
 
-        onStatusChanged: {
-            // Pas de logs: on laisse l’UI / ShellPage gérer l’erreur.
-            // Loader.Error est observable côté QML si tu veux afficher un écran d’erreur.
-        }
+
     }
 }

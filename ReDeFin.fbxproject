@@ -4,7 +4,8 @@ Project {
     mainFile: "main.qml"
 
     /*
-     * ReDeFin / Freebox
+     * ReDeFin / Freebox - version 0.9.9.1
+     * Le numéro de version du package est déclaré dans manifest.json.
      *
      * Liste blanche par répertoire fonctionnel : l'export ne parcourt plus toute
      * l'arborescence du dépôt. Le package doit néanmoins toujours être généré
