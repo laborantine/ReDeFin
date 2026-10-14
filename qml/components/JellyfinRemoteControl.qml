@@ -61,10 +61,9 @@ Item {
                     && base.indexOf("https://") !== 0))
             return false
 
-        // Le token WebSocket doit être placé dans l'URL. On refuse donc
-        // explicitement un serveur HTTP public qui deviendrait un ws:// public.
+        // Le token WebSocket doit etre dans l'URL : HTTP public sans accord interdit.
         try {
-            if (JFB.isWanHttpUrl && JFB.isWanHttpUrl(base))
+            if (JFB.isWanHttpBlocked && JFB.isWanHttpBlocked(base))
                 return false
         } catch (e0) {}
         return true
