@@ -107,12 +107,12 @@ FocusScope {
     }
     property int marginL: 40
     property int marginR: 40
-    property int contentTopGap: 72
-    property int sectionsSpacing: 8
+    property int contentTopGap: 40
+    property int sectionsSpacing: 4
     // Les rails doivent pouvoir afficher simultanément leur titre et le halo
     // complet du poster focalisé sous le hero épinglé.
-    property int sectionHeaderDropY: 6
-    property int sectionListGap: 6
+    property int sectionHeaderDropY: 2
+    property int sectionListGap: 3
     property int sectionBottomPad: 2
     property int headerTopNudgeY: -12
     property int titleCharLimit: 45
@@ -121,21 +121,21 @@ FocusScope {
     property int titleMarqueePauseStartMs: 750
     property int titleMarqueePauseEndMs: 520
     property int overviewMinH: 190
-    property int overviewTopShift: -5
+    property int overviewTopShift: -8
     property int overviewMaxLines: 7
-    property int posterW: 230
-    property int posterH: 330
+    property int posterW: 192
+    property int posterH: 275
     property int posterEdgeGap: 20
-    // Position absolue dans le viewport du hero épinglé : l'avatar ClockHUD
-    // finit vers y=68, donc l'art démarre un peu plus bas avec 24 px d'air.
-    property int posterViewportTop: 92
+    // Affiche du hero sous le nom du profil ClockHUD (avatar + libellé).
+    // La réserve suit la position réelle du poster pour ne pas masquer les rails.
+    property int posterViewportTop: 96
     property int seriesSectionNudgeY: 0     // FIX PINNED HERO: ne plus remonter les rails sous le résumé
     property int filmsSectionNudgeY:  0     // FIX PINNED HERO: ne plus remonter les rails sous le résumé
     property int bottomScrollPad: pinDynamicHero ? Math.max(380, pinnedHeroReserveH + 24) : 64
     property bool pinDynamicHero: true
     readonly property real pinnedHeroCounterY: (pinDynamicHero && rootFlick) ? rootFlick.contentY : 0
-    // Bas du hero : poster à y=92, hauteur 330, puis quelques pixels pour
-    // absorber son scale 1.02. Les rails commencent sous cette limite.
+    // Limite dérivée du poster épinglé (y + hauteur + marge pour scale 1.02).
+    // Les rails suivent automatiquement cette limite sans chevauchement.
     readonly property int pinnedHeroReserveH: posterViewportTop + posterH + 4
     function safeRowHeight(){
         // Garantit que la première section réelle débute sous le hero, sans que
@@ -502,8 +502,8 @@ FocusScope {
     function _collectionRebuildRails(){
         var oldSeriesId = _collectionRailSelectedId(seriesList, seriesWarm); var oldFilmId = _collectionRailSelectedId(filmsList, filmsWarm)
         var rails = MediaCatalog.collectionRailsFromPages(_collectionChildrenPages)
-        // SortBy=SortName est appliqué par Jellyfin avant pagination : ne pas
-        // retrier les centaines de DTO à chaque page/focus.
+        // Le tri de la saga (DisplayOrder) est appliqué par Jellyfin AVANT
+        // pagination. Ne jamais retrier localement une fenêtre partielle.
         _collectionChildrenSeen = rails.seen
         seriesAll = rails.series
         filmsAll = rails.films
@@ -694,7 +694,8 @@ FocusScope {
                     filmsExpanded = false; seriesExpanded = false
                     _finishCollectionChildrenLoad()
                 }
-            }
+            },
+            MediaCatalog.collectionDisplaySortBy(item)
         )
         _collectionChildrenHandle = requestHandle
         return requestHandle

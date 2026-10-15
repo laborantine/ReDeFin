@@ -126,12 +126,39 @@ Item {
     /* ========= Layout / constantes ========= */
     readonly property int marginL: 40
     readonly property int marginR: 40
-    readonly property int headerTop: 30
-    readonly property int gridTopGap: 24
+    // Toutes les bibliothèques de posters portrait partagent désormais le
+    // cadrage T30 (Films, Séries, Mixte, Collections, Médias personnels).
+    // Les clips gardent impérativement leurs cartes 16:9.
+    readonly property bool compactPortraitGrid: !musicVideoMode
+    // Le D-Pad directionnel et la fin de page s'appliquent aussi aux clips,
+    // sans modifier leur format ni la taille des vignettes.
+    readonly property bool directionalGridScroll: true
+    // +4 px sur le titre et les tags. Le garde A-Z ci-dessous absorbe
+    // ce déplacement lorsque le HUD impose déjà le haut de la grille.
+    readonly property int headerTop: compactPortraitGrid ? 16 : 30
+    // Ne pas laisser le poster focalisé de la première rangée passer sous A-Z.
+    // Le focus (origine Bottom) remonte l'image de h*(1.14-1)+lift.
+    // Réserver uniquement la hauteur manquante sous le bas réel du bouton +
+    // son trait de focus. Aucun effet sur les grilles non portrait compactes.
+    // On utilise le HUD au repos plutôt que son y animé pendant le scroll :
+    // aucun redimensionnement de grille à chaque image de l'animation.
+    readonly property int gridTopGap: {
+        if (!compactPortraitGrid) return 24
+        if (!folderItems || folderItems.length <= 1) return 0
+        var sortBottomAtRest = topBar.anchors.topMargin
+                + clockHudWrap.clockHudCoreH
+                + profileName.anchors.topMargin + profileName.height
+                + sortButton.anchors.topMargin + sortButton.height + 3
+        var focusedTopWithoutGap = headerArea.y + headerArea.height
+                + gridPosterTopPad - posterH * (focusScale - 1) - focusLiftPx
+        return Math.max(0, Math.ceil(sortBottomAtRest + 6 - focusedTopWithoutGap))
+    }
 
     /* ========= Posters ========= */
-    readonly property int  posterW: musicVideoMode ? 270 : 162
-    readonly property int  posterH: musicVideoMode ? 152 : 243
+    // Même dimension de posters portrait pour toutes les bibliothèques ;
+    // les vignettes clips 16:9 restent inchangées.
+    readonly property int  posterW: musicVideoMode ? 270 : (compactPortraitGrid ? 158 : 162)
+    readonly property int  posterH: musicVideoMode ? 152 : (compactPortraitGrid ? 237 : 243)
     readonly property real posterOversample: 1.20
     readonly property int  reqPosterW: Math.round(posterW * posterOversample)
     readonly property int  reqPosterH: Math.round(posterH * posterOversample)
@@ -176,7 +203,14 @@ Item {
     }
 
     readonly property int  gridCellW: posterW + focusPad * 2
-    readonly property int  gridCellH: posterH + focusPad + topPadFor(posterH)
+    // Le zoom 1.14, son pic d'animation et le lift 6 px restent inchangés.
+    // Marge de focus conservée malgré la légère baisse de taille du poster :
+    // 44 px pour 237 px, en tenant compte du zoom et du lift (origine bas).
+    // Réduire ensemble le pas de grille et le topPad du delegate : pas de
+    // dépassement de la carte dans la cellule voisine, ni de chevauchement.
+    readonly property int gridPosterTopPad: focusPad + topPadFor(posterH)
+                                           - (compactPortraitGrid ? 6 : 0)
+    readonly property int gridCellH: posterH + gridPosterTopPad
 
     // ✅ TWEAK 2: qualité JPEG abaissée (URL unique)
     readonly property int jpgQltPosters: 82
@@ -1648,11 +1682,18 @@ Item {
         readonly property bool hudHasFocus: !!(clockHudLoader.item && clockHudLoader.item.containsActiveFocus)
         readonly property bool sortHasFocus: !!(sortButton && (sortButton.containsActiveFocus || sortButton.popupOpen))
         readonly property bool keepHudVisible: hudHasFocus || sortHasFocus || moviepage.hudPinned || moviepage.currentFocusTarget === moviepage.focusHud || moviepage.currentFocusTarget === moviepage.focusSort
+        // Le ClockHUD reste stable sur les trois premières rangées :
+        // aucun effacement/rechargement lors des passages 1 <-> 2 <-> 3.
+        // Dès la 4e rangée, le comportement historique du bandeau et du
+        // compteur flottant reprend, sans recréer l'instance ClockHUD.
+        readonly property bool initialRowsHud: !!(grid && grid.currentIndex >= 0
+            && grid.columns > 0 && Math.floor(grid.currentIndex / grid.columns) < 3)
+        readonly property bool showHud: keepHudVisible || initialRowsHud
         readonly property real fadeBase: Math.max(0.0, 1.0 - Math.min(1.0, moviepage.scrollProgress * 1.25))
 
-        opacity: keepHudVisible ? 1.0 : fadeBase
-        y:      keepHudVisible ? 0 : -(18 * (1.0 - fadeBase))
-        visible: keepHudVisible ? true : (opacity > 0.02)
+        opacity: showHud ? 1.0 : fadeBase
+        y:      showHud ? 0 : -(18 * (1.0 - fadeBase))
+        visible: showHud ? true : (opacity > 0.02)
 
         Behavior on opacity { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
         Behavior on y       { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
@@ -1696,8 +1737,13 @@ Item {
                     id: clockHudLoader
                     width: clockHudWrap.width
                     height: clockHudWrap.clockHudCoreH
-                    active: (topBar.visible || moviepage.hudPinned || moviepage.currentFocusTarget === moviepage.focusHud || moviepage.currentFocusTarget === moviepage.focusSort)
-                    visible:(topBar.visible || moviepage.hudPinned || moviepage.currentFocusTarget === moviepage.focusHud || moviepage.currentFocusTarget === moviepage.focusSort)
+                    // Conserver l'instance tant que la page est à l'écran :
+                    // un simple fade du bandeau ne doit jamais détruire et
+                    // recharger l'horloge ou l'avatar Jellyfin (QtQuick 2.15).
+                    active: moviepage.visible
+                    visible: moviepage.visible && (topBar.visible || moviepage.hudPinned
+                        || moviepage.currentFocusTarget === moviepage.focusHud
+                        || moviepage.currentFocusTarget === moviepage.focusSort)
                     sourceComponent: clockHudComp
                 }
 
@@ -1722,7 +1768,7 @@ Item {
                 Components.SortHudButton {
                     id: sortButton
                     anchors.top: profileName.bottom
-                    anchors.topMargin: 4
+                    anchors.topMargin: 2
                     x: Math.round((moviepage.avatarSize - width) / 2)
                     visible: clockHudWrap.sortAreaH > 0
                     options: moviepage.sortOptionLabels
@@ -1734,23 +1780,7 @@ Item {
                     onRequestFocusGrid: moviepage.focusGridFromSort()
                 }
 
-                // Double repère de focus du tri : deux traits fins au-dessus et
-                // en dessous du bouton A-Z, sans QtQuick Controls ni effet GPU.
-                Rectangle {
-                    z: sortButton.z + 1
-                    anchors.horizontalCenter: sortButton.horizontalCenter
-                    anchors.bottom: sortButton.top
-                    anchors.bottomMargin: 1
-                    width: clockHudWrap.sortFocusDecorActive ? Math.max(40, sortButton.width + 2) : 0
-                    height: 2
-                    radius: 1
-                    color: "#FFFFFF"
-                    opacity: clockHudWrap.sortFocusDecorActive ? 1.0 : 0.0
-                    visible: sortButton.visible && (width > 0 || opacity > 0.01)
-                    Behavior on width { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
-                    Behavior on opacity { NumberAnimation { duration: 90; easing.type: Easing.OutCubic } }
-                }
-
+                // Un seul repère de focus, sous A-Z. Son animation reste identique.
                 Rectangle {
                     z: sortButton.z + 1
                     anchors.horizontalCenter: sortButton.horizontalCenter
@@ -1786,7 +1816,10 @@ Item {
                     color: "#23244a"
                     border.color: "#6e7bf4"
                     border.width: 1
+                    // Ne pas dupliquer le compteur avec sa variante flottante
+                    // pendant la transition du HUD sur la deuxième rangée.
                     visible: !!(folderItems && folderItems.length > 0)
+                             && (moviepage.scrollProgress <= 0.15 || topBar.showHud)
                     Text { textFormat: Text.PlainText;
                         id: counterText
                         anchors.centerIn: parent
@@ -1821,9 +1854,11 @@ Item {
             visible: (topBar.visible || moviepage.hudPinned || moviepage.currentFocusTarget === moviepage.focusHud) && moviepage.visible
 
             // ✅ TWEAK 7: active strict
+            // Ne pas masquer l'horloge à chaque glide D-Pad. L'avatar animé
+            // est suspendu indépendamment via ClockHUD.scrolling (coût Atom).
             active:  (topBar.visible || moviepage.hudPinned || moviepage.currentFocusTarget === moviepage.focusHud)
                      && moviepage.visible
-                     && !moviepage.isScrolling
+            scrolling: moviepage.isScrolling
 
             onRequestFocusBelow: {
                 if (sortButton && sortButton.visible) moviepage.focusSortButton()
@@ -1847,7 +1882,10 @@ Item {
 
         visible: {
             var total = folderItems ? folderItems.length : 0
+            // L'autre compteur appartient au HUD. Lorsqu'il est épinglé
+            // (focus avatar / tri), garder seulement la version d'origine.
             return (total > 0) && (moviepage.scrollProgress > 0.15)
+                   && !topBar.showHud
         }
 
         Text { textFormat: Text.PlainText;
@@ -1884,7 +1922,7 @@ Item {
         Column {
             id: headerInfos
             width: parent.width
-            spacing: 6
+            spacing: moviepage.compactPortraitGrid ? 2 : 6
 
             property var selectedItemBase: moviepage._baseSelectedItem()
             property var selectedItem: moviepage.collectionsMode ? selectedItemBase : moviepage.itemWithDetailForHeader(selectedItemBase)
@@ -2490,6 +2528,25 @@ Item {
         anchors.bottom: parent.bottom
         cellWidth: gridCellW
         cellHeight: gridCellH
+        // QtQuick 2.15 / Flickable : espace scrollable APRÈS les données réelles.
+        // Seulement à la fin effective de la bibliothèque, jamais entre pages.
+        // La dernière rangée garde ainsi exactement le même y de repos que les
+        // rangées précédentes lors d'un déplacement D-Pad vers le bas.
+        bottomMargin: {
+            // Uniquement la dernière page réelle, quel que soit le mode.
+            // Pas de fausse fin lorsqu'une requête/pagination est en cours.
+            if (!moviepage.directionalGridScroll || moviepage.folderPageHasMore
+                    || moviepage.folderPageInFlight || count <= 0 || columns <= 0)
+                return 0
+            var pad = moviepage.gridPosterTopPad
+            var visibleRows = Math.max(2, Math.floor((height - pad - 14) / cellHeight))
+            var shift = Math.max(0, Math.min(pad - 8,
+                visibleRows * cellHeight + pad + 14 - height))
+            // Un libellé de fin est dessiné APRÈS les posters dans le
+            // contentItem, avec une réserve mini de 42 px, sans delegate.
+            if (count <= columns || height < 2 * cellHeight) return 42
+            return Math.max(42, Math.ceil(height - visibleRows * cellHeight + shift))
+        }
         width: parent.width - (marginL + marginR)
         height: parent.height - (headerArea.y + headerArea.height + gridTopGap)
         model: folderItems
@@ -2510,6 +2567,9 @@ Item {
         readonly property int visibleLastIndex: Math.max(0,
             ((Math.floor((contentY + height + posterVisibilityMargin) / Math.max(1, cellHeight)) + 1) * columns) - 1)
         property int pendingEnsureIndex: -1
+        // Suivre la direction réelle du changement de rangée. Un retour depuis
+        // une fiche ou une pagination qui restaure le focus ne force pas de peek.
+        property int previousSelectionIndex: -1
         // Empêche un glide interrompu par une nouvelle touche de déclencher les
         // traitements de fin. En scroll rapide, seule la dernière position stable
         // doit lancer sauvegarde, backdrop, détails, pagination et HQ.
@@ -2593,16 +2653,53 @@ Item {
             if (suppressSettle === true) _suppressNextGlideSettle = true
             glideY.stop()
         }
-        function ensureVisible(idx, immediate) {
+        function ensureVisible(idx, immediate, direction) {
             if (idx < 0 || idx >= count) return
             if (height <= 0 || contentHeight <= 0 || columns <= 0) { pendingEnsureIndex = idx; return }
             var row = Math.floor(idx / columns)
             var rowTop = row * cellHeight
             var rowBottom = rowTop + cellHeight
             var target = contentY
+            // Cadrage historique pour retour et changement de tri. Aucun
+            // repositionnement du focus lors des déplacements horizontaux.
             if (rowTop < contentY) target = rowTop
             else if (rowBottom > contentY + height) target = rowBottom - height
-            target = Math.max(0, Math.min(target, contentHeight - height))
+
+            // Uniquement après un changement de rangée D-Pad : le sens du
+            // mouvement détermine la petite portion à montrer. Le déplacement
+            // se fait dans la marge haute des CELLULES, non sur le poster zoomé.
+            // Ainsi deux affiches restent entièrement visibles et les 1.14x du
+            // focus continuent d'utiliser exactement la même marge de sécurité.
+            if (immediate !== true && moviepage.directionalGridScroll
+                    && (direction === 1 || direction === -1) && height >= cellHeight * 2) {
+                var pad = moviepage.gridPosterTopPad
+                // Adapte le nombre de rangées entièrement visibles à la
+                // hauteur réelle du viewport (720p, 1080p, clips 16:9).
+                // À 720p portrait, visibleRows reste à 2 comme en T30.
+                var visibleRows = Math.max(2, Math.floor((height - pad - 14) / cellHeight))
+                if (direction === 1 && row >= visibleRows - 1) {
+                    var hasNextRow = (row + 1) * columns < count
+                    var isActualFinalRow = !hasNextRow && !moviepage.folderPageHasMore
+                        && !moviepage.folderPageInFlight
+                    if (hasNextRow || isActualFinalRow) {
+                        var shift = Math.max(0, Math.min(pad - 8,
+                            visibleRows * cellHeight + pad + 14 - height))
+                        var realPeek = height - (visibleRows * cellHeight + pad - shift)
+                        if (height >= visibleRows * cellHeight - shift
+                                && (realPeek >= 7 || isActualFinalRow))
+                            target = (row - visibleRows + 1) * cellHeight + shift
+                    }
+                } else if (direction === -1 && row > 0) {
+                    // Même comportement T29 en remontant, adapté au viewport.
+                    var upperPeek = Math.min(18,
+                        Math.max(0, height - visibleRows * cellHeight - 4))
+                    if (upperPeek >= 7) target = row * cellHeight - upperPeek
+                }
+            }
+            // bottomMargin est une vraie propriété Flickable, pas un faux
+            // élément de grille : aucun delegate et aucune requête additionnelle.
+            target = Math.max(0, Math.min(target,
+                contentHeight + bottomMargin - height))
             if (Math.abs(target - contentY) > 1) {
                 // Une nouvelle pression remplace le glide précédent : ne pas
                 // exécuter un settle intermédiaire pour une position transitoire.
@@ -2639,8 +2736,10 @@ Item {
                 var tags = itemData.ImageTags || {}
                 return !tags.Primary && !!tags.Thumb
             }
-            property int unread: moviepage.unreadCountFor(itemData)
-            readonly property bool watched: MediaCatalog.isPlayedItem(itemData)
+            readonly property var sagaWatch: moviepage._isSagaItem(itemData)
+                ? MediaCatalog.collectionWatchStatus(itemData) : null
+            property int unread: sagaWatch ? sagaWatch.unplayed : moviepage.unreadCountFor(itemData)
+            readonly property bool watched: sagaWatch ? sagaWatch.allWatched : MediaCatalog.isPlayedItem(itemData)
             readonly property real resumeRatio: MediaCatalog.resumeProgressRatioFor(itemData, moviepage.collectionsMode)
             readonly property bool allowLocalFocusAnims: moviepage.visible && !moviepage.externalModalOpen && !moviepage.isScrolling && grid.activeFocus
             readonly property bool posterVisualReady: posterCard ? posterCard.visualReady : true
@@ -2707,7 +2806,7 @@ Item {
                 tileHeight: moviepage.posterH
                 titleHeight: 0
                 sidePad: moviepage.focusPad
-                topPad: moviepage.focusPad + moviepage.topPadFor(moviepage.posterH)
+                topPad: moviepage.gridPosterTopPad
 
                 cardIndex: movieLibraryDelegate.itemIndex
                 gridColumns: grid.columns
@@ -2745,9 +2844,11 @@ Item {
 
                 showWatchedBadge: true
                 watched: movieLibraryDelegate.watched
-                showUnplayedBadge: !moviepage.personalMode && !moviepage.collectionsMode
-                                   && !moviepage._isSagaItem(movieLibraryDelegate.itemData) && movieLibraryDelegate.unread > 0
+                showUnplayedBadge: !moviepage.personalMode && movieLibraryDelegate.unread > 0
+                    && (movieLibraryDelegate.sagaWatch
+                        ? movieLibraryDelegate.sagaWatch.known : !moviepage.collectionsMode)
                 unplayedCount: movieLibraryDelegate.unread
+                suppressWatchedWhenUnplayed: !!movieLibraryDelegate.sagaWatch
                 showProgress: movieLibraryDelegate.resumeRatio > 0
                 progressRatioOverride: movieLibraryDelegate.resumeRatio
 
@@ -2758,12 +2859,41 @@ Item {
                 }
             }
         }
+        // Libellé fixe DANS le contenu scrollable, après la vraie dernière
+        // rangée, et jamais après une simple page de pagination Jellyfin.
+        // Le viewport GridView le masque automatiquement ailleurs.
+        Text {
+            parent: grid.contentItem
+            z: 2
+            x: 0
+            y: Math.ceil(grid.count / Math.max(1, grid.columns)) * grid.cellHeight + 10
+            width: grid.width
+            height: 24
+            text: "Fin de page"
+            textFormat: Text.PlainText
+            color: "#B8BDCD"
+            font.pixelSize: 16
+            horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
+            visible: grid.count > 0 && !moviepage.folderPageHasMore
+                     && !moviepage.folderPageInFlight && !moviepage.folderBlockingLoading
+        }
         onActiveFocusChanged: moviepage._schedulePosterHq()
         onCurrentIndexChanged: {
+            // Le sens n'est calculé que sur un vrai changement de rangée.
+            // Pas de recadrage sur un simple déplacement gauche/droite, ni lors
+            // du retour depuis une fiche (immediate / _restoring).
+            var prevRow = previousSelectionIndex >= 0 && columns > 0
+                    ? Math.floor(previousSelectionIndex / columns) : -1
+            var nextRow = currentIndex >= 0 && columns > 0
+                    ? Math.floor(currentIndex / columns) : -1
+            var scrollDirection = prevRow < 0 || nextRow < 0 || prevRow === nextRow
+                    ? 0 : (nextRow > prevRow ? 1 : -1)
+            previousSelectionIndex = currentIndex
             // Politique image 30082026 : armer le HQ dès le changement de focus.
             // Les autres traitements restent coalescés pendant glideY pour ne pas
             // réintroduire la perte de fluidité corrigée depuis.
-            if (!moviepage._restoring) ensureVisible(currentIndex)
+            if (!moviepage._restoring) ensureVisible(currentIndex, false, scrollDirection)
             moviepage.updateScrollProgress()
             moviepage._schedulePosterHq()
             if (!moviepage.isGridInMotion) {
