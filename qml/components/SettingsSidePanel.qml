@@ -27,7 +27,7 @@ FocusScope {
 
     /* === Personnalisation === */
     property real  panelWidthRatio: 0.18
-    // Affichage de la version publiée : 0.9.9.1, fourni par clientId.js.
+    // Affichage de la version publiée : 1.0-stable, fourni par clientId.js.
     property string versionText: "ReDeFin " + ClientId.applicationVersion()
     readonly property int panelWidth: Math.max(360, Math.round(width * panelWidthRatio))
 
