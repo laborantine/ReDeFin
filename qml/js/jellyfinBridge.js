@@ -1691,7 +1691,7 @@ function fetchCollectionFolderItemsPage(serverUrl, accessToken, userId, folderId
         startIndex, limit, sortMode, onSuccess, onError
     );
 }
-function fetchCollectionChildrenPage(serverUrl, accessToken, userId, folderId, startIndex, limit, mode, deadlineAt, onSuccess, onError) {
+function fetchCollectionChildrenPage(serverUrl, accessToken, userId, folderId, startIndex, limit, mode, deadlineAt, onSuccess, onError, displayOrder) {
     if (!serverUrl || !accessToken || !userId || !folderId) {
         if (onError) onError("missing_params");
         return null;
@@ -1701,13 +1701,16 @@ function fetchCollectionChildrenPage(serverUrl, accessToken, userId, folderId, s
     limit = _folderSafePageLimit(limit);
     var recursive = mode === 1 || mode === 3;
     var noCollapse = mode >= 2;
+    // La métadonnée DisplayOrder appartient à la saga, pas à la bibliothèque.
+    // Liste blanche dans MediaCatalog : aucune injection arbitraire d'URL.
+    var sortBy = MediaCatalog.collectionDisplaySortBy({ DisplayOrder: displayOrder });
     var query = "/Items?UserId=" + enc(userId) +
                 "&ParentId=" + enc(folderId) +
                 "&Recursive=" + (recursive ? "true" : "false") +
                 (noCollapse ? "&CollapseBoxSetItems=false" : "") +
                 "&EnableTotalRecordCount=false" +
                 "&EnableImages=true&EnableUserData=true" +
-                "&SortBy=SortName&SortOrder=Ascending" +
+                "&SortBy=" + enc(sortBy) + "&SortOrder=Ascending" +
                 "&StartIndex=" + startIndex +
                 "&Limit=" + limit +
                 "&Fields=" + _modernItemFields("PrimaryImageAspectRatio,CumulativeRunTimeTicks,CustomRating,ParentId,SortName,DateCreated,DateLastMediaAdded,ChildCount,RecursiveItemCount,ItemCounts");

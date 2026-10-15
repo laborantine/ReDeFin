@@ -708,6 +708,34 @@ function resumeProgressRatioFor(it, allowCumulativeRuntime) {
     return Math.max(0.03, Math.min(0.97, ratio));
 }
 
+// Ordre d'affichage défini dans les métadonnées du BoxSet Jellyfin.
+// Valeurs bornées aux tris de l'API Items ; un BoxSet non renseigné
+// utilise PremiereDate, comme le constructeur BoxSet du serveur.
+function collectionDisplaySortBy(it) {
+    var raw = it && it.DisplayOrder !== undefined && it.DisplayOrder !== null
+        ? String(it.DisplayOrder).replace(/^\s+|\s+$/g, "").toLowerCase() : "";
+    if (raw === "sortname" || raw === "name") return "SortName";
+    if (raw === "productionyear") return "ProductionYear";
+    if (raw === "datecreated") return "DateCreated";
+    if (raw === "default") return "Default";
+    return "PremiereDate";
+}
+// L'état des sagas ne peut pas se déduire de l'absence d'un compteur.
+// Un zéro explicite n'est une coche que pour une collection non vide.
+function collectionWatchStatus(it) {
+    var data = it && it.UserData ? it.UserData : null;
+    var raw = data && data.UnplayedItemCount !== undefined
+        ? data.UnplayedItemCount
+        : (it && it.UnplayedItemCount !== undefined ? it.UnplayedItemCount
+           : (it ? it.RecursiveUnplayedItemCount : undefined));
+    var known = raw !== undefined && raw !== null && raw !== "" &&
+                isFinite(Number(raw)) && Number(raw) >= 0;
+    var remaining = known ? Math.floor(Number(raw)) : 0;
+    var childCount = it ? Number(it.ChildCount || it.RecursiveItemCount || 0) : 0;
+    var allWatched = childCount > 0 &&
+            ((known && remaining === 0) || (!known && data && data.Played === true));
+    return { known: known, unplayed: remaining, allWatched: !!allWatched };
+}
 function unreadCount(it) {
     if (!it) return 0;
     var c = 0;
