@@ -2,7 +2,7 @@
     "name": "ReDeFin",
     "identifier": "com.lab.redefin",
     "description": "Un client Jellyfin non officiel pour lire votre bibliothèque sur Freebox",
-    "version": "0.9.9.1",
+    "version": "1.0-stable",
     "author": "Laborantine",
     "entryPoints": {
         "main": {

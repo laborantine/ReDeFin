@@ -18,7 +18,7 @@ Application {
     // Flag interne : Settings prêts avant ShellPage ?
     property bool _settingsReady: false
     readonly property var settingsRef: settings
-    // Version publique unique (clientId.js), synchronisée avec manifest.json.
+    // Version publique 1.0-stable centralisée dans clientId.js, synchronisée avec manifest.json.
     readonly property string appVersion: ClientId.applicationVersion()
 
 
