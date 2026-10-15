@@ -19,7 +19,7 @@ Item {
 
     // Version réellement exposée par le runtime Freebox / FreeStore.
     // Formats tolérés :
-    // 0.49.true / 0.49-beta / 0.49 / 0.50 / 0.51 / 1.0 / 0.9.7.1
+    // 0.49.true / 0.49-beta / 0.49 / 0.50 / 0.51 / 1.0 / 1.0-stable / 0.9.7.1
     property string currentVersion:
         Qt.application.version ? String(Qt.application.version) : "dev"
 
@@ -75,7 +75,7 @@ Item {
      * Convention ReDeFin :
      * - 0.x = bêta si aucun marqueur explicite
      * - 1.0+ = stable si aucun marqueur explicite
-     * - .true / .false / -beta restent prioritaires
+     * - .true / .false / -beta / -stable restent prioritaires
      */
     function _parseVersion(rawVersion) {
         var value = String(rawVersion || "").toLowerCase().trim()
@@ -109,6 +109,13 @@ Item {
             beta = true
             channelExplicit = true
             value = value.substr(0, value.length - 5)
+
+        } else if (value.length > 7 &&
+                   value.substr(value.length - 7) === "-stable") {
+
+            beta = false
+            channelExplicit = true
+            value = value.substr(0, value.length - 7)
         }
 
         var parts = value.split(".")
@@ -227,24 +234,10 @@ Item {
         if (!installedParsed)
             return null
 
-        var stable = _readChannel(document, "stable")
-
-        // Une stable reste sur le canal stable.
-        if (!installedParsed.beta)
-            return stable
-
-        // Une bêta peut recevoir une bêta plus récente ou la stable.
-        var beta = _readChannel(document, "beta")
-        var candidate = stable
-
-        if (beta &&
-                (!candidate ||
-                 _compareParsed(beta.parsed, candidate.parsed) > 0)) {
-
-            candidate = beta
-        }
-
-        return candidate
+        // Les deux canaux sont strictement indépendants :
+        // une bêta ne vérifie jamais la stable, et inversement.
+        var channelName = installedParsed.beta ? "beta" : "stable"
+        return _readChannel(document, channelName)
     }
 
     function _abortActiveRequest(reason) {
