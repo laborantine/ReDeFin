@@ -725,12 +725,12 @@ FocusScope {
             var u=localUsers[i];
             if (u && u.Id && !map[u.Id]) { map[u.Id]=true; arr.push(u); }
         }
-        // Un utilisateur seulement découvert via /Users/Public n'est pas ajouté
-        // à la grille tant qu'il n'a jamais été authentifié sur cet appareil.
-        // Si un token de session existe déjà, il peut néanmoins rejoindre le modèle.
+        // Les profils que le serveur affiche sur ses écrans de connexion
+        // (/Users/Public) rejoignent la grille : sans token, les choisir ouvre
+        // la saisie du mot de passe avec le nom déjà rempli.
         for (var j=0;j<serverUsers.length;j++){
             var su=serverUsers[j];
-            if (su && su.Id && !map[su.Id] && _hasToken(su.Id)) { map[su.Id]=true; arr.push(su); }
+            if (su && su.Id && !map[su.Id]) { map[su.Id]=true; arr.push(su); }
         }
         usersModel = arr;
     }
