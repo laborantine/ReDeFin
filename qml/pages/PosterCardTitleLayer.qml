@@ -112,12 +112,10 @@ Item {
         return false
     }
 
+    // Remet les textes au repos ; la carte l'appelle aussi quand elle part au pool.
     function _resetMarqueeState() {
-        marqueeUpdateTimer.stop()
-        titleMarqueeStartTimer.stop()
-        subtitleMarqueeStartTimer.stop()
-        marquee.stop()
-        subtitleMarquee.stop()
+        if (marqueeEngine.item)
+            marqueeEngine.item.stopAll()
 
         marqueeMoving = false
         subtitleLineClip.marqueeMoving = false
@@ -132,62 +130,8 @@ Item {
         // Un delegate ListView pooled reste vivant : ne pas réarmer ses timers.
         // La carte rappelle cette méthode au retour du pool.
         if (_destroying || _boolProp("delegatePooled", false)) return
-        marqueeUpdateTimer.restart()
-    }
-
-    Timer {
-        id: marqueeUpdateTimer
-        interval: 0
-        repeat: false
-        onTriggered: {
-            if (titleClip._isUsable())
-                titleClip.updateMarquee()
-        }
-    }
-
-    Timer {
-        id: titleMarqueeStartTimer
-        interval: 0
-        repeat: false
-        onTriggered: {
-            if (titleClip._isUsable()
-                    && titleClip.marqueeNeeded
-                    && titleClip._marqueeFocusActive()) {
-                marquee.start()
-            }
-        }
-    }
-
-    Timer {
-        id: subtitleMarqueeStartTimer
-        interval: 0
-        repeat: false
-        onTriggered: {
-            if (titleClip._isUsable()
-                    && subtitleLineClip.marqueeNeeded
-                    && titleClip._marqueeFocusActive()) {
-                subtitleMarquee.start()
-            }
-        }
-    }
-
-    function updateMarquee() {
-        _resetMarqueeState()
-
-        if (!_isUsable()
-                || !_boolProp("allowMarquee", false)
-                || !_boolProp("allowAnims", false)
-                || !_boolProp("allowLoad", false)
-                || !_boolProp("selected", false)) {
-            return
-        }
-
-        if (marqueeNeeded && marqueeScrollMs > 0)
-            titleMarqueeStartTimer.restart()
-
-        if (subtitleLineClip.marqueeNeeded
-                && subtitleLineClip.marqueeScrollMs > 0)
-            subtitleMarqueeStartTimer.restart()
+        if (marqueeEngine.item)
+            marqueeEngine.item.requestUpdate()
     }
 
     onCardChanged: _requestUpdateMarquee("card")
@@ -454,124 +398,183 @@ Item {
         }
     }
 
-    SequentialAnimation {
-        id: marquee
-        running: false
-        loops: Animation.Infinite
-
-        ScriptAction {
-            script: {
-                titleClip.marqueeMoving = false
-                titleTextItem.x = 0
-                titleTextItem.opacity = 1.0
-            }
-        }
-        PauseAnimation {
-            duration: Math.max(0,
-                Math.round(titleClip._numProp("marqueeStartDelayMs", 700)))
-        }
-        ScriptAction { script: titleClip.marqueeMoving = true }
-        NumberAnimation {
-            target: titleTextItem
-            property: "x"
-            from: 0
-            to: titleClip.marqueeExitX
-            duration: titleClip.marqueeScrollMs
-            easing.type: Easing.Linear
-        }
-        ScriptAction {
-            script: {
-                titleTextItem.x = 0
-                titleTextItem.opacity = 1.0
-                titleClip.marqueeMoving = false
-            }
-        }
-        PauseAnimation { duration: 180 }
-        PauseAnimation {
-            duration: Math.max(0,
-                Math.round(titleClip._numProp("marqueeEndPauseMs", 260)))
-        }
-
-        onRunningChanged: {
-            if (!running) {
-                titleClip.marqueeMoving = false
-                titleTextItem.x = 0
-                titleTextItem.opacity = 1.0
-            }
-        }
-    }
-
-    SequentialAnimation {
-        id: subtitleMarquee
-        running: false
-        loops: Animation.Infinite
-
-        ScriptAction {
-            script: {
-                subtitleLineClip.marqueeMoving = false
-                subtitleTextItem.x = 0
-                subtitleTextItem.opacity = 1.0
-            }
-        }
-        PauseAnimation {
-            duration: Math.max(0,
-                Math.round(titleClip._numProp("marqueeStartDelayMs", 700)))
-        }
-        ScriptAction { script: subtitleLineClip.marqueeMoving = true }
-        NumberAnimation {
-            target: subtitleTextItem
-            property: "x"
-            from: 0
-            to: subtitleLineClip.marqueeExitX
-            duration: subtitleLineClip.marqueeScrollMs
-            easing.type: Easing.Linear
-        }
-        ScriptAction {
-            script: {
-                subtitleTextItem.x = 0
-                subtitleTextItem.opacity = 1.0
-                subtitleLineClip.marqueeMoving = false
-            }
-        }
-        PauseAnimation { duration: 180 }
-        PauseAnimation {
-            duration: Math.max(0,
-                Math.round(titleClip._numProp("marqueeEndPauseMs", 260)))
-        }
-
-        onRunningChanged: {
-            if (!running) {
-                subtitleLineClip.marqueeMoving = false
-                subtitleTextItem.x = 0
-                subtitleTextItem.opacity = 1.0
-            }
-        }
-    }
-
-    Connections {
-        target: titleClip.card
-        ignoreUnknownSignals: true
-
-        function onSelectedChanged() {
-            titleClip._requestUpdateMarquee("selected")
-        }
-        function onAllowMarqueeChanged() {
-            titleClip._requestUpdateMarquee("allow-marquee")
-        }
-        function onAllowAnimsChanged() {
-            if (!titleClip._boolProp("allowAnims", false))
+    // Minuteries et animations du défilement, créées pour la seule carte qui peut
+    // défiler (sélectionnée, défilement permis) : chaque objet d'une carte se paie à
+    // sa création, pour chaque carte de l'accueil.
+    Loader {
+        id: marqueeEngine
+        active: titleClip._marqueeFocusActive() && !titleClip._destroying
+        onActiveChanged: {
+            if (!active && !titleClip._destroying)
                 titleClip._resetMarqueeState()
-            else
-                titleClip._requestUpdateMarquee("allow-anims")
         }
-        function onAllowLoadChanged() {
-            titleClip._requestUpdateMarquee("allow-load")
-        }
-        function onEffectiveTitleTextChanged() {
-            titleClip._requestUpdateMarquee("title")
-        }
-        function onEffectiveSubtitleTextChanged() {
-            titleClip._requestUpdateMarquee("subtitle")
+        sourceComponent: Component {
+            Item {
+                id: marqueeEngineItem
+
+                function stopAll() {
+                    marqueeUpdateTimer.stop()
+                    titleMarqueeStartTimer.stop()
+                    subtitleMarqueeStartTimer.stop()
+                    marquee.stop()
+                    subtitleMarquee.stop()
+                }
+
+                function requestUpdate() {
+                    marqueeUpdateTimer.restart()
+                }
+
+                function updateMarquee() {
+                    titleClip._resetMarqueeState()
+
+                    if (!titleClip._isUsable()
+                            || !titleClip._boolProp("allowMarquee", false)
+                            || !titleClip._boolProp("allowAnims", false)
+                            || !titleClip._boolProp("allowLoad", false)
+                            || !titleClip._boolProp("selected", false)) {
+                        return
+                    }
+
+                    if (titleClip.marqueeNeeded && titleClip.marqueeScrollMs > 0)
+                        titleMarqueeStartTimer.restart()
+
+                    if (subtitleLineClip.marqueeNeeded
+                            && subtitleLineClip.marqueeScrollMs > 0)
+                        subtitleMarqueeStartTimer.restart()
+                }
+
+                Timer {
+                    id: marqueeUpdateTimer
+                    interval: 0
+                    repeat: false
+                    onTriggered: {
+                        if (titleClip._isUsable())
+                            marqueeEngineItem.updateMarquee()
+                    }
+                }
+
+                Timer {
+                    id: titleMarqueeStartTimer
+                    interval: 0
+                    repeat: false
+                    onTriggered: {
+                        if (titleClip._isUsable()
+                                && titleClip.marqueeNeeded
+                                && titleClip._marqueeFocusActive()) {
+                            marquee.start()
+                        }
+                    }
+                }
+
+                Timer {
+                    id: subtitleMarqueeStartTimer
+                    interval: 0
+                    repeat: false
+                    onTriggered: {
+                        if (titleClip._isUsable()
+                                && subtitleLineClip.marqueeNeeded
+                                && titleClip._marqueeFocusActive()) {
+                            subtitleMarquee.start()
+                        }
+                    }
+                }
+
+            SequentialAnimation {
+                id: marquee
+                running: false
+                loops: Animation.Infinite
+
+                ScriptAction {
+                    script: {
+                        titleClip.marqueeMoving = false
+                        titleTextItem.x = 0
+                        titleTextItem.opacity = 1.0
+                    }
+                }
+                PauseAnimation {
+                    duration: Math.max(0,
+                        Math.round(titleClip._numProp("marqueeStartDelayMs", 700)))
+                }
+                ScriptAction { script: titleClip.marqueeMoving = true }
+                NumberAnimation {
+                    target: titleTextItem
+                    property: "x"
+                    from: 0
+                    to: titleClip.marqueeExitX
+                    duration: titleClip.marqueeScrollMs
+                    easing.type: Easing.Linear
+                }
+                ScriptAction {
+                    script: {
+                        titleTextItem.x = 0
+                        titleTextItem.opacity = 1.0
+                        titleClip.marqueeMoving = false
+                    }
+                }
+                PauseAnimation { duration: 180 }
+                PauseAnimation {
+                    duration: Math.max(0,
+                        Math.round(titleClip._numProp("marqueeEndPauseMs", 260)))
+                }
+
+                onRunningChanged: {
+                    if (!running) {
+                        titleClip.marqueeMoving = false
+                        titleTextItem.x = 0
+                        titleTextItem.opacity = 1.0
+                    }
+                }
+            }
+
+            SequentialAnimation {
+                id: subtitleMarquee
+                running: false
+                loops: Animation.Infinite
+
+                ScriptAction {
+                    script: {
+                        subtitleLineClip.marqueeMoving = false
+                        subtitleTextItem.x = 0
+                        subtitleTextItem.opacity = 1.0
+                    }
+                }
+                PauseAnimation {
+                    duration: Math.max(0,
+                        Math.round(titleClip._numProp("marqueeStartDelayMs", 700)))
+                }
+                ScriptAction { script: subtitleLineClip.marqueeMoving = true }
+                NumberAnimation {
+                    target: subtitleTextItem
+                    property: "x"
+                    from: 0
+                    to: subtitleLineClip.marqueeExitX
+                    duration: subtitleLineClip.marqueeScrollMs
+                    easing.type: Easing.Linear
+                }
+                ScriptAction {
+                    script: {
+                        subtitleTextItem.x = 0
+                        subtitleTextItem.opacity = 1.0
+                        subtitleLineClip.marqueeMoving = false
+                    }
+                }
+                PauseAnimation { duration: 180 }
+                PauseAnimation {
+                    duration: Math.max(0,
+                        Math.round(titleClip._numProp("marqueeEndPauseMs", 260)))
+                }
+
+                onRunningChanged: {
+                    if (!running) {
+                        subtitleLineClip.marqueeMoving = false
+                        subtitleTextItem.x = 0
+                        subtitleTextItem.opacity = 1.0
+                    }
+                }
+            }
+
+                Component.onCompleted: requestUpdate()
+            }
         }
     }
 
