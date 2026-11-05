@@ -1,4 +1,5 @@
 import QtQuick 2.15
+import QtQuick.Window 2.15
 import "../js/MediaBrowser.js" as MediaBrowser
 import "../js/HomeLatestLoader.js" as HomeLatest
 import "../js/jellyfinBridge.js" as Jellyfin
@@ -1268,6 +1269,32 @@ Item {
         if (!items || items.length === 0) return null
         var idx = MediaCatalog.clampIndex(latestIndexFor(group), Math.min(items.length, sectionMaxItems))
         return (idx >= 0 && idx < items.length) ? items[idx] : null
+    }
+    // Dernière action de l'utilisateur sur l'accueil : déplacement de la
+    // sélection ou de l'élément actif (0 avant la première).
+    property double lastSelectionMoveMs: 0
+    readonly property string _selectionKey: focusSection + ":" + currentFolderIndex + ":" + currentResumeIndex
+        + ":" + currentNextUpIndex + ":" + currentLatestGroup + ":" + latestIndexFor(currentLatestGroup)
+    on_SelectionKeyChanged: if (fetchedOnce) lastSelectionMoveMs = Date.now()
+    Connections {
+        target: postergrid.Window.window
+        enabled: postergrid.pageActive
+        ignoreUnknownSignals: true
+        function onActiveFocusItemChanged() { postergrid.lastSelectionMoveMs = Date.now() }
+    }
+    // Page qu'ouvrirait OK sur la carte sélectionnée (« Mes médias » : la
+    // bibliothèque ; un film : sa fiche ; un épisode ou une série : la saison).
+    function selectedTargetPage() {
+        if (focusSection === 0) return "moviepage.qml"
+        var it = null
+        if (focusSection === 1) it = cappedResumeItems[currentResumeIndex]
+        else if (focusSection === 2) it = cappedNextUpItems[currentNextUpIndex]
+        else if (focusSection === 3) it = currentLatestItem()
+        if (!it) return ""
+        var t = MediaCatalog.itemTypeLower(it)
+        if (t === "movie" || t === "video" || t === "musicvideo") return "detailMoviePage.qml"
+        if (t === "episode" || t === "series" || t === "season") return "seasonpage.qml"
+        return ""
     }
     function openEpisodeLike(it) {
         if (!it) return

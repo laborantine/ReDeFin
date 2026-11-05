@@ -295,6 +295,17 @@ FocusScope {
         }
     }
 
+    // Dernier déplacement de la sélection dans les rangées, pour le repos
+    // mesuré par le shell.
+    readonly property double lastNavigationMs: posterGridLoader.item
+                                                ? Number(posterGridLoader.item.lastSelectionMoveMs || 0) : 0
+    // Page de contenu qu'ouvrirait OK sur la carte sélectionnée, pour l'ordre de
+    // la précompilation du shell ; vide hors des rangées.
+    function precompileTargetPage() {
+        var pg = posterGridLoader.item
+        return pg && pg.selectedTargetPage ? pg.selectedTargetPage() : ""
+    }
+
     // ✅ Hook appelé par ClockHUD (ou par signal) pour focus Settings
     function requestFocusSettings() {
         if (homePage._loading) return

@@ -13,6 +13,7 @@
 // ✅ MoviePage universel : injection libraryMode/browserTitle + restauration restoreIndex/restoreY.
 
 import QtQuick 2.15
+import QtQuick.Window 2.15
 import "../js/NavigationContext.js" as NavContext
 import fbx.system 1.0
 import "../js/jellyfinBridge.js" as JellyfinBridge
@@ -105,7 +106,97 @@ FocusScope {
             shell._tryShowPendingUpdate();
         });
     }
-    onCurrentPageChanged: _syncPageLoaderSource()
+    onCurrentPageChanged: {
+        _syncPageLoaderSource()
+        _startPrecompileWatch()
+    }
+
+    // Précompilation : des types QML sont chargés en arrière-plan, un par un,
+    // pour que leur première utilisation ne paie pas la compilation : ceux de
+    // l'accueil pendant le choix du profil, ceux des pages de contenu et du
+    // panneau des réglages sur l'accueil. Les composants sont gardés : le
+    // moteur conserve ainsi les types compilés. Mêmes URL que les Loaders qui
+    // les créent.
+    // Une compilation occupe le seul cœur de la box pendant ~1 s : chacune
+    // n'est lancée que sur la page affichée, sans action de l'utilisateur
+    // depuis precompileQuietMs (élément actif ou sélection de la page), pour
+    // ne pas retarder ses touches. Les trames ne comptent pas : le titre
+    // défilant de la carte sélectionnée en rend sans arrêt. Passé
+    // precompileMaxWaitMs, elle part quand même.
+    property var _precompileProfileQueue: ["HomePage.qml", "postergrid.qml", "PosterGridCard.qml", "HomeBackdrop.qml"]
+    property var _precompileQueue: ["moviepage.qml", "detailMoviePage.qml", "seasonpage.qml", "../components/SettingsSidePanel.qml"]
+    property var _precompiled: []
+    property bool _precompileBusy: false
+    property double _precompileLastActionMs: 0
+    property double _precompileWaitStartMs: 0
+    property double _precompileServedSinceMs: 0
+    readonly property int precompileQuietMs: 1000
+    readonly property int precompileMaxWaitMs: 30000
+    Connections {
+        target: precompileTimer.running ? shell.Window.window : null
+        ignoreUnknownSignals: true
+        function onActiveFocusItemChanged() { shell._precompileLastActionMs = Date.now() }
+    }
+    Timer {
+        id: precompileTimer
+        interval: 250
+        repeat: true
+        onTriggered: shell._precompileTick()
+    }
+    function _startPrecompileWatch() {
+        if (precompileTimer.running || (!_precompileQueue.length && !_precompileProfileQueue.length)) return
+        _precompileLastActionMs = Date.now()
+        _precompileWaitStartMs = _precompileLastActionMs
+        _precompileServedSinceMs = _precompileLastActionMs
+        precompileTimer.start()
+    }
+    // File à servir sur la page affichée, ou null.
+    function _precompileQueueNow() {
+        var base = NavContext.baseOf(currentPage).toLowerCase()
+        // L'accueil compile lui-même ses types à sa création.
+        if (base === "homepage.qml") _precompileProfileQueue = []
+        if (pageLoadCurtain.visible || playerActive || _shownPageStatus !== Loader.Ready) return null
+        if (base === "loginpage.qml" && _precompileProfileQueue.length) return _precompileProfileQueue
+        if (base === "homepage.qml" && _precompileQueue.length) return _precompileQueue
+        return null
+    }
+    function _precompileTick() {
+        if (!_precompileQueue.length && !_precompileProfileQueue.length) { precompileTimer.stop(); return }
+        if (_precompileBusy) return
+        var now = Date.now()
+        var queue = _precompileQueueNow()
+        if (!queue) { _precompileWaitStartMs = now; _precompileServedSinceMs = now; return }
+        // Repos compté depuis la dernière action ou l'affichage de la page ; au
+        // repos, les compilations s'enchaînent sans nouvelle attente.
+        var pageActionMs = _shownPage ? Number(_shownPage.lastNavigationMs || 0) : 0
+        var lastActivity = Math.max(_precompileLastActionMs, _precompileServedSinceMs, pageActionMs)
+        if (now - lastActivity < precompileQuietMs
+                && now - _precompileWaitStartMs < precompileMaxWaitMs) return
+        _precompileNext(queue)
+    }
+    // Sur l'accueil, la page qu'ouvrirait OK sur la carte sélectionnée passe
+    // en tête : c'est la prochaine à servir si l'utilisateur valide.
+    function _promoteFocusTarget(queue) {
+        if (!_homeShown || !_shownPage || !_shownPage.precompileTargetPage) return
+        var target = ""
+        try { target = _shownPage.precompileTargetPage() } catch (e) {}
+        var i = target ? queue.indexOf(target) : -1
+        if (i > 0) queue.unshift(queue.splice(i, 1)[0])
+    }
+    function _precompileNext(queue) {
+        _promoteFocusTarget(queue)
+        var name = queue.shift()
+        _precompileBusy = true
+        var c = Qt.createComponent(Qt.resolvedUrl(name), Component.Asynchronous)
+        _precompiled.push(c)
+        var finish = function() {
+            if (c.status === Component.Loading) return
+            shell._precompileBusy = false
+            shell._precompileWaitStartMs = Date.now()
+        }
+        if (c.status === Component.Loading) c.statusChanged.connect(finish)
+        else finish()
+    }
     on_DirectPlayReloadPendingChanged: _syncPageLoaderSource()
 
     /* ===================== UPDATE CHECK ===================== */
@@ -2515,6 +2606,8 @@ FocusScope {
                 try { forceActiveFocus(Qt.OtherFocusReason) } catch(e0) {}
             } else {
                 shell._handoffFocusAfterPageCurtain()
+                if (NavContext.baseOf(shell.currentPage).toLowerCase() === "homepage.qml")
+                    shell._startPrecompileWatch()
 
                 Qt.callLater(function() {
                     shell._tryShowPendingUpdate()
