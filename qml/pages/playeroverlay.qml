@@ -651,7 +651,7 @@ FocusScope {
             (controlsFocus === cF_ZOOM || controlsFocus === cF_SPEED ||
              controlsFocus === cF_CHAPTERS || controlsFocus === cF_QUALITY ||
              controlsFocus === cF_MENU)) {
-            hideControlsFromBottomRow()
+            hideControlsByKey("down-from-bottom-row")
             event.accepted = true
             return true
         }
@@ -2740,12 +2740,12 @@ FocusScope {
             _focusControlsLater()
         }
     }
-    // Bas depuis la rangée du bas (lecture ou boutons latéraux) : même fermeture
-    // que le masquage automatique, focus reparqué sur la barre de progression.
-    function hideControlsFromBottomRow(){
+    // Bas depuis la rangée du bas (lecture ou boutons latéraux) ou Retour : même
+    // fermeture que le masquage automatique, focus reparqué sur la barre de progression.
+    function hideControlsByKey(reason){
         if(nextUiLocked){  return }
         controlsTimer.stop()
-        _parkFocusOnProgress("down-from-bottom-row")
+        _parkFocusOnProgress(reason)
         controlsVisible=false
     }
     function resetControlsTimer(){
