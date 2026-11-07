@@ -2357,6 +2357,7 @@ FocusScope {
                 nextHiddenWaiter.restart()
             })
             if (w.requestHide) w.requestHide.connect(function(){ hideNextPanel() })
+            if (w.requestExit) w.requestExit.connect(function(){ finalizePlaybackAndExit("next-panel-back") })
             if (w.findNextByPlaylist) w.findNextByPlaylist(itemId, w.playlist)
         }
         onActiveChanged: _syncNextOverlayContext()
