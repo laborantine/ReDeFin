@@ -42,8 +42,15 @@ FocusScope {
     // lecture, pour rendre sa mémoire au lecteur.
     property bool _homeShown: false
     property var _homeWiredItem: null
-    readonly property var _shownPage: _homeShown ? homeLoader.item : pageLoader.item
-    readonly property int _shownPageStatus: _homeShown ? homeLoader.status : pageLoader.status
+    // La fiche film survit de même dans detailLoader : rouvrir une fiche
+    // change son film au lieu de recréer la page. Masquée sous l'accueil, elle
+    // libère ses données et ses images ; masquée sous une page acteur, elle
+    // reste telle quelle pour un retour immédiat. Elle est détruite pendant la
+    // lecture, en sortie de session et vers toute autre page.
+    property bool _detailShown: false
+    property var _detailWiredItem: null
+    readonly property var _shownPage: _homeShown ? homeLoader.item : (_detailShown ? detailLoader.item : pageLoader.item)
+    readonly property int _shownPageStatus: _homeShown ? homeLoader.status : (_detailShown ? detailLoader.status : pageLoader.status)
     // Les paramètres de navigation sont appliqués par _onPageLoaded().
     // Le cache de types QML ne reçoit que l'URL de base de chaque page.
     function _pageLoaderRoute() {
@@ -52,20 +59,45 @@ FocusScope {
     function _isHomeRoute(route) {
         return NavContext.baseOf(route).toLowerCase() === "homepage.qml";
     }
+    function _isDetailRoute(route) {
+        return NavContext.baseOf(route).toLowerCase() === "detailmoviepage.qml";
+    }
     function _pageLoaderRouteApplied(route) {
-        var target = _isHomeRoute(route) ? homeLoader : pageLoader;
+        var target = _isHomeRoute(route) ? homeLoader : (_isDetailRoute(route) ? detailLoader : pageLoader);
         return _pageSourceRoute === route && (route === "" || target.source.toString() !== "");
     }
     function _syncPageLoaderSource() {
-        if (!pageLoader || !homeLoader) return;
+        if (!pageLoader || !homeLoader || !detailLoader) return;
         var route = _pageLoaderRoute();
         if (_pageLoaderRouteApplied(route)) return;
         _applyPageLoaderRoute(route);
     }
+    function _disposeDetail() {
+        detailDisposeTimer.stop();
+        detailSuspendTimer.stop();
+        _detailWiredItem = null;
+        detailLoader.setSource("");
+    }
+    Timer {
+        id: detailDisposeTimer
+        interval: 300
+        onTriggered: { if (!shell._detailShown) shell._disposeDetail() }
+    }
+    // Sous l'accueil, la fiche rend ses données et ses images après le retour,
+    // pour ne pas retarder la première image de l'accueil.
+    Timer {
+        id: detailSuspendTimer
+        interval: 300
+        onTriggered: {
+            var page = detailLoader.item
+            if (!shell._detailShown && page && page.suspendForReuse) page.suspendForReuse()
+        }
+    }
     function _applyPageLoaderRoute(route) {
         var base = NavContext.baseOf(route).toLowerCase();
         var isHome = base === "homepage.qml";
-        var target = isHome ? homeLoader : pageLoader;
+        var isDetail = base === "detailmoviepage.qml";
+        var target = isHome ? homeLoader : (isDetail ? detailLoader : pageLoader);
         _pageSourceRoute = route;
         var seq = ++_pageSourceSeq;
         // currentPage passe brièvement par "" pour recharger une même page :
@@ -73,9 +105,21 @@ FocusScope {
         if (playerActive || _directPlayReloadPending
                 || base === "splashpage.qml" || base === "serverpage.qml" || base === "loginpage.qml")
             homeLoader.setSource("");
+        if (playerActive || _directPlayReloadPending)
+            _disposeDetail();
+        else if (route && !isDetail && !isHome && base !== "personpage.qml" && detailLoader.source != "")
+            detailDisposeTimer.restart();
         pageLoader.setSource("");
         _homeShown = isHome;
+        _detailShown = isDetail;
+        if (isHome && detailLoader.item) detailSuspendTimer.restart();
         if (!route) return;
+        if (isDetail && detailLoader.item && detailLoader.item === _detailWiredItem) {
+            detailDisposeTimer.stop();
+            detailSuspendTimer.stop();
+            _onDetailShownAgain(detailLoader.item);
+            return;
+        }
         if (isHome && homeLoader.item && homeLoader.item === _homeWiredItem) {
             // Aucun rechargement : HomePage.onVisibleChanged gère le retour
             // externe et remonte son état via shellLoading.
@@ -84,10 +128,40 @@ FocusScope {
         }
         _beginPageCurtainTransition();
         if (isHome && homeLoader.status === Loader.Loading) return;
+        if (isDetail && detailLoader.status === Loader.Loading) return;
         if (isHome) homeLoader.setSource("");
+        if (isDetail) _disposeDetail();
         Qt.callLater(function() {
             if (seq !== shell._pageSourceSeq || shell.playerActive || shell._directPlayReloadPending) return;
             target.setSource(Qt.resolvedUrl(NavContext.baseOf(route)));
+        });
+    }
+
+    // Ne jamais rappeler _onPageLoaded() sur la fiche gardée : ses connexions
+    // de navigation et de lecture seraient doublées. Même film (retour d'une
+    // page acteur) : la fiche se réaffiche telle quelle. Autre film : elle
+    // repart à zéro, reçoit le nouveau contexte et garde le rideau jusqu'à
+    // ce que la nouvelle fiche soit prête.
+    function _onDetailShownAgain(pageItem) {
+        var safeCurrentPage = NavContext.stripCredentials(shell.currentPage);
+        var params = _loadedPageParams(safeCurrentPage);
+        var sameItem = !!params.itemId && String(pageItem.itemId || "") === String(params.itemId)
+                && !(pageItem.reuseSuspended === true);
+        if (!sameItem) {
+            _beginPageCurtainTransition();
+            if (pageItem.prepareForReuse) pageItem.prepareForReuse();
+            _injectStandardPageContext(pageItem, params, safeCurrentPage);
+            _applyDetailSnapshotToPage("detailmoviepage.qml", pageItem, params);
+            if (pageItem.scheduleFetch) pageItem.scheduleFetch();
+        }
+        _persistLoadedPageContext("detailmoviepage.qml");
+        _applyPendingLoadedPageFocus(pageItem);
+        var seq = _pageLoadCurtainSeq;
+        Qt.callLater(function() {
+            if (!shell._detailShown || shell._shownPage !== pageItem) return;
+            if (!sameItem && seq === shell._pageLoadCurtainSeq) shell._schedulePageCurtainRelease(seq);
+            try { if (pageItem.forceActiveFocus) pageItem.forceActiveFocus(); } catch(e0) {}
+            shell._tryShowPendingUpdate();
         });
     }
 
@@ -2411,6 +2485,38 @@ FocusScope {
                 return
             }
             shell._homeWiredItem = item
+            shell._onPageLoaded(item, shell._pageLoadCurtainSeq)
+        }
+    }
+
+    Loader {
+        id: detailLoader
+        anchors.fill: parent
+        source: ""
+        visible: shell._detailShown && !playerActive && !shell._directPlayReloadPending
+        asynchronous: true
+        onStatusChanged: {
+            if (!shell._detailShown) return
+            if (status === Loader.Loading) {
+                shell._beginPageCurtainTransition()
+            } else if (status === Loader.Error || status === Loader.Null) {
+                shell._pageLoadCurtainSeq = (shell._pageLoadCurtainSeq + 1) | 0
+                shell._pageLoadCurtainHold = false
+                shell._homeLaunchPending = false
+                shell._pageCurtainReadySinceMs = 0
+                shell._pageCurtainStableTicks = 0
+                try { pageCurtainReleaseTimer.stop() } catch(e0) {}
+            } else if (status === Loader.Ready) {
+                shell._schedulePageCurtainRelease(shell._pageLoadCurtainSeq)
+            }
+        }
+
+        onLoaded: {
+            if (!shell._detailShown) {
+                Qt.callLater(function() { if (!shell._detailShown) shell._disposeDetail() })
+                return
+            }
+            shell._detailWiredItem = item
             shell._onPageLoaded(item, shell._pageLoadCurtainSeq)
         }
     }

@@ -1430,6 +1430,57 @@ FocusScope {
         _cancelItemFetch()
     }
     function _ctxChanged(){ scheduleFetch(); _scheduleClockHudSync() }
+
+    // ShellPage garde cette fiche entre deux ouvertures (detailLoader).
+    // prepareForReuse() la remet dans l'état d'une page neuve juste avant
+    // qu'elle reçoive un autre film : sans cela, le rideau pourrait se lever
+    // sur l'ancien film pendant l'attente de la requête. suspendForReuse()
+    // rend données et images pendant que l'accueil est affiché.
+    property bool reuseSuspended: false
+    function _clearItemForReuse(){
+        _cancelItemFetch()
+        try { fetchDebounce.stop() } catch(e0) {}
+        _fetchKey = ""
+        warmSnapshotVisible = false
+        _warmDetailSnapshot = null
+        _resetData(true)
+        _resetOverlay()
+        try { backdrop.updateBackdropNow() } catch(e1) {}
+        try { _syncPosterSources() } catch(e2) {}
+    }
+    function prepareForReuse(){
+        reuseSuspended = false
+        _rebindActionsOnItem = true
+        initialAuthoritativeFetchPending = true
+        _resetGates()
+        _clearItemForReuse()
+        didInitialFocus = false
+        isRestoring = true
+        currentFocus = initialContentFocus()
+        actionsArmed = false
+        try { if (actionsBlock) actionsBlock.lastActionIndex = -1 } catch(e3) {}
+        if (rootFlick) { rootFlick.cancelFlick(); rootFlick.contentY = 0 }
+    }
+    // GlassCircleButtonMovie._adoptContext() remplace les liaisons de ses
+    // boutons par une copie du film quand elles sont vides : une fiche
+    // réutilisée garderait la reprise ou le « vu » du film précédent. Les
+    // liaisons sont rétablies dès que le nouveau film arrive.
+    property bool _rebindActionsOnItem: false
+    function _rebindActionButtons(){
+        var btns = actionsBlock ? actionsBlock.btns : []
+        for (var i = 0; i < btns.length; i++) {
+            var b = btns[i]
+            if (!b) continue
+            b.itemId = Qt.binding(function(){ return hasItem ? item.Id : "" })
+            b.userData = Qt.binding(function(){ return hasItem ? item.UserData : null })
+            b.runTimeTicks = Qt.binding(function(){ return hasItem && item.RunTimeTicks ? Number(item.RunTimeTicks) : 0 })
+        }
+    }
+    onItemChanged: if (item && _rebindActionsOnItem) { _rebindActionsOnItem = false; _rebindActionButtons() }
+    function suspendForReuse(){
+        _clearItemForReuse()
+        reuseSuspended = true
+    }
     onVisibleChanged: {
         if (visible) {
             var hydrated = _hydrateSensitiveContextFromShared()
