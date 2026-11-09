@@ -467,6 +467,7 @@ FocusScope {
     property bool _wasPlayingBeforeSwitch: false
     property bool _resumeWantedAfterNegotiation: false
     property int  lastUiTargetMs: 0
+    property double _localSeekChainAtMs: 0
     property int manualQualityBitrate: 0
     property bool manualRemuxMode: false
     // Zoom local QtMultimedia. 0=100 %, 1=110 %, 2=125 %, 3=150 %. PreserveAspectFit reste fixe : seul le rectangle du VideoOutput est agrandi. Aucun changement de source ni transcodage Jellyfin n'est déclenché.
