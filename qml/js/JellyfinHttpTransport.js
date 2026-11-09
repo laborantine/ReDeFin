@@ -551,19 +551,29 @@ function send(method, url, headers, body, onSuccess, onError, timeoutMs) {
     return _xhrSend(method, url, headers, body, onSuccess, onError, effectiveTimeout);
 }
 
+// fail() et finish() s'exécutent dans les gestionnaires de l'XHR. Un abort()
+// immédiat y libère la réponse que Qt 5 lit encore au retour du gestionnaire
+// (plantage dans QIODevice::readAll) : l'annulation attend ce retour.
+function _abortAfterHandler(xhr) {
+    if (!xhr) return;
+    Qt.callLater(function() {
+        try { if (xhr.abort) xhr.abort(); } catch(e0) {}
+    });
+}
+
 function probeMetadata(url, headers, onSuccess, onError, timeoutMs, sameOrigin) {
     var xhr = null; var finished = false;
     function fail(code) {
         if (finished) return;
         finished = true;
-        try { if (xhr && xhr.abort) xhr.abort(); } catch(e0) {}
+        _abortAfterHandler(xhr);
         if (onError) onError({ code: code || "network_error", message: code || "network_error" });
     }
     function finish(status, contentType) {
         if (finished) return;
         finished = true;
         var ok = status >= 200 && status < 300;
-        try { if (xhr && xhr.abort) xhr.abort(); } catch(e0) {}
+        _abortAfterHandler(xhr);
         if (ok) {
             if (onSuccess) onSuccess({ status: status | 0, contentType: _s(contentType).toLowerCase() });
         } else if (onError) {
