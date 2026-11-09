@@ -225,7 +225,7 @@ FocusScope {
     readonly property int posterRequestQuality: 85
     readonly property real posterHqRequestScale: 1.50
     readonly property int posterHqRequestQuality: 90
-    readonly property int extrasArmDelayMs: 420
+    readonly property int extrasArmDelayMs: 0
     property bool _logoArmed: false
     property bool _actionsArmed: false
     readonly property int hudThrottleMs: 60
@@ -1059,7 +1059,7 @@ FocusScope {
         _playlistRestoreInFlight = false; _focusRestoreGate = false; _lastPlaylistRestoreKey = "";
         overlayMode = "none"; overlayData = ({}); _bgWantedUrl = ""; _bgActiveUrl = "";
         _guestPrefetch = false; initialWarmup = true; _logoArmed = false; _actionsArmed = false;
-        _detailsPending = false; _guestAnchorY = -1; _episodesBottomY = -1; _deferPinAfterNav = false;
+        _detailsPending = false; _firstDetailsSent = false; _guestAnchorY = -1; _episodesBottomY = -1; _deferPinAfterNav = false;
         if (currentFocus === focusHud) currentFocus = 1;
         loadingHardTimeout.restart();
     }
@@ -1185,8 +1185,19 @@ FocusScope {
             GuestCredits.fetchSelectedDetails(seasonpage, Jellyfin, SeasonUtils.updatePlaylistFromEpisodes);
         }
     }
+    property bool _firstDetailsSent: false
     function requestDetailsFetchDebounced(){
         if (disposed) return;
+        // Les détails du premier épisode affiché conditionnent le lever du
+        // rideau : on les demande dès l'arrivée des épisodes, sans attendre la
+        // construction de la page.
+        if (!_firstDetailsSent && episodes && episodes.length > 0 && selectedEpisodeId) {
+            _firstDetailsSent = true;
+            _detailsPending = false;
+            detailsDebounceTimer.stop();
+            GuestCredits.fetchSelectedDetails(seasonpage, Jellyfin, SeasonUtils.updatePlaylistFromEpisodes);
+            return;
+        }
         _detailsPending = true;
         detailsDebounceTimer.restart();
     }
@@ -1208,6 +1219,12 @@ FocusScope {
     function requestBgUpdate(){
         if (disposed || !serverUrl) return;
         _bgWantedUrl = SeasonUtils.seasonBackdropUrl(Jellyfin, seasonpage);
+        // Premier fond : rien à lisser, il s'affiche sans attendre la minuterie.
+        if (!_bgActiveUrl && _bgWantedUrl) {
+            bgDebounceTimer.stop();
+            _bgActiveUrl = _bgWantedUrl;
+            return;
+        }
         bgDebounceTimer.restart();
     }
     onBgBlurChanged: requestBgUpdate()
@@ -2268,8 +2285,11 @@ FocusScope {
                                 var wanted = h._desiredRestoreIndex();
                                 if (wanted >= 0 && absIdx !== wanted) return;
                             }
-                            h.currentIndex = absIdx;
                             var ep = (h.episodes && h.episodes.length > absIdx) ? h.episodes[absIdx] : null;
+                            // La rangée signale aussi l'épisode déjà choisi (fin de son
+                            // démarrage) : sans changement, ne rien effacer ni redemander.
+                            if (absIdx === h.currentIndex && ep && ep.Id && ep.Id === h.selectedEpisodeId) return;
+                            h.currentIndex = absIdx;
                             h.selectedDetails = (ep && ep.Id) ? h._getEpisodeDetails(ep.Id) : null;
                             h.recomputeTagsFromDetails(false);
                             h.requestDetailsFetchDebounced();
@@ -2349,7 +2369,7 @@ FocusScope {
                             id: guestLoader
                             source: Qt.resolvedUrl("guestpage.qml")
                             width: guestsCol.width
-                            active: !!(hasGuests && (_guestPrefetch || _guestPersonReturnPending || currentFocus === 2 || autoRevealGuests || (overlayOpen && _guestWasReady)))
+                            active: !!(hasGuests && ((_guestPrefetch && !shellLoading) || _guestPersonReturnPending || currentFocus === 2 || autoRevealGuests || (overlayOpen && _guestWasReady)))
                             enabled: !isLoading && !overlayOpen
                             visible: (status === Loader.Ready) && hasGuests
                             height: h._guestH
@@ -2405,7 +2425,7 @@ FocusScope {
                 }
                 Loader {
                     id: chaptersLoader
-                    width: pageColumn.width; asynchronous: true; active: !!selectedEpisodeId
+                    width: pageColumn.width; asynchronous: true; active: !!selectedEpisodeId && !shellLoading
                     source: active ? Qt.resolvedUrl("ChaptersCarousel.qml") : ""
                     visible: status === Loader.Ready && item && item.hasContent === true
                     height: visible ? (item.implicitHeight || 0) : 0

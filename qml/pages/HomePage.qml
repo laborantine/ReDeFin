@@ -24,6 +24,7 @@
 
 import QtQuick 2.15
 import "../js/NavigationContext.js" as NavContext
+import "../js/jellyfinBridge.js" as Jellyfin
 
 import "../components" as Components
 import "../js/SafeLog.js" as SafeLog
@@ -214,6 +215,16 @@ FocusScope {
     function _openSearchDetailCollection(boxSetId) {
         if (!boxSetId) return
         requestNavigation(_navRoute("detailCollectionPage.qml", { boxSetId: boxSetId }))
+    }
+
+    // La page de saison redemande ces deux réponses dès sa création : lancées
+    // ici, elles arrivent pendant cette création et la page les rejoint.
+    function _prefetchSeason(seasonId) {
+        if (!seasonId || !serverUrl || !accessToken || !userId) return
+        try {
+            Jellyfin.fetchItem(serverUrl, accessToken, seasonId, function(){}, function(){})
+            Jellyfin.fetchEpisodes(serverUrl, accessToken, userId, seasonId, function(){}, function(){})
+        } catch(e) {}
     }
 
     function _openSearchSeason(seriesId, seasonId, episodeId) {
@@ -1037,6 +1048,7 @@ FocusScope {
             if (item.requestSeasonPage) {
                 item.requestSeasonPage.connect(function(seriesId, seasonId, episodeId) {
                     savePosterGridFocus("nav-seasonpage", true);
+                    homePage._prefetchSeason(seasonId);
                     homePage.requestNavigation(homePage._navRoute("seasonpage.qml", { seriesId: seriesId, seasonId: seasonId, preselectEpisodeId: episodeId }));
                 });
             }
