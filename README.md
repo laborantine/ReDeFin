@@ -3,7 +3,7 @@
 <div align="center">
 
 <a href="https://github.com/laborantine/ReDeFin">
-  <img src="https://github.com/user-attachments/assets/c14346df-2e99-482b-9c6d-d064583890bd" alt="Logo officiel ReDeFin" width="320" />
+  <img src="https://github.com/user-attachments/assets/c14346df-2e99-482b-9c6d-d064583890bd" alt="Logo officiel ReDeFin" width="116" />
 </a>
 
 <h1>ReDeFin</h1>
@@ -24,12 +24,11 @@
   <a href="https://www.free.fr/freebox/" title="Freebox"><img src="https://upload.wikimedia.org/wikipedia/commons/8/8a/Freebox_%28logo%29.svg" alt="Freebox" height="25" /></a>
 </p>
 
-<p>
-  <a href="https://github.com/laborantine/ReDeFin"><strong>Voir la documentation</strong></a>
-  &nbsp; · &nbsp;
-  <a href="https://github.com/laborantine/ReDeFin/issues/new?labels=bug&amp;template=bug-report---.md">Rapporter un bug</a>
-  &nbsp; · &nbsp;
-  <a href="https://github.com/laborantine/ReDeFin/issues/new?labels=enhancement&amp;template=feature-request---.md">Suggérer une nouvelle fonctionnalité</a>
+<!-- Des actions identifiables immédiatement, avec les pictogrammes GitHub natifs de Shields.io. -->
+<p align="center">
+  <a href="https://github.com/laborantine/ReDeFin"><img src="assets/readme-icons/book.svg" alt="" width="20" height="20" />&nbsp;<img alt="Voir la documentation" src="https://img.shields.io/badge/Voir_la_documentation-252B37?style=for-the-badge&amp;logo=github&amp;logoColor=white" /></a>
+  <a href="https://github.com/laborantine/ReDeFin/issues/new?labels=bug&amp;template=bug-report---.md"><img src="assets/readme-icons/bug.svg" alt="" width="20" height="20" />&nbsp;<img alt="Rapporter un bug" src="https://img.shields.io/badge/Rapporter_un_bug-B42335?style=for-the-badge&amp;logo=github&amp;logoColor=white" /></a>
+  <a href="https://github.com/laborantine/ReDeFin/issues/new?labels=enhancement&amp;template=feature-request---.md"><img src="assets/readme-icons/idea.svg" alt="" width="20" height="20" />&nbsp;<img alt="Suggérer une nouvelle fonctionnalité" src="https://img.shields.io/badge/Sugg%C3%A9rer_une_nouvelle_fonctionnalit%C3%A9-2563EB?style=for-the-badge&amp;logo=github&amp;logoColor=white" /></a>
 </p>
 
 <p>
@@ -115,6 +114,9 @@ L'objectif souhaité est de se rapprocher visuellement et fonctionnellement de c
   <a href="https://chatgpt.com/fr-FR"><img src="https://img.shields.io/badge/ChatGPT-OpenAI-202932?style=flat-square&amp;logo=openai&amp;logoColor=white" alt="ChatGPT OpenAI" /></a>
   <a href="https://www.qt.io/"><img src="https://img.shields.io/badge/QtQuick-2.15-202932?style=flat-square&amp;logo=qt&amp;logoColor=41CD52" alt="QtQuick 2.15" /></a>
   <a href="https://developer.mozilla.org/fr/docs/Web/JavaScript"><img src="https://img.shields.io/badge/JavaScript-QML-202932?style=flat-square&amp;logo=javascript&amp;logoColor=F7DF1E" alt="JavaScript" /></a>
+  <a href="https://jellyfin.org/"><img src="https://img.shields.io/badge/API-Jellyfin-202932?style=flat-square&amp;logo=jellyfin&amp;logoColor=A98CEE" alt="API Jellyfin" /></a>
+  <a href="https://dev.freebox.fr/sdk/libfbxqml/"><img src="https://img.shields.io/badge/SDK-Freebox-202932?style=flat-square&amp;logoColor=white" alt="SDK Freebox" /></a>
+  <a href="https://doc.qt.io/qt-5/qtmultimedia-index.html"><img src="https://img.shields.io/badge/QtMultimedia-5.15-202932?style=flat-square&amp;logo=qt&amp;logoColor=41CD52" alt="QtMultimedia 5.15" /></a>
 </p>
 
 Ce projet a été intégralement fabriqué à partir de ChatGPT depuis 2024. Il a été fabriqué à partir des modèles de langages suivants :
@@ -146,6 +148,11 @@ Ce projet a été intégralement fabriqué à partir de ChatGPT depuis 2024. Il 
 
 <a id="getting-started"></a>
 ## Introduction
+
+<p>
+  <a href="https://www.free.fr/freebox/"><img src="https://img.shields.io/badge/Freebox-Player-252B37?style=flat-square&amp;logoColor=white" alt="Freebox Player" /></a>
+  <a href="mailto:application.redefin@proton.me"><img src="https://img.shields.io/badge/Candidater-par_email-6D4AFF?style=flat-square&amp;logo=protonmail&amp;logoColor=white" alt="Candidater par email" /></a>
+</p>
 
 ![Places bêta](https://img.shields.io/badge/Places-110%20occup%C3%A9es%20sur%20160%20%E2%80%94%2050%20restantes-orange?style=flat-square)
 
@@ -195,6 +202,11 @@ Vous devez disposer au moins de l'un des produits suivants pour bénéficier de 
 <a id="installation"></a>
 ### Installation
 
+<p>
+  <a href="https://www.free.fr/freebox/"><img src="https://img.shields.io/badge/Freebox-Player-252B37?style=flat-square&amp;logoColor=white" alt="Freebox Player" /></a>
+  <a href="mailto:application.redefin@proton.me"><img src="https://img.shields.io/badge/Contact-Proton_Mail-6D4AFF?style=flat-square&amp;logo=protonmail&amp;logoColor=white" alt="Contacter le projet par email" /></a>
+</p>
+
 Une fois votre mail envoyé à application.redefin@proton.me pour candidater en qualité de bêta-testeur, vous aurez une réponse vous confirmant la prise en compte de votre mail et la déclaration de votre n° d'abonné (identifiant Freebox) dans la liste des bêta-testeurs.
 
 Vous pourrez alors vous rendre dans le Free Store sur votre Freebox Player afin de télécharger ReDeFin.
@@ -214,6 +226,10 @@ Vous pourrez alors vous rendre dans le Free Store sur votre Freebox Player afin 
 Cette application vous permet de lire vos épisodes de séries et vos films de votre bibliothèque Jellyfin. Le support de la bibliothèque musicale et des chaines TV sont à l'étude.
 
 _Pour plus d'exemples, Référez-vous à la [documentation officielle de Jellyfin](https://jellyfin.org/docs/)_
+
+<p>
+  <a href="https://jellyfin.org/docs/"><img src="https://img.shields.io/badge/Documentation-Jellyfin-A98CEE?style=flat-square&amp;logo=jellyfin&amp;logoColor=white" alt="Documentation officielle Jellyfin" /></a>
+</p>
 
 <a id="roadmap"></a>
 ## Roadmap
@@ -237,6 +253,12 @@ _Pour plus d'exemples, Référez-vous à la [documentation officielle de Jellyfi
 
 Voir [open issues](https://github.com/laborantine/ReDeFin/issues) pour un aperçu complet des nouvelles fonctionnalités (et des problèmes connus).
 
+<p align="left">
+  <a href="https://github.com/laborantine/ReDeFin/issues"><img src="assets/readme-icons/issues.svg" alt="" width="20" height="20" />&nbsp;<img alt="Suivre les issues" src="https://img.shields.io/badge/Suivre_les_issues-7442C8?style=for-the-badge&amp;logo=github&amp;logoColor=white" /></a>
+  <a href="https://github.com/laborantine/ReDeFin/issues/new?labels=bug&amp;template=bug-report---.md"><img src="assets/readme-icons/bug.svg" alt="" width="20" height="20" />&nbsp;<img alt="Rapporter un bug" src="https://img.shields.io/badge/Rapporter_un_bug-B42335?style=for-the-badge&amp;logo=github&amp;logoColor=white" /></a>
+  <a href="https://github.com/laborantine/ReDeFin/issues/new?labels=enhancement&amp;template=feature-request---.md"><img src="assets/readme-icons/idea.svg" alt="" width="20" height="20" />&nbsp;<img alt="Proposer une idée" src="https://img.shields.io/badge/Proposer_une_id%C3%A9e-2563EB?style=for-the-badge&amp;logo=github&amp;logoColor=white" /></a>
+</p>
+
 ---
 
 <a id="contributing"></a>
@@ -247,6 +269,12 @@ Les contributions font de la communauté open source un lieu exceptionnel pour a
 Si vous avez une suggestion pour améliorer ce projet, n'hésitez pas à forker le dépôt et à créer une pull request. Vous pouvez également ouvrir une issue avec l'étiquette « enhancement ».
 
 Pensez à mettre une étoile au projet ! Merci encore ;)
+
+<p>
+  <a href="https://github.com/laborantine/ReDeFin/fork"><img src="assets/readme-icons/fork.svg" alt="" width="20" height="20" />&nbsp;<img alt="Forker le dépôt" src="https://img.shields.io/badge/Forker_le_d%C3%A9p%C3%B4t-293548?style=for-the-badge&amp;logo=git&amp;logoColor=white" /></a>
+  <a href="https://github.com/laborantine/ReDeFin/pulls"><img src="assets/readme-icons/pull-request.svg" alt="" width="20" height="20" />&nbsp;<img alt="Pull requests" src="https://img.shields.io/badge/Pull_requests-7442C8?style=for-the-badge&amp;logo=github&amp;logoColor=white" /></a>
+  <a href="https://github.com/laborantine/ReDeFin/stargazers"><img src="assets/readme-icons/star.svg" alt="" width="20" height="20" />&nbsp;<img alt="Mettre une étoile" src="https://img.shields.io/badge/Mettre_une_%C3%A9toile-BE8200?style=for-the-badge&amp;logo=github&amp;logoColor=white" /></a>
+</p>
 
 ### Top contributors:
 
@@ -263,6 +291,8 @@ Pensez à mettre une étoile au projet ! Merci encore ;)
 <a id="license"></a>
 <h2>Licence</h2>
 
+<p><a href="https://github.com/laborantine/ReDeFin/blob/main/LICENSE"><img src="https://img.shields.io/badge/GNU-GPLv3-436837?style=flat-square&amp;logo=gnu&amp;logoColor=white" alt="Licence GNU GPL v3" /></a></p>
+
 <p>Distribuée sous la licence GPL 3.0. Regardez le fichier <code>LICENSE.txt</code> pour plus d'informations.</p>
 
 </td>
@@ -270,6 +300,11 @@ Pensez à mettre une étoile au projet ! Merci encore ;)
 
 <a id="contact"></a>
 <h2>Contact</h2>
+
+<p>
+  <a href="https://github.com/laborantine/ReDeFin/issues"><img src="https://img.shields.io/badge/GitHub-Issues-252B37?style=flat-square&amp;logo=github&amp;logoColor=white" alt="GitHub Issues" /></a>
+  <a href="mailto:application.redefin@proton.me"><img src="https://img.shields.io/badge/Proton-Mail-6D4AFF?style=flat-square&amp;logo=protonmail&amp;logoColor=white" alt="Proton Mail" /></a>
+</p>
 
 <p>Laborantine - (<a href="https://github.com/laborantine/ReDeFin/issues">https://github.com/laborantine/ReDeFin/issues</a>) - application.redefin@proton.me</p>
 
@@ -289,7 +324,14 @@ Un grand merci à :
 - OpenAI
 
 <p align="center">
+  <a href="https://www.free.fr/freebox/"><img src="https://img.shields.io/badge/Free-Freebox-252B37?style=flat-square&amp;logoColor=white" alt="Free" /></a>
+  <a href="https://openai.com/"><img src="https://img.shields.io/badge/OpenAI-ChatGPT-252B37?style=flat-square&amp;logo=openai&amp;logoColor=white" alt="OpenAI / ChatGPT" /></a>
+</p>
+
+<p align="center">
   <a href="https://ko-fi.com/B0B01NEJ0U"><img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="ko-fi" /></a>
+  &nbsp;
+  <a href="https://ko-fi.com/B0B01NEJ0U"><img src="https://img.shields.io/badge/Soutenir_ReDeFin-Ko--fi-FF5E5B?style=flat-square&amp;logo=kofi&amp;logoColor=white" alt="Soutenir ReDeFin sur Ko-fi" /></a>
 </p>
 
 <p align="center"><a href="#readme-top">Retour en haut de page</a></p>
