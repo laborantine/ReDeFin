@@ -3,7 +3,7 @@
 
 <div align="center">
 
-<a href="https://github.com/laborantine/ReDeFin"><img src="https://github.com/user-attachments/assets/c14346df-2e99-482b-9c6d-d064583890bd" width="112" alt="Logo officiel ReDeFin" /></a>
+<a href="https://github.com/laborantine/ReDeFin"><img src="https://github.com/user-attachments/assets/c14346df-2e99-482b-9c6d-d064583890bd" width="320" alt="Logo officiel ReDeFin" /></a>
 
 <h1>ReDeFin</h1>
 
