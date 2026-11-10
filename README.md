@@ -251,10 +251,6 @@ Distribuée sous la licence GPL 3.0. Regardez le fichier [`LICENSE`](https://git
   <a href="mailto:application.redefin@proton.me"><img src="https://img.shields.io/badge/Proton-Mail-6D4AFF?style=flat-square&amp;logo=protonmail&amp;logoColor=white" alt="Proton Mail" /></a>
 </p>
 
-Laborantine - (https://github.com/laborantine/ReDeFin/issues) - application.redefin@proton.me
-
-Lien officiel du projet : [https://github.com/laborantine/ReDeFin](https://github.com/laborantine/ReDeFin)
-
 <a id="acknowledgments"></a>
 ## Remerciements
 
