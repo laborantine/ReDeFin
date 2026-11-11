@@ -2377,7 +2377,13 @@ function recoverFromMediaError(root, mp, watchTimer, guardTimer) {
     _timerRestart(guardTimer);
     root._mediaErrorRecoveryCount++;
     var target = root._clampUi(recoveryCandidateUiMs(root, mp));
-    if (root._mediaErrorRecoveryCount > 4) return;
+    // Reprises épuisées : le dire à l'utilisateur plutôt que laisser
+    // « Chargement… » affiché indéfiniment.
+    if (root._mediaErrorRecoveryCount > 4) {
+        if (typeof root.showPlaybackFailure === "function")
+            root.showPlaybackFailure("media-error-retries-exhausted");
+        return;
+    }
     recoverSameModeAt(root, target, "mediaErrorSameModeRetry");
     armFrozenPlaybackWatch(root, mp, watchTimer, "postMediaErrorRecovery", root.frozenPlaybackWatchWindowMs);
 }

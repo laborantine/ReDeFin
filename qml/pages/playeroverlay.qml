@@ -1577,6 +1577,35 @@ FocusScope {
         onTriggered: root._tickFrozenPlaybackWatch()
     }
     function _recoverFromMediaError(){ PlayerSession.recoverFromMediaError(root,mp,_playbackTimers().frozenWatch,_playbackTimers().mediaGuard) }
+
+    // Toutes les reprises ont échoué (transcodage refusé par le serveur, flux
+    // illisible…) : message explicite, puis retour à la fiche par la sortie
+    // normale du lecteur, qui signale aussi l'arrêt à Jellyfin.
+    property bool _playbackFailureShown: false
+    function showPlaybackFailure(reason){
+        if (_playbackFailureShown || _tearingDownPlayer || _playbackExitInProgress) return
+        _playbackFailureShown = true
+        try { mp.stop() } catch(e0) {}
+        _releaseVideoLoading(reason || "playback-failure")
+        playbackFailureLoader.active = true
+    }
+    Loader {
+        id: playbackFailureLoader
+        anchors.fill: parent
+        z: 30000
+        active: false
+        source: "../components/UnsupportedDialog.qml"
+        onLoaded: {
+            item.title = "Lecture impossible"
+            item.open("Le serveur Jellyfin n'a pas pu préparer cette vidéo.",
+                      "Réessayez plus tard, ou vérifiez le transcodage dans les réglages du serveur.")
+        }
+        Connections {
+            target: playbackFailureLoader.item
+            ignoreUnknownSignals: true
+            function onClosed() { root.finalizePlaybackAndExit("playback-failure") }
+        }
+    }
     Timer {
         id: videoLoadingShowTimer
         interval: Math.max(0, videoLoadingShowDelayMs)
