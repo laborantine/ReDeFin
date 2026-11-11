@@ -81,12 +81,32 @@ ReDeFin est un projet indépendant et open source. Il n'est pas développé offi
 
 Avec la version 1.0 stable, vous pouvez :
 
-- Retrouver vos films, séries et collections Jellyfin.
-- Parcourir votre médiathèque et consulter les informations de vos contenus.
-- Vous connecter avec différents profils Jellyfin.
-- Regarder vos vidéos en Direct Play, Direct Stream (avec remuxage si nécessaire) ou en transcodage, selon les formats et les capacités du matériel.
+Médiathèque et navigation
 
-Les bibliothèques musicales et les chaînes TV ne sont pas encore prises en charge dans cette version. Leur ajout fait partie des pistes que j'étudie pour la suite.
+- Accès aux bibliothèques de films, séries et collections Jellyfin.
+- Navigation dans les saisons, épisodes, collections et dossiers de la médiathèque.
+- Prise en charge des vidéos et photos personnelles, avec une visionneuse adaptée aux photos.
+- Recherche de films, séries, épisodes, collections et dossiers.
+- Fiches détaillées avec synopsis, genres, informations techniques et illustrations.
+- Consultation de la distribution, des équipes de production et des fiches des personnes.
+- Suggestions de contenus similaires et accès aux épisodes suivants.
+
+Lecture multimédia
+
+- Lecture en Direct Play, Direct Stream, remuxage ou transcodage selon les capacités de la Freebox et du serveur Jellyfin.
+- Sélection des pistes audio et des sous-titres disponibles.
+- Réglage de la qualité vidéo, de la vitesse de lecture et du zoom.
+- Reprise de la lecture à l'endroit où elle s'était arrêtée.
+- Lecture successive des épisodes et possibilité de lecture aléatoire.
+- Navigation entre les chapitres et saut des introductions lorsqu'ils sont disponibles.
+- Suivi de la progression de lecture avec Jellyfin.
+
+Profils et expérience utilisateur
+
+- Connexion à un serveur Jellyfin et utilisation de plusieurs profils.
+- Gestion des favoris et des contenus vus ou non vus.
+- Navigation adaptée aux Freebox Révolution et Devialet, avec une attention particulière portée à leurs capacités matérielles.
+
 
 Si vous découvrez Jellyfin, sa <a href="https://jellyfin.org/docs/"><img src="assets/readme-icons/book.svg" width="20" height="20" alt="" /> documentation officielle</a> explique comment préparer et organiser votre médiathèque.
 
