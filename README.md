@@ -28,7 +28,7 @@
   <a href="https://www.free.fr/freebox/"><img src="https://upload.wikimedia.org/wikipedia/commons/8/8a/Freebox_%28logo%29.svg" alt="Freebox" height="25" /></a>&nbsp;&nbsp;&nbsp;
   <a href="https://www.qt.io/"><img src="https://cdn.simpleicons.org/qt/41CD52" alt="Qt" height="25" /></a>&nbsp;&nbsp;&nbsp;
   <a href="https://developer.mozilla.org/fr/docs/Web/JavaScript"><img src="https://cdn.simpleicons.org/javascript/F7DF1E" alt="JavaScript" height="25" /></a>&nbsp;&nbsp;&nbsp;
-  <a href="https://openai.com/"><img src="https://cdn.simpleicons.org/openai/8D99A6" alt="OpenAI" height="25" /></a>
+  <a href="https://openai.com/"><img src="https://upload.wikimedia.org/wikipedia/commons/6/66/OpenAI_logo_2025_%28symbol%29.svg" alt="OpenAI" height="25" /></a>
 </p>
 
 </div>
