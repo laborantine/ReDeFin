@@ -70,7 +70,13 @@
 <a id="a-propos"></a>
 ## À propos de ReDeFin
 
-ReDeFin est né de l'envie d'utiliser Jellyfin sur les Players Freebox Révolution et Devialet, avec une interface agréable à parcourir depuis son canapé.
+ReDeFin est né de l'envie d'utiliser Jellyfin sur les Players Freebox Révolution et Devialet, avec une interface agréable à parcourir depuis son canapé, qui n'existait pas encore.
+
+Au départ, le projet était un portage de Sailfin, un client Jellyfin sur Sailfish OS (https://github.com/heartfin/harbour-sailfin). Mais ce dernier a été conçu en C++ et certains modules QML (Exemple : Silica) étaient à réécrire pour l'adapter sur Freebox. Le travail était autant chargé pour l'adapter sur Freebox qu'écrire un projet from scratch, la deuxième option a fini par être choisie.
+
+En s'inspirant de l'interface et des fonctionnalités du client officiel Jellyfin for Android TV entre juin 2025 et décembre 2025, l'objectif a été de générer un livrable afin que les beta-testeurs potentiels puissent tester la toute première version beta, qui est sortie le 21 Décembre 2025.
+
+S'est ensuite échelonné sur 10 mois, plusieurs builds qui auront apporté corrections des bugs, d'interface, ainsi que des ajouts de fonctionnalités. Ce qui a permis d'avoir la première version stable en Octobre 2026, optimisée pour la Freebox Révolution et Devialet.
 
 Le but est de se rapprocher de l'expérience proposée par le client officiel Jellyfin sur Android TV, tout en tenant compte des possibilités et des limites des Freebox. Vous gardez votre serveur Jellyfin et vos propres fichiers : ReDeFin sert simplement à les retrouver et à les lire sur votre télévision.
 
