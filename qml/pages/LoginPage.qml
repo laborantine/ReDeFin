@@ -761,10 +761,15 @@ FocusScope {
         // Un profil masqué dans /Users/Public peut tout de même être mémorisé
         // localement. S'il possède un token valide, /Users/{id} permet de
         // valider son tag sans jamais tenter une URL /UserImage potentiellement
-        // héritée d'un ancien store.
+        // héritée d'un ancien store. Il est relu à chaque chargement, même déjà
+        // validé : /Users/Public ne rapporte jamais son nouvel avatar.
+        var publicIds = {};
+        for(var p=0;p<serverUsers.length;p++){
+            if(serverUsers[p] && serverUsers[p].Id) publicIds[serverUsers[p].Id]=true;
+        }
         for(var i=0;i<localUsers.length;i++){
             var lu=localUsers[i];
-            if(!lu || !lu.Id || lu.AvatarTagVerified===true) continue;
+            if(!lu || !lu.Id || publicIds[lu.Id]) continue;
             var tok=tokenByUserId[lu.Id] || "";
             if(!tok) continue;
             (function(uid, token, remembered){
@@ -2602,9 +2607,16 @@ FocusScope {
                         Jellyfin.validateToken(
                             page.serverUrl,
                             tok,
-                            function(){
+                            function(me){
                                 tile._selecting = false
-                                var stored = page._storeSensitiveNavContextForUser(tok, uid, name, tag || "", tile.remembered)
+                                // /Users/Me porte l'avatar à jour, même pour un profil
+                                // absent de /Users/Public dont le tag stocké est périmé.
+                                var avatarTag = tag || ""
+                                if (me && me.Id === uid) {
+                                    avatarTag = me.PrimaryImageTag || (me.ImageTags && me.ImageTags.Primary) || ""
+                                    page._persistVerifiedAvatarMeta(uid, name, avatarTag)
+                                }
+                                var stored = page._storeSensitiveNavContextForUser(tok, uid, name, avatarTag, tile.remembered)
                                 if (stored)
                                     page.requestNavigation("HomePage.qml?ctx=1")
                                 else {
