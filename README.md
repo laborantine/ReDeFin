@@ -172,8 +172,6 @@ ReDeFin 1.0 est disponible sur le Free Store depuis le 28 octobre 2026. Si votre
 
 L'installation depuis le Free Store nécessite un abonnement donnant accès à ce service. Si vous avez un Player Devialet sans abonnement associé, vous pouvez [me contacter](#contact). Il existe des possibilités de test en dehors du Free Store, mais elles dépendent de votre configuration.
 
-Un utilisateur de Freebox Révolution a également [signalé un problème de lancement des applications après une mise à jour du Player](https://github.com/laborantine/ReDeFin/issues/107). Si vous rencontrez le même souci, vous pouvez suivre ce ticket.
-
 <details>
 <summary>Utiliser le code source avec le SDK Freebox</summary>
 
@@ -220,7 +218,7 @@ Ce sont les pistes de travail actuelles, pas des dates de sortie promises. Les i
 <a id="beta"></a>
 ## <img src="assets/readme-icons/people.svg" width="25" height="25" alt="" /> Participer à la bêta
 
-Même si ReDeFin 1.0 est maintenant disponible en version stable, je continue d'accueillir des bêta-testeurs pour essayer les prochaines nouveautés avant leur sortie.
+Même si ReDeFin 1.0 est maintenant disponible en version stable, ReDeFin continue d'accueillir des bêta-testeurs pour essayer les prochaines nouveautés avant leur sortie.
 
 Vous n'avez pas besoin de vous inscrire pour utiliser la version stable. Les candidatures concernent seulement les versions de test.
 
@@ -300,7 +298,7 @@ Avant de créer un ticket, jetez un œil aux [problèmes déjà signalés](https
   <a href="https://chatgpt.com/"><img src="https://img.shields.io/badge/ChatGPT-OpenAI-202932?style=flat-square&amp;logo=openai&amp;logoColor=white" alt="ChatGPT OpenAI" /></a>
 </p>
 
-J'ai commencé ReDeFin en 2024 en m'appuyant sur ChatGPT pour écrire et faire évoluer le code. De mon côté, je définis les fonctionnalités, je teste l'application sur les Freebox et j'adapte son fonctionnement aux contraintes de ces appareils. Les retours des utilisateurs m'aident aussi à décider des corrections et des améliorations à apporter.
+J'ai commencé à mener des pistes de réflexion dès fin 2024 en m'appuyant sur ChatGPT. En avril 2025 le projet débute réellement pour écrire et faire évoluer le code. Le projet possède une orientation de développement définie sur bien des points. L'application est testée sur la Freebox Devialet et son fonctionnement est adapté aux contraintes de ces appareils. Les retours des utilisateurs aident aussi à décider des corrections et des améliorations à apporter.
 
 ReDeFin utilise QML et JavaScript avec QtQuick et QtMultimedia. L'optimisation est particulièrement importante sur la Freebox Révolution, dont les ressources sont plus limitées.
 
