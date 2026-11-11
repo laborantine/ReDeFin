@@ -960,6 +960,10 @@ Item {
                 currentNextUpIndex: cacheNextUpIndex,
                 currentLatestGroup: cacheLatestGroup
             })
+            // Le snapshot reflète ce que la grille affiche : le relire sur cette
+            // même grille, gardée en vie, viderait ses affiches pour rien.
+            postergrid._lastHomeCacheRestoreKey = cacheKey
+            postergrid._lastHomeCacheRestoreCacheTs = now
             MediaBrowser.trimHomeCacheStore(st, cacheKey, postergrid.homeCacheSchemaVersion,
                                                postergrid.homeCacheFreshMs, postergrid.homeCacheMaxEntries, Date.now())
         } catch(e) {}

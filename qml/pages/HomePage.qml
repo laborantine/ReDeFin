@@ -1753,6 +1753,19 @@ FocusScope {
         Rectangle { anchors.fill: parent; color: "#000" }
     }
 
+    function _homeStillPainted() {
+        var pg = posterGridLoader.item
+        if (!pg || _loading || pg.fetchedOnce !== true || pg.latestFetchCompleted !== true)
+            return false
+        // Les sections ne sont pas encore visibles dans ce tour : on se fie à
+        // l'état « affiches prêtes » que PosterGrid garde depuis son dernier reveal.
+        try {
+            return pg._homeImagesReady === true && pg.homePosterVisualReady === true
+        } catch(e) {
+            return false
+        }
+    }
+
     onVisibleChanged: {
         if (!visible) inactiveHomeBackdropTimer.stop()
         else if (currentHomeTab === 1) inactiveHomeBackdropTimer.restart()
@@ -1765,6 +1778,10 @@ FocusScope {
 
         var externalHomeReturn = _externalReturnArmed && currentHomeTab === 0
         _externalReturnArmed = false
+        // HomePage gardée par ShellPage pendant la page de contenu : rangées,
+        // position et affiches sont intactes, le gate anti-flash n'a rien à cacher.
+        if (externalHomeReturn && _homeStillPainted())
+            externalHomeReturn = false
 
         if (externalHomeReturn) {
             // Lever immédiatement le curtain avant tout repaint de PosterGrid.
