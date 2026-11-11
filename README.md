@@ -183,36 +183,7 @@ Cette possibilité s'adresse plutôt aux développeurs. Pour une installation cl
 <a id="roadmap"></a>
 ## <img src="assets/readme-icons/issues.svg" width="25" height="25" alt="" /> Les prochaines étapes
 
-ReDeFin a franchi une première étape avec la sortie de sa version 1.0 stable. Voici ce qui est déjà en place et ce que j'aimerais développer ensuite.
-
-
-### Disponible dans la version 1.0
-
-#### Médiathèque et navigation
-
-- [x] Accès aux bibliothèques de films, séries et collections Jellyfin.
-- [x] Navigation dans les dossiers, saisons, épisodes et collections.
-- [x] Prise en charge des vidéos et photos personnelles, avec visionneuse intégrée.
-- [x] Recherche de films, séries, épisodes, collections et dossiers.
-- [x] Fiches détaillées avec synopsis, genres, illustrations et informations sur les médias.
-- [x] Consultation de la distribution, des équipes de production et des fiches des personnes.
-- [x] Suggestions de contenus similaires et accès aux épisodes suivants.
-
-#### Lecture multimédia
-
-- [x] Lecture en Direct Play, Direct Stream, remuxage ou transcodage selon les capacités du matériel.
-- [x] Choix des pistes audio et des sous-titres disponibles.
-- [x] Réglage de la qualité vidéo, de la vitesse de lecture et du zoom.
-- [x] Reprise d'une vidéo à l'endroit où elle avait été arrêtée.
-- [x] Lecture automatique des épisodes suivants et lecture aléatoire.
-- [x] Navigation entre les chapitres et saut des introductions lorsque ces informations sont disponibles.
-- [x] Synchronisation de la progression de lecture avec Jellyfin.
-
-#### Profils et expérience utilisateur
-
-- [x] Connexion à un serveur Jellyfin et gestion de plusieurs profils.
-- [x] Gestion des favoris et des contenus vus ou non vus.
-- [x] Navigation et lecture adaptées aux Freebox Révolution et Devialet.
+ReDeFin a franchi une première étape avec la sortie de sa version 1.0 stable. Voici ce qui est prévu à l'avenir.
 
 ### À l'étude pour les prochaines versions
 
