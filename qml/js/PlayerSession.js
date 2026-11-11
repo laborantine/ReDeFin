@@ -2734,6 +2734,8 @@ function commitScrub(root, mp, subtitleItem) {
     }
 }
 
+var LOCAL_SEEK_CHAIN_MS = 2000
+
 function seekBy(root, mp, timers, subtitleItem, deltaMs) {
     if (root._transportLocked("seekBy")) return
     var d = root.durationMs();
@@ -2764,7 +2766,17 @@ function seekBy(root, mp, timers, subtitleItem, deltaMs) {
         return
     }
     if (root._queueCoalescedLocalSeek(deltaMs)) return
-    root._localSeekTo(nowUi + deltaMs, "seekBy")
+    // Appuis enchaînés : juste après un saut, la position lue est celle d'une
+    // image clé avant la cible, ou encore l'ancienne position après un recul.
+    // On repart donc de la cible précédente, avancée du temps de lecture écoulé.
+    var now = Date.now()
+    var base = nowUi
+    if (root._localSeekChainAtMs > 0 && now - root._localSeekChainAtMs < LOCAL_SEEK_CHAIN_MS) {
+        base = root.lastUiTargetMs
+        if (mp.playbackState === root._mpPlayingState) base += now - root._localSeekChainAtMs
+    }
+    root._localSeekTo(base + deltaMs, "seekBy")
+    root._localSeekChainAtMs = now
 }
 
 // Checkpoints Progress/UserData : une seule responsabilité de reporting.
