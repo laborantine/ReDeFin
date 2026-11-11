@@ -185,17 +185,54 @@ Cette possibilité s'adresse plutôt aux développeurs. Pour une installation cl
 
 ReDeFin a franchi une première étape avec la sortie de sa version 1.0 stable. Voici ce qui est déjà en place et ce que j'aimerais développer ensuite.
 
+
 ### Disponible dans la version 1.0
 
-- [x] Bibliothèques Films, Séries et Collections.
-- [x] Lecture en Direct Play, Direct Stream / remuxage et transcodage.
-- [x] Gestion de plusieurs profils Jellyfin.
+#### Médiathèque et navigation
+
+- [x] Accès aux bibliothèques de films, séries et collections Jellyfin.
+- [x] Navigation dans les dossiers, saisons, épisodes et collections.
+- [x] Prise en charge des vidéos et photos personnelles, avec visionneuse intégrée.
+- [x] Recherche de films, séries, épisodes, collections et dossiers.
+- [x] Fiches détaillées avec synopsis, genres, illustrations et informations sur les médias.
+- [x] Consultation de la distribution, des équipes de production et des fiches des personnes.
+- [x] Suggestions de contenus similaires et accès aux épisodes suivants.
+
+#### Lecture multimédia
+
+- [x] Lecture en Direct Play, Direct Stream, remuxage ou transcodage selon les capacités du matériel.
+- [x] Choix des pistes audio et des sous-titres disponibles.
+- [x] Réglage de la qualité vidéo, de la vitesse de lecture et du zoom.
+- [x] Reprise d'une vidéo à l'endroit où elle avait été arrêtée.
+- [x] Lecture automatique des épisodes suivants et lecture aléatoire.
+- [x] Navigation entre les chapitres et saut des introductions lorsque ces informations sont disponibles.
+- [x] Synchronisation de la progression de lecture avec Jellyfin.
+
+#### Profils et expérience utilisateur
+
+- [x] Connexion à un serveur Jellyfin et gestion de plusieurs profils.
+- [x] Gestion des favoris et des contenus vus ou non vus.
+- [x] Navigation et lecture adaptées aux Freebox Révolution et Devialet.
 
 ### À l'étude pour les prochaines versions
 
-- [ ] Lecture des bibliothèques musicales.
-- [ ] Prise en charge des chaînes TV via Jellyfin.
-- [ ] Davantage de possibilités de personnalisation.
+#### Nouvelles fonctionnalités
+
+- [ ] Prise en charge des bibliothèques musicales avec une interface dédiée aux artistes, albums et morceaux.
+- [ ] Accès aux chaînes TV configurées dans Jellyfin, notamment via des playlists M3U.
+- [ ] Davantage de possibilités de personnalisation de l'interface et des paramètres.
+- [ ] Consultation et lecture des bandes-annonces des films et séries.
+- [ ] Amélioration de l'organisation et de la navigation dans les médiathèques.
+
+#### Pistes de réflexion à plus long terme
+
+- [ ] Expérimentation de commandes vocales, notamment avec Alexa.
+- [ ] Identification plus précise des voix françaises disponibles pour les films et séries.
+- [ ] Réflexion sur de nouvelles évolutions de l'interface et de son ergonomie.
+
+Ces fonctionnalités sont à l'étude et ne sont pas garanties. Leur intégration dépendra de leur faisabilité, des possibilités offertes par Jellyfin et les Freebox, ainsi que des retours des utilisateurs.
+
+Pour suivre les propositions et leur avancement, consultez les [issues GitHub](https://github.com/laborantine/ReDeFin/issues).
 
 Ce sont les pistes de travail actuelles, pas des dates de sortie promises. Les idées et les problèmes signalés sont suivis dans les [Issues GitHub](https://github.com/laborantine/ReDeFin/issues).
 
