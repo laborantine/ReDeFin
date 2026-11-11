@@ -345,6 +345,12 @@ Vous pouvez me contacter par mail à [application.redefin@proton.me](mailto:appl
 
 Merci à l'équipe de Free, aux bêta-testeurs et à toutes les personnes qui prennent le temps de signaler un problème, de proposer une idée ou de contribuer au projet. Merci également à OpenAI, dont les outils m'accompagnent dans le développement de ReDeFin.
 
+
+### Évolution des étoiles GitHub
+
+[![Star History Chart](https://api.star-history.com/svg?repos=laborantine/ReDeFin&type=Date)](https://www.star-history.com/)
+
+
 <p align="center"><a href="https://ko-fi.com/B0B01NEJ0U"><img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="Soutenir ReDeFin sur Ko-fi" /></a></p>
 
 <p align="center"><a href="#readme-top">↑ Retour en haut</a></p>
