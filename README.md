@@ -170,7 +170,7 @@ ReDeFin 1.0 est disponible sur le Free Store depuis le 28 octobre 2026. Si votre
 
 ### Et si vous utilisez un Player Devialet sans abonnement Free ?
 
-L'installation depuis le Free Store nécessite un abonnement donnant accès à ce service. Si vous avez un Player Devialet sans abonnement associé, vous pouvez [me contacter](#contact). Il existe des possibilités de test en dehors du Free Store, mais elles dépendent de votre configuration.
+L'installation depuis le Free Store nécessite un abonnement donnant accès à ce service. Si vous avez un Player Devialet sans abonnement associé, vous pouvez [me contacter](#contact). Il existe des possibilités de test en dehors du Free Store, mais elles dépendent de votre configuration. Une procédure simplifiée est en cours de construction.
 
 <details>
 <summary>Utiliser le code source avec le SDK Freebox</summary>
