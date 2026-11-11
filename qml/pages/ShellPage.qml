@@ -13,6 +13,7 @@
 // ✅ MoviePage universel : injection libraryMode/browserTitle + restauration restoreIndex/restoreY.
 
 import QtQuick 2.15
+import QtQuick.Window 2.15
 import "../js/NavigationContext.js" as NavContext
 import fbx.system 1.0
 import "../js/jellyfinBridge.js" as JellyfinBridge
@@ -36,23 +37,166 @@ FocusScope {
     property int _pageLoadCurtainSeq: 0
     property int _pageSourceSeq: 0
     property string _pageSourceRoute: ""
+    // HomePage survit aux pages de contenu dans homeLoader, masquée : un retour
+    // à l'accueil la réaffiche sans reconstruire ses rangées. Elle n'est
+    // détruite qu'en sortie de session (Splash/Server/Login) et pendant la
+    // lecture, pour rendre sa mémoire au lecteur.
+    property bool _homeShown: false
+    property var _homeWiredItem: null
+    readonly property var _shownPage: _homeShown ? homeLoader.item : pageLoader.item
+    readonly property int _shownPageStatus: _homeShown ? homeLoader.status : pageLoader.status
     // Les paramètres de navigation sont appliqués par _onPageLoaded().
     // Le cache de types QML ne reçoit que l'URL de base de chaque page.
+    function _pageLoaderRoute() {
+        return (!playerActive && !_directPlayReloadPending) ? String(currentPage || "") : "";
+    }
+    function _isHomeRoute(route) {
+        return NavContext.baseOf(route).toLowerCase() === "homepage.qml";
+    }
+    function _pageLoaderRouteApplied(route) {
+        var target = _isHomeRoute(route) ? homeLoader : pageLoader;
+        return _pageSourceRoute === route && (route === "" || target.source.toString() !== "");
+    }
     function _syncPageLoaderSource() {
-        if (!pageLoader) return;
-        var route = (!playerActive && !_directPlayReloadPending) ? String(currentPage || "") : "";
-        if (_pageSourceRoute === route && (route === "" || pageLoader.source.toString() !== "")) return;
+        if (!pageLoader || !homeLoader) return;
+        var route = _pageLoaderRoute();
+        if (_pageLoaderRouteApplied(route)) return;
+        _applyPageLoaderRoute(route);
+    }
+    function _applyPageLoaderRoute(route) {
+        var base = NavContext.baseOf(route).toLowerCase();
+        var isHome = base === "homepage.qml";
+        var target = isHome ? homeLoader : pageLoader;
         _pageSourceRoute = route;
         var seq = ++_pageSourceSeq;
+        // currentPage passe brièvement par "" pour recharger une même page :
+        // seule la lecture ou la sortie de session détruit l'accueil.
+        if (playerActive || _directPlayReloadPending
+                || base === "splashpage.qml" || base === "serverpage.qml" || base === "loginpage.qml")
+            homeLoader.setSource("");
         pageLoader.setSource("");
+        _homeShown = isHome;
         if (!route) return;
+        if (isHome && homeLoader.item && homeLoader.item === _homeWiredItem) {
+            // Aucun rechargement : HomePage.onVisibleChanged gère le retour
+            // externe et remonte son état via shellLoading.
+            _onHomeShownAgain(homeLoader.item);
+            return;
+        }
         _beginPageCurtainTransition();
+        if (isHome && homeLoader.status === Loader.Loading) return;
+        if (isHome) homeLoader.setSource("");
         Qt.callLater(function() {
             if (seq !== shell._pageSourceSeq || shell.playerActive || shell._directPlayReloadPending) return;
-            pageLoader.setSource(Qt.resolvedUrl(NavContext.baseOf(route)));
+            target.setSource(Qt.resolvedUrl(NavContext.baseOf(route)));
         });
     }
-    onCurrentPageChanged: _syncPageLoaderSource()
+
+    // Ne jamais rappeler _onPageLoaded() sur la HomePage gardée : ses
+    // connexions de navigation seraient doublées.
+    function _onHomeShownAgain(pageItem) {
+        _takeFastHomeReturn();
+        if (pageItem.hasOwnProperty("playbackDeviceMode"))
+            pageItem.playbackDeviceMode = playbackDeviceMode;
+        _persistLoadedPageContext("homepage.qml");
+        _applyPendingLoadedPageFocus(pageItem);
+        Qt.callLater(function() {
+            if (!shell._homeShown || shell._shownPage !== pageItem) return;
+            try { if (pageItem.forceActiveFocus) pageItem.forceActiveFocus(); } catch(e0) {}
+            shell._tryShowPendingUpdate();
+        });
+    }
+    onCurrentPageChanged: {
+        _syncPageLoaderSource()
+        _startPrecompileWatch()
+    }
+
+    // Précompilation : des types QML sont chargés en arrière-plan, un par un,
+    // pour que leur première utilisation ne paie pas la compilation : ceux de
+    // l'accueil pendant le choix du profil, ceux des pages de contenu et du
+    // panneau des réglages sur l'accueil. Les composants sont gardés : le
+    // moteur conserve ainsi les types compilés. Mêmes URL que les Loaders qui
+    // les créent.
+    // Une compilation occupe le seul cœur de la box pendant ~1 s : chacune
+    // n'est lancée que sur la page affichée, sans action de l'utilisateur
+    // depuis precompileQuietMs (élément actif ou sélection de la page), pour
+    // ne pas retarder ses touches. Les trames ne comptent pas : le titre
+    // défilant de la carte sélectionnée en rend sans arrêt. Passé
+    // precompileMaxWaitMs, elle part quand même.
+    property var _precompileProfileQueue: ["HomePage.qml", "postergrid.qml", "PosterGridCard.qml", "HomeBackdrop.qml"]
+    property var _precompileQueue: ["moviepage.qml", "detailMoviePage.qml", "seasonpage.qml", "../components/SettingsSidePanel.qml"]
+    property var _precompiled: []
+    property bool _precompileBusy: false
+    property double _precompileLastActionMs: 0
+    property double _precompileWaitStartMs: 0
+    property double _precompileServedSinceMs: 0
+    readonly property int precompileQuietMs: 1000
+    readonly property int precompileMaxWaitMs: 30000
+    Connections {
+        target: precompileTimer.running ? shell.Window.window : null
+        ignoreUnknownSignals: true
+        function onActiveFocusItemChanged() { shell._precompileLastActionMs = Date.now() }
+    }
+    Timer {
+        id: precompileTimer
+        interval: 250
+        repeat: true
+        onTriggered: shell._precompileTick()
+    }
+    function _startPrecompileWatch() {
+        if (precompileTimer.running || (!_precompileQueue.length && !_precompileProfileQueue.length)) return
+        _precompileLastActionMs = Date.now()
+        _precompileWaitStartMs = _precompileLastActionMs
+        _precompileServedSinceMs = _precompileLastActionMs
+        precompileTimer.start()
+    }
+    // File à servir sur la page affichée, ou null.
+    function _precompileQueueNow() {
+        var base = NavContext.baseOf(currentPage).toLowerCase()
+        // L'accueil compile lui-même ses types à sa création.
+        if (base === "homepage.qml") _precompileProfileQueue = []
+        if (pageLoadCurtain.visible || playerActive || _shownPageStatus !== Loader.Ready) return null
+        if (base === "loginpage.qml" && _precompileProfileQueue.length) return _precompileProfileQueue
+        if (base === "homepage.qml" && _precompileQueue.length) return _precompileQueue
+        return null
+    }
+    function _precompileTick() {
+        if (!_precompileQueue.length && !_precompileProfileQueue.length) { precompileTimer.stop(); return }
+        if (_precompileBusy) return
+        var now = Date.now()
+        var queue = _precompileQueueNow()
+        if (!queue) { _precompileWaitStartMs = now; _precompileServedSinceMs = now; return }
+        // Repos compté depuis la dernière action ou l'affichage de la page ; au
+        // repos, les compilations s'enchaînent sans nouvelle attente.
+        var pageActionMs = _shownPage ? Number(_shownPage.lastNavigationMs || 0) : 0
+        var lastActivity = Math.max(_precompileLastActionMs, _precompileServedSinceMs, pageActionMs)
+        if (now - lastActivity < precompileQuietMs
+                && now - _precompileWaitStartMs < precompileMaxWaitMs) return
+        _precompileNext(queue)
+    }
+    // Sur l'accueil, la page qu'ouvrirait OK sur la carte sélectionnée passe
+    // en tête : c'est la prochaine à servir si l'utilisateur valide.
+    function _promoteFocusTarget(queue) {
+        if (!_homeShown || !_shownPage || !_shownPage.precompileTargetPage) return
+        var target = ""
+        try { target = _shownPage.precompileTargetPage() } catch (e) {}
+        var i = target ? queue.indexOf(target) : -1
+        if (i > 0) queue.unshift(queue.splice(i, 1)[0])
+    }
+    function _precompileNext(queue) {
+        _promoteFocusTarget(queue)
+        var name = queue.shift()
+        _precompileBusy = true
+        var c = Qt.createComponent(Qt.resolvedUrl(name), Component.Asynchronous)
+        _precompiled.push(c)
+        var finish = function() {
+            if (c.status === Component.Loading) return
+            shell._precompileBusy = false
+            shell._precompileWaitStartMs = Date.now()
+        }
+        if (c.status === Component.Loading) c.statusChanged.connect(finish)
+        else finish()
+    }
     on_DirectPlayReloadPendingChanged: _syncPageLoaderSource()
 
     /* ===================== UPDATE CHECK ===================== */
@@ -111,9 +255,9 @@ FocusScope {
                 return
 
             try {
-                if (pageLoader.item &&
-                        pageLoader.item.forceActiveFocus) {
-                    pageLoader.item.forceActiveFocus(
+                if (shell._shownPage &&
+                        shell._shownPage.forceActiveFocus) {
+                    shell._shownPage.forceActiveFocus(
                                 Qt.OtherFocusReason
                             )
                     return
@@ -149,8 +293,8 @@ FocusScope {
         if (!base || base === "splashpage.qml")
             return
 
-        if (pageLoader.status !== Loader.Ready ||
-                !pageLoader.item) {
+        if (shell._shownPageStatus !== Loader.Ready ||
+                !shell._shownPage) {
             return
         }
 
@@ -221,7 +365,7 @@ FocusScope {
             _pageCurtainStableTicks = 0
             pageCurtainReleaseTimer.stop()
         } else if (_pageLoadCurtainHold && pageLoader &&
-                   pageLoader.status === Loader.Ready && pageLoader.item &&
+                   shell._shownPageStatus === Loader.Ready && shell._shownPage &&
                    _pageCurtainReadySinceMs > 0) {
             _schedulePageCurtainRelease(_pageLoadCurtainSeq)
         }
@@ -247,7 +391,7 @@ FocusScope {
 
     function _schedulePageCurtainRelease(seq) {
         if (seq !== _pageLoadCurtainSeq) return
-        if (!pageLoader || pageLoader.status !== Loader.Ready || !pageLoader.item) return
+        if (!pageLoader || shell._shownPageStatus !== Loader.Ready || !shell._shownPage) return
         if (!(_pageCurtainReadySinceMs > 0))
             _pageCurtainReadySinceMs = Date.now()
         _pageCurtainStableTicks = 0
@@ -275,7 +419,7 @@ FocusScope {
                 stop()
                 return
             }
-            if (!pageLoader || pageLoader.status !== Loader.Ready || !pageLoader.item) {
+            if (!pageLoader || shell._shownPageStatus !== Loader.Ready || !shell._shownPage) {
                 shell._pageCurtainStableTicks = 0
                 return
             }
@@ -295,7 +439,7 @@ FocusScope {
             if (shell._pageSawLoading || shell._pageCurtainStableTicks >= shell.pageCurtainStableTicksRequired) {
                 stop()
                 if (curtainSeq === shell._pageLoadCurtainSeq &&
-                        pageLoader.status === Loader.Ready &&
+                        shell._shownPageStatus === Loader.Ready &&
                         !shell._pageReportedLoading) {
                     shell._pageLoadCurtainHold = false
                     shell._homeLaunchPending = false
@@ -307,14 +451,14 @@ FocusScope {
     // État visuel remonté par la page courante. Le Loader QML peut être Ready
     // alors que Jellyfin, le backdrop ou le focus ne le sont pas encore.
     readonly property bool _pageReportedLoading: {
-        var p = pageLoader ? pageLoader.item : null
+        var p = pageLoader ? shell._shownPage : null
         if (!p) return false
         try { if (p.hasOwnProperty("shellLoading")) return p.shellLoading === true } catch(e0) {}
         var base = NavContext.baseOf(currentPage).toLowerCase()
         return false
     }
     readonly property string _pageReportedLoadingError: {
-        var p = pageLoader ? pageLoader.item : null
+        var p = pageLoader ? shell._shownPage : null
         try { if (p && p.hasOwnProperty("shellLoadingError")) return String(p.shellLoadingError || "") } catch(e0) {}
         return ""
     }
@@ -328,9 +472,9 @@ FocusScope {
         Qt.callLater(function() {
             if (seq !== shell._pageFocusHandoffSeq) return
             if (shell.playerActive || pageLoadCurtain.visible) return
-            if (!pageLoader || pageLoader.status !== Loader.Ready || !pageLoader.item) return
+            if (!pageLoader || shell._shownPageStatus !== Loader.Ready || !shell._shownPage) return
 
-            var p = pageLoader.item
+            var p = shell._shownPage
             try {
                 if (p.restoreFocusAfterShellCurtain
                         && typeof p.restoreFocusAfterShellCurtain === "function") {
@@ -1480,7 +1624,7 @@ FocusScope {
         try {
             var base = NavContext.baseOf(currentPage).toLowerCase()
             if (!_isSnapshotDetailPage(base)) return false
-            var page = pageLoader.item
+            var page = shell._shownPage
             if (!page || !page.hasOwnProperty("item") || !page.item || !page.item.Id) return false
             var itemCopy = _cloneItemForDetailSnapshot(page.item)
             if (!itemCopy) return false
@@ -1526,7 +1670,7 @@ FocusScope {
 
     function _snapshotSeasonHintsFromPage() {
         try {
-            var p = pageLoader.item
+            var p = shell._shownPage
             if (!p) return
             __seasonHintId = p.hasOwnProperty("selectedSeasonId")
                     ? (p.selectedSeasonId || "")
@@ -1992,8 +2136,8 @@ FocusScope {
         // Snapshot du focus MoviePage avant de quitter
         try {
             if (baseCurr === "moviepage.qml"
-                && pageLoader.item && pageLoader.item.hasOwnProperty("currentIndex")) {
-                _rememberFocus(currentPage, pageLoader.item.currentIndex || 0)
+                && shell._shownPage && shell._shownPage.hasOwnProperty("currentIndex")) {
+                _rememberFocus(currentPage, shell._shownPage.currentIndex || 0)
             }
         } catch(e) {}
 
@@ -2184,8 +2328,8 @@ FocusScope {
         if (baseNow === "homepage.qml") {
             Qt.callLater(function() {
                 try {
-                    if (pageLoader.item && pageLoader.item.forceActiveFocus)
-                        pageLoader.item.forceActiveFocus()
+                    if (shell._shownPage && shell._shownPage.forceActiveFocus)
+                        shell._shownPage.forceActiveFocus()
                 } catch(eFocusHome) {}
             })
         }
@@ -2249,9 +2393,9 @@ FocusScope {
         if (baseNow === "serverpage.qml" && pageItem.discoveredServersUpdated) {
             pageItem.discoveredServersUpdated.connect(function(list) {
                 shell.shared.discoveredServers = (list && list.slice) ? list.slice(0) : (list || [])
-                if (pageLoader.item
+                if (shell._shownPage
                         && NavContext.baseOf(shell.currentPage).toLowerCase() === "loginpage.qml") {
-                    var loginPage = pageLoader.item
+                    var loginPage = shell._shownPage
                     if (loginPage.hasOwnProperty("setDiscoveredServers"))
                         loginPage.setDiscoveredServers(shell.shared.discoveredServers)
                 }
@@ -2328,6 +2472,40 @@ FocusScope {
     }
 
     /* ===================== PAGE COURANTE ========================== */
+    // Un chargement terminé alors que l'utilisateur a déjà quitté l'accueil
+    // est jeté : _onPageLoaded() injecterait le contexte d'une autre page.
+    Loader {
+        id: homeLoader
+        anchors.fill: parent
+        source: ""
+        visible: shell._homeShown && !playerActive && !shell._directPlayReloadPending
+        asynchronous: true
+        onStatusChanged: {
+            if (!shell._homeShown) return
+            if (status === Loader.Loading) {
+                shell._beginPageCurtainTransition()
+            } else if (status === Loader.Error || status === Loader.Null) {
+                shell._pageLoadCurtainSeq = (shell._pageLoadCurtainSeq + 1) | 0
+                shell._pageLoadCurtainHold = false
+                shell._homeLaunchPending = false
+                shell._pageCurtainReadySinceMs = 0
+                shell._pageCurtainStableTicks = 0
+                try { pageCurtainReleaseTimer.stop() } catch(e0) {}
+            } else if (status === Loader.Ready) {
+                shell._schedulePageCurtainRelease(shell._pageLoadCurtainSeq)
+            }
+        }
+
+        onLoaded: {
+            if (!shell._homeShown) {
+                Qt.callLater(function() { if (!shell._homeShown) homeLoader.setSource("") })
+                return
+            }
+            shell._homeWiredItem = item
+            shell._onPageLoaded(item, shell._pageLoadCurtainSeq)
+        }
+    }
+
     Loader {
         id: pageLoader
         anchors.fill: parent
@@ -2367,7 +2545,7 @@ FocusScope {
                  !shell._directPlayReloadPending &&
                  shell._circleDotsRuntimeEnabled &&
                  (shell._homeLaunchPending ||
-                  pageLoader.status === Loader.Loading ||
+                  shell._shownPageStatus === Loader.Loading ||
                   shell._pageLoadCurtainHold ||
                   shell._pageReportedLoading)
         enabled: visible
@@ -2428,6 +2606,8 @@ FocusScope {
                 try { forceActiveFocus(Qt.OtherFocusReason) } catch(e0) {}
             } else {
                 shell._handoffFocusAfterPageCurtain()
+                if (NavContext.baseOf(shell.currentPage).toLowerCase() === "homepage.qml")
+                    shell._startPrecompileWatch()
 
                 Qt.callLater(function() {
                     shell._tryShowPendingUpdate()

@@ -525,6 +525,8 @@ FocusScope {
     property var    serverUsers: []
     property var    localUsers: []
     property var    usersModel: []
+    // Dernier déplacement entre les profils, pour le repos mesuré par le shell.
+    property double lastNavigationMs: 0
     property bool   loading: true
     property string errorText: ""
     property var    tokenByUserId: ({})
@@ -2471,6 +2473,7 @@ FocusScope {
                 easing.type: Easing.OutCubic
             }
             onCurrentIndexChanged: {
+                page.lastNavigationMs = Date.now()
                 if (currentIndex >= 0)
                     Qt.callLater(function(){ userCarousel.ensureCurrentVisible(userCarousel._animateNextScroll) })
             }
