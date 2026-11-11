@@ -41,7 +41,10 @@ FocusScope {
     property string fallbackKind: ""
     property string imagePolicy: "standard"
     property bool homeDelegateMode: false
-    property var homeLoader: null
+    // Le Loader d'accueil est le parent de la carte dès sa création : lu tout de suite,
+    // il évite d'évaluer chaque liaison une première fois avec les valeurs par défaut.
+    property var homeLoader: parent && parent.cardController !== undefined && parent.cardData !== undefined
+                             ? parent : null
     // Les loaders ListView recyclés restent vivants : suspendre leurs animations,
     // sans jamais effacer les textures (sinon flicker au retour du scroll).
     property bool delegatePooled: false
@@ -126,8 +129,10 @@ FocusScope {
 
                 _homeSyncing = true
                 try {
-                    controller = h.cardController || null
-                    modelData = h.cardData || null
+                    var nextController = h.cardController || null
+                    if (controller !== nextController) controller = nextController
+                    var nextData = h.cardData || null
+                    if (modelData !== nextData) modelData = nextData
                     tileWidth = h.cardTileW || tileWidth
                     tileHeight = h.cardTileH || tileHeight
                     titleHeight = h.cardTitleH || 0
@@ -161,7 +166,13 @@ FocusScope {
                     if (cardRoot.homeLoader) cardRoot._syncHomeLoader()
                 })
             }
-            onHomeLoaderChanged: _syncHomeLoader()
+            // Réaffecté au même Loader par onLoaded : rien à resynchroniser.
+            property var _syncedLoader: null
+            onHomeLoaderChanged: {
+                if (homeLoader === _syncedLoader) return
+                _syncedLoader = homeLoader
+                _syncHomeLoader()
+            }
             Connections {
                 target: cardRoot.homeLoader
                 ignoreUnknownSignals: true
@@ -236,6 +247,20 @@ FocusScope {
             function fallbackWantsClapperboard() { return fallbackKind === "clapperboard" }
             function fallbackWantsFolder() { return fallbackKind === "folder" || fallbackKind === "collection" || fallbackKind === "boxset" }
             function fallbackWantsSeries() { return fallbackKind === "series" }
+            // Visuel de remplacement affiché quand l'image manque. Tous ont un fond
+            // opaque : seul le plus prioritaire compte. La musique passe avant tout ;
+            // la pellicule et le glyphe excluent les autres ; sinon série, puis
+            // dossier, puis vidéo, et le clap seulement si rien d'autre ne s'applique.
+            function _fallbackVisualKind() {
+                if (musicFallback) return "music"
+                var clapperboard = fallbackWantsClapperboard()
+                if (!clapperboard && fallbackWantsFilmstrip()) return "filmstrip"
+                if (!clapperboard && fallbackGlyph.length > 0) return "glyph"
+                if (fallbackWantsSeries()) return "series"
+                if (fallbackWantsFolder() || isFolderLikeSafe(modelData)) return "folder"
+                if (fallbackWantsVideo() || isVideoLikeSafe(modelData)) return "video"
+                return clapperboard ? "clapperboard" : ""
+            }
             function _serverUrlSafe() {
                 try { return String(controller && controller.serverUrl ? controller.serverUrl : "") } catch(e) { return "" }
             }
@@ -580,6 +605,22 @@ FocusScope {
         }
 
         Component {
+            id: glyphFallbackComp
+            Item {
+                anchors.fill: parent
+                Rectangle { anchors.fill: parent; color: "#2a2f4f" }
+                Text {
+                    anchors.centerIn: parent
+                    text: cardRoot.fallbackGlyph
+                    textFormat: Text.PlainText
+                    color: "#E7ECFF"
+                    font.pixelSize: Math.round(parent.height * cardRoot.fallbackGlyphScale)
+                    opacity: 0.95
+                }
+            }
+        }
+
+        Component {
             id: seriesFallbackComp
             Item {
                 anchors.fill: parent
@@ -673,14 +714,8 @@ FocusScope {
                 property bool _stablePreserveAspectFit: false
                 readonly property bool _needFallback: !visual._hasPotentialImg
                                                       || (cardRoot.fallbackOnImageError && visual._imgError)
-                readonly property bool _useMusicFallback: cardRoot.musicFallback && visual._needFallback
-                readonly property bool _useNonMusicFallback: !cardRoot.musicFallback && visual._needFallback
-                readonly property bool _useClapperboardFallback: visual._useNonMusicFallback && cardRoot.fallbackWantsClapperboard()
-                readonly property bool _useFilmstripFallback: visual._useNonMusicFallback && !visual._useClapperboardFallback && cardRoot.fallbackWantsFilmstrip()
-                readonly property bool _useGlyphFallback: visual._useNonMusicFallback && !visual._useClapperboardFallback && !visual._useFilmstripFallback && cardRoot.fallbackGlyph.length > 0
-                readonly property bool _useVideoFallback: visual._useNonMusicFallback && !visual._useFilmstripFallback && !visual._useGlyphFallback && !cardRoot.fallbackWantsSeries() && (cardRoot.fallbackWantsVideo() || cardRoot.isVideoLikeSafe(cardRoot.modelData))
-                readonly property bool _useSeriesFallback: visual._useNonMusicFallback && !visual._useFilmstripFallback && !visual._useGlyphFallback && cardRoot.fallbackWantsSeries()
-                readonly property bool _useFolderFallback: visual._useNonMusicFallback && !visual._useFilmstripFallback && !visual._useGlyphFallback && !visual._useSeriesFallback && (cardRoot.fallbackWantsFolder() || cardRoot.isFolderLikeSafe(cardRoot.modelData))
+                // Vide tant que l'image est attendue ou affichée.
+                readonly property string _fallbackKind: _needFallback ? cardRoot._fallbackVisualKind() : ""
                 readonly property real _progressRatio: cardRoot.showProgress ? cardRoot.resumeRatioSafe(cardRoot.modelData) : 0
                 property string _stableSource: ""
                 property string _stableKey: ""
@@ -775,13 +810,7 @@ FocusScope {
             anchors.fill: parent
             color: "#1f233a"
             visible: visual._hasPotentialImg
-                     && !visual._useMusicFallback
-                     && !visual._useClapperboardFallback
-                     && !visual._useFilmstripFallback
-                     && !visual._useGlyphFallback
-                     && !visual._useVideoFallback
-                     && !visual._useSeriesFallback
-                     && !visual._useFolderFallback
+                     && visual._fallbackKind === ""
                      && (posterImg.status !== Image.Ready
                          || visual._stablePreserveAspectFit)
         }
@@ -796,10 +825,7 @@ FocusScope {
             mipmap: false
             smooth: cardRoot.smoothImages
             source: visual._stableSource ? visual._stableSource : ""
-            visible: !visual._useMusicFallback && !visual._useClapperboardFallback
-                     && !visual._useFilmstripFallback && !visual._useGlyphFallback
-                     && !visual._useVideoFallback && !visual._useSeriesFallback && !visual._useFolderFallback
-                     && source !== ""
+            visible: visual._fallbackKind === "" && source !== ""
             opacity: status === Image.Ready ? 1.0 : 0.0
             Behavior on opacity {
                 enabled: cardRoot.allowAnims
@@ -873,76 +899,90 @@ FocusScope {
                 }
             }
         }
-                Loader { anchors.fill: parent; active: visual._useMusicFallback;       visible: active; sourceComponent: musicNoteComp }
-                Loader { anchors.fill: parent; active: visual._useClapperboardFallback; visible: active; sourceComponent: clapperboardFallbackComp }
-                Loader { anchors.fill: parent; active: visual._useFilmstripFallback;    visible: active; sourceComponent: filmstripFallbackComp }
-                Item {
+                // Un seul Loader : le visuel de remplacement n'est créé que pour une
+                // carte sans image, jamais pour les autres.
+                Loader {
                     anchors.fill: parent
-                    visible: visual._useGlyphFallback
-                    Rectangle { anchors.fill: parent; color: "#2a2f4f" }
-                    Text {
-                        anchors.centerIn: parent
-                        text: cardRoot.fallbackGlyph
-                        textFormat: Text.PlainText
-                        color: "#E7ECFF"
-                        font.pixelSize: Math.round(parent.height * cardRoot.fallbackGlyphScale)
-                        opacity: 0.95
+                    active: visual._fallbackKind !== ""
+                    visible: active
+                    sourceComponent: visual._fallbackKind === "music" ? musicNoteComp
+                                   : visual._fallbackKind === "clapperboard" ? clapperboardFallbackComp
+                                   : visual._fallbackKind === "filmstrip" ? filmstripFallbackComp
+                                   : visual._fallbackKind === "glyph" ? glyphFallbackComp
+                                   : visual._fallbackKind === "video" ? videoLogoComp
+                                   : visual._fallbackKind === "series" ? seriesFallbackComp
+                                   : visual._fallbackKind === "folder" ? folderFallbackComp
+                                   : null
+                }
+                // Badges et indicateurs créés seulement quand ils s'affichent : chaque objet
+                // d'une carte se paie à sa création, pour chaque carte de l'accueil.
+                Loader {
+                    z: 18
+                    anchors.fill: parent
+                    active: cardRoot.showFolderIndicator && visual._needFallback
+                    sourceComponent: Component {
+                        Item {
+                            anchors.fill: parent
+                            Item {
+                                anchors.centerIn: parent
+                                width: Math.round(parent.width * 0.58)
+                                height: Math.round(parent.height * 0.28)
+                                Rectangle {
+                                    x: 0; y: 0
+                                    width: Math.round(parent.width * 0.44)
+                                    height: Math.round(parent.height * 0.24)
+                                    radius: 4
+                                    color: "#B7C2EA"
+                                }
+                                Rectangle {
+                                    x: 0
+                                    y: Math.round(parent.height * 0.15)
+                                    width: parent.width
+                                    height: Math.round(parent.height * 0.78)
+                                    radius: 7
+                                    color: "#7D8EC8"
+                                    border.width: 1
+                                    border.color: "#D6DDF7"
+                                }
+                            }
+                        }
                     }
                 }
-                Loader { anchors.fill: parent; active: visual._useVideoFallback;  visible: active; sourceComponent: videoLogoComp }
-                Loader { anchors.fill: parent; active: visual._useSeriesFallback; visible: active; sourceComponent: seriesFallbackComp }
-                Loader { anchors.fill: parent; active: visual._useFolderFallback; visible: active; sourceComponent: folderFallbackComp }
-                Item {
+                Loader {
                     z: 18
-                    anchors.centerIn: parent
-                    width: Math.round(parent.width * 0.58)
-                    height: Math.round(parent.height * 0.28)
-                    visible: cardRoot.showFolderIndicator && visual._needFallback
-                    Rectangle {
-                        x: 0; y: 0
-                        width: Math.round(parent.width * 0.44)
-                        height: Math.round(parent.height * 0.24)
-                        radius: 4
-                        color: "#B7C2EA"
-                    }
-                    Rectangle {
-                        x: 0
-                        y: Math.round(parent.height * 0.15)
-                        width: parent.width
-                        height: Math.round(parent.height * 0.78)
-                        radius: 7
-                        color: "#7D8EC8"
-                        border.width: 1
-                        border.color: "#D6DDF7"
-                    }
-                }
-                Rectangle {
-                    z: 18
-                    width: 42
-                    height: 42
-                    radius: 21
-                    anchors.left: parent.left
-                    anchors.bottom: parent.bottom
-                    anchors.leftMargin: 8
-                    anchors.bottomMargin: 8
-                    color: Qt.rgba(0.02, 0.025, 0.04, 0.82)
-                    border.width: 1
-                    border.color: "#CCFFFFFF"
-                    visible: cardRoot.showVideoIndicator
-                    Canvas {
-                        anchors.centerIn: parent
-                        width: 15
-                        height: 18
-                        onPaint: {
-                            var c = getContext("2d")
-                            c.clearRect(0, 0, width, height)
-                            c.fillStyle = "#FFFFFF"
-                            c.beginPath()
-                            c.moveTo(2, 1)
-                            c.lineTo(14, 9)
-                            c.lineTo(2, 17)
-                            c.closePath()
-                            c.fill()
+                    anchors.fill: parent
+                    active: cardRoot.showVideoIndicator
+                    sourceComponent: Component {
+                        Item {
+                            anchors.fill: parent
+                            Rectangle {
+                                width: 42
+                                height: 42
+                                radius: 21
+                                anchors.left: parent.left
+                                anchors.bottom: parent.bottom
+                                anchors.leftMargin: 8
+                                anchors.bottomMargin: 8
+                                color: Qt.rgba(0.02, 0.025, 0.04, 0.82)
+                                border.width: 1
+                                border.color: "#CCFFFFFF"
+                                Canvas {
+                                    anchors.centerIn: parent
+                                    width: 15
+                                    height: 18
+                                    onPaint: {
+                                        var c = getContext("2d")
+                                        c.clearRect(0, 0, width, height)
+                                        c.fillStyle = "#FFFFFF"
+                                        c.beginPath()
+                                        c.moveTo(2, 1)
+                                        c.lineTo(14, 9)
+                                        c.lineTo(2, 17)
+                                        c.closePath()
+                                        c.fill()
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -962,79 +1002,103 @@ FocusScope {
                         NumberAnimation { duration: 110; easing.type: Easing.OutCubic }
                     }
                 }
-                Rectangle {
+                Loader {
                     z: 20
-                    height: 24
-                    radius: 12
-                    anchors.top: parent.top
-                    anchors.right: parent.right
-                    anchors.topMargin: 6
-                    anchors.rightMargin: 6
-                    color: "#3B82F6"
-                    border.color: "#1E3A8A"
-                    border.width: 1
-                    visible: cardRoot.showUnplayedBadge && cardRoot.unplayedCount > 0
-                    width: Math.max(height, unplayedBadgeText.paintedWidth + 12)
-                    Text {
-                        id: unplayedBadgeText
-                        anchors.centerIn: parent
-                        text: cardRoot.unplayedText
-                        color: "white"
-                        font.pixelSize: 13
-                        font.bold: true
+                    anchors.fill: parent
+                    active: cardRoot.showUnplayedBadge && cardRoot.unplayedCount > 0
+                    sourceComponent: Component {
+                        Item {
+                            anchors.fill: parent
+                            Rectangle {
+                                height: 24
+                                radius: 12
+                                anchors.top: parent.top
+                                anchors.right: parent.right
+                                anchors.topMargin: 6
+                                anchors.rightMargin: 6
+                                color: "#3B82F6"
+                                border.color: "#1E3A8A"
+                                border.width: 1
+                                width: Math.max(height, unplayedBadgeText.paintedWidth + 12)
+                                Text {
+                                    id: unplayedBadgeText
+                                    anchors.centerIn: parent
+                                    text: cardRoot.unplayedText
+                                    color: "white"
+                                    font.pixelSize: 13
+                                    font.bold: true
+                                }
+                            }
+                        }
                     }
                 }
-                Rectangle {
+                Loader {
                     z: 20
-                    width: cardRoot.watchedBadgeSize
-                    height: cardRoot.watchedBadgeSize
-                    radius: width / 2
-                    x: cardRoot.watchedBadgePosition === "topLeft"
-                       ? cardRoot.watchedBadgeMargin
-                       : parent.width - width - cardRoot.watchedBadgeMargin
-                    y: cardRoot.watchedBadgeMargin
-                    color: "#3B82F6"
-                    border.color: "#1E3A8A"
-                    border.width: 1
-                    visible: cardRoot.showWatchedBadge && cardRoot.watched
-                             && (!cardRoot.suppressWatchedWhenUnplayed
-                                 || !(cardRoot.showUnplayedBadge && cardRoot.unplayedCount > 0))
-                    Item {
-                        anchors.centerIn: parent
-                        width: 15
-                        height: 12
-                        Rectangle { x: 2.1; y: 6.6; width: 5.4; height: 2.1; radius: 1.05; color: "#FFFFFF"; rotation: 42; transformOrigin: Item.Left; antialiasing: true }
-                        Rectangle { x: 5.8; y: 9.1; width: 8.6; height: 2.1; radius: 1.05; color: "#FFFFFF"; rotation: -42; transformOrigin: Item.Left; antialiasing: true }
-                        Rectangle { x: 5.1; y: 8.1; width: 2.0; height: 2.0; radius: 1.0; color: "#FFFFFF"; antialiasing: true }
+                    anchors.fill: parent
+                    active: cardRoot.showWatchedBadge && cardRoot.watched
+                            && (!cardRoot.suppressWatchedWhenUnplayed
+                                || !(cardRoot.showUnplayedBadge && cardRoot.unplayedCount > 0))
+                    sourceComponent: Component {
+                        Item {
+                            anchors.fill: parent
+                            Rectangle {
+                                width: cardRoot.watchedBadgeSize
+                                height: cardRoot.watchedBadgeSize
+                                radius: width / 2
+                                x: cardRoot.watchedBadgePosition === "topLeft"
+                                   ? cardRoot.watchedBadgeMargin
+                                   : parent.width - width - cardRoot.watchedBadgeMargin
+                                y: cardRoot.watchedBadgeMargin
+                                color: "#3B82F6"
+                                border.color: "#1E3A8A"
+                                border.width: 1
+                                Item {
+                                    anchors.centerIn: parent
+                                    width: 15
+                                    height: 12
+                                    Rectangle { x: 2.1; y: 6.6; width: 5.4; height: 2.1; radius: 1.05; color: "#FFFFFF"; rotation: 42; transformOrigin: Item.Left; antialiasing: true }
+                                    Rectangle { x: 5.8; y: 9.1; width: 8.6; height: 2.1; radius: 1.05; color: "#FFFFFF"; rotation: -42; transformOrigin: Item.Left; antialiasing: true }
+                                    Rectangle { x: 5.1; y: 8.1; width: 2.0; height: 2.0; radius: 1.0; color: "#FFFFFF"; antialiasing: true }
+                                }
+                            }
+                        }
                     }
                 }
-                Rectangle {
-                    anchors.left: parent.left
-                    anchors.right: parent.right
-                    anchors.bottom: parent.bottom
-                    anchors.leftMargin: cardRoot.progressSideInsetOverride >= 0
-                                        ? cardRoot.progressSideInsetOverride : 10
-                    anchors.rightMargin: anchors.leftMargin
-                    anchors.bottomMargin: cardRoot.progressBottomMarginOverride >= 0
-                                          ? cardRoot.progressBottomMarginOverride : 10
-                    height: cardRoot.progressHeightOverride > 0
-                            ? cardRoot.progressHeightOverride : 6
-                    radius: cardRoot.progressRadiusOverride >= 0
-                            ? cardRoot.progressRadiusOverride
-                            : Math.max(0, Math.round(height / 2))
-                    color: cardRoot.progressTrackColorOverride.length > 0
-                           ? cardRoot.progressTrackColorOverride : "#2a2f4f"
-                    visible: visual._progressRatio > 0
-                    Rectangle {
-                        anchors.left: parent.left
-                        anchors.verticalCenter: parent.verticalCenter
-                        height: parent.height
-                        width: Math.max(cardRoot.progressMinWidthOverride >= 0
-                                        ? cardRoot.progressMinWidthOverride : 6,
-                                        parent.width * visual._progressRatio)
-                        radius: parent.radius
-                        color: cardRoot.progressFillColorOverride.length > 0
-                               ? cardRoot.progressFillColorOverride : "#6e7bf4"
+                Loader {
+                    anchors.fill: parent
+                    active: visual._progressRatio > 0
+                    sourceComponent: Component {
+                        Item {
+                            anchors.fill: parent
+                            Rectangle {
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.bottom: parent.bottom
+                                anchors.leftMargin: cardRoot.progressSideInsetOverride >= 0
+                                                    ? cardRoot.progressSideInsetOverride : 10
+                                anchors.rightMargin: anchors.leftMargin
+                                anchors.bottomMargin: cardRoot.progressBottomMarginOverride >= 0
+                                                      ? cardRoot.progressBottomMarginOverride : 10
+                                height: cardRoot.progressHeightOverride > 0
+                                        ? cardRoot.progressHeightOverride : 6
+                                radius: cardRoot.progressRadiusOverride >= 0
+                                        ? cardRoot.progressRadiusOverride
+                                        : Math.max(0, Math.round(height / 2))
+                                color: cardRoot.progressTrackColorOverride.length > 0
+                                       ? cardRoot.progressTrackColorOverride : "#2a2f4f"
+                                Rectangle {
+                                    anchors.left: parent.left
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    height: parent.height
+                                    width: Math.max(cardRoot.progressMinWidthOverride >= 0
+                                                    ? cardRoot.progressMinWidthOverride : 6,
+                                                    parent.width * visual._progressRatio)
+                                    radius: parent.radius
+                                    color: cardRoot.progressFillColorOverride.length > 0
+                                           ? cardRoot.progressFillColorOverride : "#6e7bf4"
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1067,17 +1131,14 @@ FocusScope {
                 id: titleLayerLoader
                 active: cardRoot.titleHeight > 0
                 asynchronous: false
-                source: active ? Qt.resolvedUrl("PosterCardTitleLayer.qml") : ""
+                // La carte est passée à la création : les liaisons de la couche ne
+                // s'évaluent pas une première fois sans elle.
+                Component.onCompleted: setSource(Qt.resolvedUrl("PosterCardTitleLayer.qml"), { card: cardRoot })
                 width: cardRoot.tileWidth
                 height: cardRoot.titleHeight
                 anchors.top: visual.bottom
                 anchors.topMargin: cardRoot.titleTopMargin
                 anchors.horizontalCenter: visual.horizontalCenter
-
-                onLoaded: {
-                    if (item)
-                        item.card = cardRoot
-                }
             }
 
             MouseArea {
