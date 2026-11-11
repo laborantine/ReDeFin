@@ -81,7 +81,7 @@ ReDeFin est un projet indépendant et open source. Il n'est pas développé offi
 
 Avec la version 1.0 stable, vous pouvez :
 
-Médiathèque et navigation
+#### Médiathèque et navigation
 
 - Accès aux bibliothèques de films, séries et collections Jellyfin.
 - Navigation dans les saisons, épisodes, collections et dossiers de la médiathèque.
@@ -91,7 +91,7 @@ Médiathèque et navigation
 - Consultation de la distribution, des équipes de production et des fiches des personnes.
 - Suggestions de contenus similaires et accès aux épisodes suivants.
 
-Lecture multimédia
+#### Lecture multimédia
 
 - Lecture en Direct Play, Direct Stream, remuxage ou transcodage selon les capacités de la Freebox et du serveur Jellyfin.
 - Sélection des pistes audio et des sous-titres disponibles.
@@ -101,7 +101,7 @@ Lecture multimédia
 - Navigation entre les chapitres et saut des introductions lorsqu'ils sont disponibles.
 - Suivi de la progression de lecture avec Jellyfin.
 
-Profils et expérience utilisateur
+#### Profils et expérience utilisateur
 
 - Connexion à un serveur Jellyfin et utilisation de plusieurs profils.
 - Gestion des favoris et des contenus vus ou non vus.
