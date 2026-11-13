@@ -13,6 +13,7 @@
 // ✅ MoviePage universel : injection libraryMode/browserTitle + restauration restoreIndex/restoreY.
 
 import QtQuick 2.15
+import QtQuick.Window 2.15
 import "../js/NavigationContext.js" as NavContext
 import fbx.system 1.0
 import "../js/jellyfinBridge.js" as JellyfinBridge
@@ -38,10 +39,20 @@ FocusScope {
     property string _pageSourceRoute: ""
     // Les paramètres de navigation sont appliqués par _onPageLoaded().
     // Le cache de types QML ne reçoit que l'URL de base de chaque page.
+    function _pageLoaderRoute() {
+        return (!playerActive && !_directPlayReloadPending) ? String(currentPage || "") : "";
+    }
+    function _pageLoaderRouteApplied(route) {
+        return _pageSourceRoute === route && (route === "" || pageLoader.source.toString() !== "");
+    }
     function _syncPageLoaderSource() {
-        if (!pageLoader) return;
-        var route = (!playerActive && !_directPlayReloadPending) ? String(currentPage || "") : "";
-        if (_pageSourceRoute === route && (route === "" || pageLoader.source.toString() !== "")) return;
+        if (!pageLoader || _pageFreezePending) return;
+        var route = _pageLoaderRoute();
+        if (_pageLoaderRouteApplied(route)) return;
+        if (_startPageFreeze()) return;
+        _applyPageLoaderRoute(route);
+    }
+    function _applyPageLoaderRoute(route) {
         _pageSourceRoute = route;
         var seq = ++_pageSourceSeq;
         pageLoader.setSource("");
@@ -52,6 +63,41 @@ FocusScope {
             pageLoader.setSource(Qt.resolvedUrl(NavContext.baseOf(route)));
         });
     }
+
+    // Changement de page dans la session : l'écran quitté reste affiché, figé,
+    // sous un petit indicateur, au lieu du curtain noir plein écran. Sa capture
+    // (pageSnapshot) est rendue à la trame suivante, avant la destruction de la
+    // page ; pendant cette trame, le curtain est déjà levé et prend les touches.
+    property bool _pageFreezePending: false
+    property bool _pageSnapshotShown: false
+
+    function _startPageFreeze() {
+        if (!_circleDotsRuntimeEnabled || _homeLaunchPending || playerActive || _directPlayReloadPending) return false;
+        if (_pageSnapshotShown || !pageLoader.item || pageLoader.status !== Loader.Ready || _pageReportedLoading) return false;
+        _pageFreezePending = true;
+        _pageSnapshotShown = true;
+        pageFreezeTimeout.restart();
+        return true;
+    }
+
+    // Appelée une fois la capture rendue, ou par sécurité si aucune trame ne
+    // vient. La route est appliquée avant de lever le gel pour que le curtain
+    // reste affiché sans interruption.
+    function _finishPageFreeze() {
+        if (!_pageFreezePending) return;
+        pageFreezeTimeout.stop();
+        var route = _pageLoaderRoute();
+        if (!_pageLoaderRouteApplied(route)) _applyPageLoaderRoute(route);
+        _pageFreezePending = false;
+    }
+
+    Timer {
+        id: pageFreezeTimeout
+        interval: 150
+        repeat: false
+        onTriggered: shell._finishPageFreeze()
+    }
+
     onCurrentPageChanged: _syncPageLoaderSource()
     on_DirectPlayReloadPendingChanged: _syncPageLoaderSource()
 
@@ -2367,15 +2413,79 @@ FocusScope {
                  !shell._directPlayReloadPending &&
                  shell._circleDotsRuntimeEnabled &&
                  (shell._homeLaunchPending ||
+                  shell._pageFreezePending ||
                   pageLoader.status === Loader.Loading ||
                   shell._pageLoadCurtainHold ||
                   shell._pageReportedLoading)
         enabled: visible
         focus: visible
 
+        // Écran quitté figé sous un badge ; sinon (entrée dans la session,
+        // erreur de chargement) fond noir, logo et indicateur centré.
+        readonly property bool frozen: shell._pageSnapshotShown && shell._pageReportedLoadingError === ""
+
         Rectangle { anchors.fill: parent; color: "#000000" }
 
+        Loader {
+            id: pageSnapshot
+            anchors.fill: parent
+            active: shell._pageSnapshotShown
+            sourceComponent: Component {
+                ShaderEffectSource {
+                    sourceItem: pageLoader
+                    live: false
+                    hideSource: false
+                    // Pixels réellement affichés, plafonnés à 1280×720 (la surface
+                    // logique de l'interface) : le GPU de la Révolution refuse un
+                    // framebuffer 1920×1080 (« Framebuffer incomplete attachment »,
+                    // capture noire), et en dessous la capture paraît pixellisée.
+                    textureSize: {
+                        var origin = pageLoader.mapToGlobal(0, 0)
+                        var corner = pageLoader.mapToGlobal(pageLoader.width, pageLoader.height)
+                        var ratio = Math.max(1, Screen.devicePixelRatio || 1)
+                        var w = Math.max(1, (corner.x - origin.x) * ratio)
+                        var h = Math.max(1, (corner.y - origin.y) * ratio)
+                        var fit = Math.min(1, 1280 / w, 720 / h)
+                        return Qt.size(Math.max(1, Math.round(w * fit)), Math.max(1, Math.round(h * fit)))
+                    }
+                    Component.onCompleted: scheduleUpdate()
+                    onScheduledUpdateCompleted: shell._finishPageFreeze()
+                }
+            }
+        }
+
+        Rectangle {
+            anchors.fill: parent
+            color: "#59000000"
+            visible: pageLoadCurtain.frozen
+        }
+
+        Rectangle {
+            anchors.centerIn: parent
+            width: 70
+            height: 70
+            radius: 35
+            color: "#CC090B14"
+            border.width: 1
+            border.color: "#55FFFFFF"
+            visible: pageLoadCurtain.frozen
+
+            Loader {
+                anchors.centerIn: parent
+                width: 48
+                height: 48
+                active: pageLoadCurtain.visible && pageLoadCurtain.frozen
+                sourceComponent: Component {
+                    Components.CircleDotsLoader {
+                        active: true; running: true
+                        preservePhase: false
+                    }
+                }
+            }
+        }
+
         Image {
+            visible: !pageLoadCurtain.frozen
             source: "../images/Redefin-logo2-512.png"
             anchors.horizontalCenter: parent.horizontalCenter
             anchors.verticalCenter: parent.verticalCenter
@@ -2398,7 +2508,7 @@ FocusScope {
             anchors.topMargin: 10
             width: 80
             height: 80
-            active: pageLoadCurtain.visible && shell._circleDotsRuntimeEnabled
+            active: pageLoadCurtain.visible && shell._circleDotsRuntimeEnabled && !pageLoadCurtain.frozen
             sourceComponent: Component {
                 Components.CircleDotsLoader {
                     dotSize: 6; radius: 30
@@ -2427,6 +2537,7 @@ FocusScope {
                 ++shell._pageFocusHandoffSeq
                 try { forceActiveFocus(Qt.OtherFocusReason) } catch(e0) {}
             } else {
+                shell._pageSnapshotShown = false
                 shell._handoffFocusAfterPageCurtain()
 
                 Qt.callLater(function() {
