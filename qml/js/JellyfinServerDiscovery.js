@@ -161,7 +161,8 @@ function _discoveryBaseParts(base) {
 // stopOnFirstFound permet au volet compact de s'arrêter au premier résultat ;
 // la page de découverte conserve plusieurs serveurs.
 // Aucun Timer/probe supplémentaire n'est créé : maxParallel reste le garde-fou CPU/RAM.
-function start(options, onUpdate, onDone) {
+// onProgress(percent, details) est optionnel et ne change pas l'API existante.
+function start(options, onUpdate, onDone, onProgress) {
     options = options || {};
     var maxHosts = Math.max(1, Math.min(256, Number(options.maxHosts || 96) | 0));
     var maxParallel = Math.max(1, Math.min(4, Number(options.maxParallel || 2) | 0));
@@ -179,7 +180,45 @@ function start(options, onUpdate, onDone) {
         foundHosts = {},
         activeHandles = [],
         probedHttpHosts = {},
-        probedHttpsHosts = {};
+        probedHttpsHosts = {},
+        progressPlanned = {},
+        progressFinished = {},
+        progressTotal = 0,
+        progressDone = 0;
+
+    // Chaque couple (protocole, hote) n'est comptabilise qu'une fois.
+    // Les sondes sautees (doublons / serveur deja trouve) sont egalement
+    // soldees pour que 100 % signifie que toutes les phases sont terminees.
+    function progressKey(scheme, host) {
+        return scheme + "|" + _discoveryCleanHost(host).toLowerCase();
+    }
+    function planPhase(hosts, scheme) {
+        for (var i = 0; i < hosts.length; i++) {
+            var h = _discoveryCleanHost(hosts[i]);
+            if (!h) continue;
+            var key = progressKey(scheme, h);
+            if (!progressPlanned[key]) {
+                progressPlanned[key] = true;
+                progressTotal++;
+            }
+        }
+    }
+    function publishProgress(forceDone) {
+        if (controller.cancelled || typeof onProgress !== "function") return;
+        var pct = forceDone ? 100 : (progressTotal > 0 ? Math.floor(progressDone * 100 / progressTotal) : 0);
+        if (!forceDone) pct = Math.min(99, pct);
+        try {
+            onProgress(pct, { completed: progressDone, total: progressTotal });
+        } catch (e0) {} // Un observateur ne doit jamais interrompre le scan.
+    }
+    function finishProbe(scheme, host) {
+        if (controller.cancelled) return;
+        var key = progressKey(scheme, host);
+        if (!progressPlanned[key] || progressFinished[key]) return;
+        progressFinished[key] = true;
+        progressDone++;
+        publishProgress(false);
+    }
     var controller = {
         cancelled: false,
         done: false,
@@ -217,6 +256,7 @@ function start(options, onUpdate, onDone) {
         if (controller.cancelled || controller.done) return;
         controller.done = true;
         activeHandles = [];
+        publishProgress(true);
         if (onDone) onDone(snapshot());
     }
 
@@ -276,7 +316,12 @@ function start(options, onUpdate, onDone) {
                 var host = _discoveryCleanHost(hosts[cursor++]),
                     hk = host.toLowerCase();
                 var probedMap = (scheme === "https") ? probedHttpsHosts : probedHttpHosts;
-                if (!host || phaseSeen[hk] || probedMap[hk] || (skipFound && foundHosts[hk])) continue;
+                if (!host || phaseSeen[hk] || probedMap[hk]) continue;
+                if (skipFound && foundHosts[hk]) {
+                    // Requete HTTPS devenue inutile : achevee par exclusion.
+                    finishProbe(scheme, host);
+                    continue;
+                }
                 phaseSeen[hk] = true;
                 probedMap[hk] = true;
                 inFlight++;
@@ -284,7 +329,11 @@ function start(options, onUpdate, onDone) {
                     var base = scheme + "://" + hostValue + ":" + port,
                         handle = null;
 
+                    var settled = false;
                     function doneOne() {
+                        if (settled) return;
+                        settled = true;
+                        finishProbe(scheme, hostValue);
                         inFlight = Math.max(0, inFlight - 1);
                         pump();
                     }
@@ -296,9 +345,10 @@ function start(options, onUpdate, onDone) {
                         },
                         function() {
                             dropHandle(handle);
-                            if (!controller.cancelled) doneOne();
+                            doneOne();
                         });
-                    activeHandles.push(handle);
+                    // Protege aussi contre un callback termine synchroniquement.
+                    if (!settled && handle) activeHandles.push(handle);
                 })(host);
             }
             if (cursor >= hosts.length && inFlight === 0) complete();
@@ -312,6 +362,16 @@ function start(options, onUpdate, onDone) {
         _discoveryPushHost(initial, seen, lan[i], maxHosts);
     for (var j = 0; j < localNames.length && initial.length < maxHosts; j++)
         _discoveryPushHost(initial, seen, localNames[j], maxHosts);
+    // Calcule le travail maximal prevu AVANT les requetes. La progression
+    // reste stable lorsque l'on passe de HTTP a HTTPS et au fallback /24.
+    var fallback = fallbackEnabled ? _discoveryFallbackHosts(fallbackMaxHosts, lan) : [];
+    planPhase(initial, "http");
+    planPhase(initial, "https");
+    if (fallbackEnabled) {
+        planPhase(fallback, "http");
+        planPhase(fallback, "https");
+    }
+    publishProgress(false);
 
     runPhase(initial, "http", 8096, httpTimeout, false, function() {
         if (controller.cancelled) return;
@@ -335,7 +395,6 @@ function start(options, onUpdate, onDone) {
             // qu'un second Jellyfin absent/inactif dans fbx.lan.hosts() soit ignoré.
             // Les maps probedHttpHosts/probedHttpsHosts empêchent de retester les
             // mêmes hôtes lorsqu'ils réapparaissent dans cette phase.
-            var fallback = _discoveryFallbackHosts(fallbackMaxHosts, lan);
             runPhase(fallback, "http", 8096, httpTimeout, false, function() {
                 if (controller.cancelled) return;
                 if (stopOnFirst && results.length) {
