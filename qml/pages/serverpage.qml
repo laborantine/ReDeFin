@@ -82,14 +82,24 @@ FocusScope {
     // Timeout dédié à la saisie manuelle : le handshake HTTPS domaine + redirection + VM peut être lent.
     // La découverte auto reste rapide, mais l'URL entrée manuellement a le droit de respirer.
     property int    manualHttpTimeoutMs: 3500
-    property int    manualHttpsTimeoutMs: 9000
+    property int    manualHttpsTimeoutMs: 60000
     property bool   fallbackSubnetScan: true
 
     /* ===== Transport découverte ===== */
     property var _discoveryHandle: null
+    // La progression est fondee sur les sondes LAN terminees, pas sur le temps ecoule.
+    property int scanProgressPercent: 0
+    property bool scanIndicatorVisible: false
+    // Ignore les callbacks tardifs des scans precedents apres annulation/redemarrage.
+    property int _scanGeneration: 0
+
+    onScanProgressPercentChanged: scanProgressCanvas.requestPaint()
+    onScanIndicatorVisibleChanged: scanProgressCanvas.requestPaint()
 
     function _cancelDiscovery() {
+        _scanGeneration++
         discovering = false
+        scanIndicatorVisible = false
         var h = _discoveryHandle
         _discoveryHandle = null
         try { if (h && typeof h.cancel === "function") h.cancel("serverpage-cancel") } catch(e0) {}
@@ -124,22 +134,38 @@ FocusScope {
         try { return Jellyfin.isWanHttpUrl(url) === true; } catch(e0) { return false; }
     }
 
+    // Un dialogue modal HTTP vole le focus a l'interface sous-jacente.
+    // Restaurer le bouton concret (pas le FocusScope urlPage) apres les DEUX choix.
+    // Dans le cas d'une selection depuis la liste, restaurer plutot la liste.
+    function _restoreFocusAfterHttpConsent(fromUrlEntry) {
+        if (httpConsentDialog.visible || !serverPage.visible) return;
+        if (fromUrlEntry) {
+            if (overlay.active && overlay.item && typeof overlay.item.focusConnectButton === "function")
+                overlay.item.focusConnectButton();
+        } else if (!overlay.active) {
+            if (lv.count > 0) lv.forceActiveFocus();
+            else urlEntryLauncher.forceActiveFocus();
+        }
+    }
+
     function _withHttpConsent(url, onAccepted, onCancelled) {
         if (!isWanHttpUrl(url) || Jellyfin.hasWanHttpConsent(url)) {
             if (onAccepted) onAccepted();
             return;
         }
+        var fromUrlEntry = overlay.active && overlay.item && !overlay.item.closing;
         httpConsentDialog.confirm(url, function(approved) {
+            // InsecureHttpDialog.finish() masque le modal avant cet appel.
+            // Repositionnement immediat + au prochain tour Qt pour le moteur focus.
+            _restoreFocusAfterHttpConsent(fromUrlEntry);
             if (approved) {
                 if (onAccepted) onAccepted();
             } else {
                 if (onCancelled) onCancelled();
-                Qt.callLater(function() {
-                    if (overlay.active && overlay.item && overlay.item.forceActiveFocus)
-                        overlay.item.forceActiveFocus();
-                    else if (serverPage.visible) urlEntryLauncher.forceActiveFocus();
-                });
             }
+            Qt.callLater(function() {
+                _restoreFocusAfterHttpConsent(fromUrlEntry);
+            });
         });
     }
 
@@ -291,14 +317,17 @@ FocusScope {
     /* ===== Découverte réseau ===== */
     function startDiscovery() {
         _cancelDiscovery()
+        var scanId = _scanGeneration
         servers = []
         publishDiscovered()
         lastError = ""
+        scanProgressPercent = 0
+        scanIndicatorVisible = true
         discovering = true
         infoText = "Recherche de serveurs Jellyfin sur le réseau…"
         try { if (fbx && Jellyfin.setFbx) Jellyfin.setFbx(fbx) } catch(e0) {}
 
-        _discoveryHandle = ServerDiscovery.start({
+        var handle = ServerDiscovery.start({
             fbx: fbx || null,
             maxHosts: scanMaxHosts,
             maxParallel: maxParallel,
@@ -308,18 +337,27 @@ FocusScope {
             fallbackMaxHosts: scanMaxHosts,
             stopOnFirstFound: false
         }, function(list) {
-            if (!discovering) return
+            if (!discovering || scanId !== _scanGeneration) return
             servers = list && list.slice ? list.slice(0) : (list || [])
             infoText = servers.length ? "Serveurs découverts" : "Recherche de serveurs Jellyfin sur le réseau…"
             publishDiscovered()
         }, function(list) {
-            if (!discovering) return
+            if (!discovering || scanId !== _scanGeneration) return
             _discoveryHandle = null
             servers = list && list.slice ? list.slice(0) : (list || [])
+            scanProgressPercent = 100
             discovering = false
             infoText = servers.length ? "Serveurs découverts" : "Aucun serveur trouvé. Entrez l’adresse complète du serveur."
             publishDiscovered()
+        }, function(percent, details) {
+            if (!discovering || scanId !== _scanGeneration) return
+            scanProgressPercent = Math.max(scanProgressPercent, Math.max(0, Math.min(100, Math.floor(Number(percent) || 0))))
         })
+        // Une annulation ou une fin synchrone ne doit pas conserver un handle fantome.
+        if (scanId === _scanGeneration && discovering)
+            _discoveryHandle = handle
+        else if (handle && handle.isActive && handle.isActive())
+            handle.cancel("serverpage-stale")
     }
 
     onVisibleChanged: {
@@ -511,6 +549,75 @@ FocusScope {
             }
         }
 
+        // Cercle de progression : points blancs inactifs, arc blanc continu pour
+        // la fraction du scan reellement terminee. Aucun timer d'animation.
+        Item {
+            id: scanProgressContainer
+            width: parent.width
+            height: visible ? 134 : 0
+            visible: serverPage.scanIndicatorVisible
+
+            Canvas {
+                id: scanProgressCanvas
+                width: 134
+                height: 134
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.verticalCenter: parent.verticalCenter
+                antialiasing: true
+                onPaint: {
+                    var ctx = getContext("2d")
+                    if (!ctx) return
+                    var w = width, h = height, cx = w / 2, cy = h / 2
+                    var r = Math.min(w, h) / 2 - 11
+                    var from = -Math.PI / 2
+                    var fraction = Math.max(0, Math.min(1, serverPage.scanProgressPercent / 100))
+                    ctx.clearRect(0, 0, w, h)
+                    ctx.save()
+                    // Repere pointille blanc, toujours visible sur fond noir.
+                    ctx.fillStyle = "rgba(255,255,255,0.57)"
+                    for (var i = 0; i < 36; ++i) {
+                        var theta = from + i * (2 * Math.PI / 36)
+                        ctx.beginPath()
+                        ctx.arc(cx + r * Math.cos(theta), cy + r * Math.sin(theta), 2.5, 0, 2 * Math.PI)
+                        ctx.fill()
+                    }
+                    if (fraction > 0) {
+                        ctx.strokeStyle = "#FFFFFF"
+                        ctx.lineWidth = 9
+                        ctx.lineCap = "round"
+                        ctx.beginPath()
+                        ctx.arc(cx, cy, r, from, from + fraction * 2 * Math.PI, false)
+                        ctx.stroke()
+                    }
+                    ctx.restore()
+                }
+            }
+            // Deux lignes de libelle au-dessus du pourcentage, a l'interieur du cercle.
+            Column {
+                anchors.centerIn: scanProgressCanvas
+                spacing: 3
+                Text {
+                    width: 104
+                    textFormat: Text.PlainText
+                    text: "Scan du\nréseau local..."
+                    color: serverPage.uiText
+                    font.pixelSize: 12
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                }
+                Text {
+                    width: 104
+                    textFormat: Text.PlainText
+                    text: serverPage.scanProgressPercent + "%"
+                    color: serverPage.uiText
+                    font.pixelSize: 28
+                    font.bold: true
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                }
+            }
+        }
+
         Text {
             width: parent.width
             textFormat: Text.PlainText
@@ -523,7 +630,7 @@ FocusScope {
 
         ListView {
             id: lv
-            width: parent.width; height: 380
+            width: parent.width; height: serverPage.scanIndicatorVisible ? 194 : 380
             model: servers
             spacing: 8
             clip: true
@@ -852,6 +959,12 @@ FocusScope {
 
             property bool backJustHandled: false
             property bool closing: false
+            // Appelee lorsque l'avertissement HTTP disparait (Annuler/Poursuivre).
+            // Ne pas simplement focaliser le FocusScope : selectionner le bouton.
+            function focusConnectButton() {
+                if (!closing && overlay.active && !httpConsentDialog.visible)
+                    btnConnect.forceActiveFocus();
+            }
             function consumeBack() { backJustHandled = true; backGuard.restart(); }
             Timer { id: backGuard; interval: 300; repeat: false; running: false; onTriggered: urlPage.backJustHandled = false }
 
@@ -1058,6 +1171,9 @@ FocusScope {
 
                 if (!baseIn) { err = "Adresse vide.";  return; }
 
+                // La saisie manuelle est prioritaire sur la decouverte LAN.
+                // Annule immediatement les sondes en cours (avant HTTPS/HTTP).
+                serverPage._cancelDiscovery();
                 busy = true;
                 serverPage.manualUrl = baseIn;
 
