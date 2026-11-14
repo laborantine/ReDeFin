@@ -286,6 +286,12 @@ function handlePressed(root, event) {
         return;
     }
     if (wasControlsHidden) {
+        // Sans contrôles affichés, Retour quitte la lecture ; avec, il les referme.
+        if (event.key === K.Key_Back || event.key === K.Key_Escape) {
+            _finalizeExit(root, "back-key");
+            event.accepted = true;
+            return;
+        }
         if (event.key === K.Key_Left) {
             _focusProgress(root);
             _transportRewind(root, "hidden-progress-left");
@@ -382,6 +388,7 @@ function handlePressed(root, event) {
                 return;
             }
             if (event.key === K.Key_Down) {
+                if (root && typeof root.hideControlsByKey === "function") root.hideControlsByKey("down-from-bottom-row");
                 event.accepted = true;
                 return;
             }
@@ -510,7 +517,7 @@ function handlePressed(root, event) {
         return;
     }
     if (event.key === K.Key_Back || event.key === K.Key_Escape) {
-        _finalizeExit(root, "back-key");
+        if (root && typeof root.hideControlsByKey === "function") root.hideControlsByKey("back-key");
         event.accepted = true;
         return;
     }

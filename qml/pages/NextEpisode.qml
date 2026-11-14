@@ -92,8 +92,10 @@ FocusScope {
             }
             event.accepted = true; return
         }
+        // Retour quitte la lecture vers la fiche ; seul OK sur le second bouton
+        // masque l'annonce en restant sur la vidéo.
         if (event.key === Qt.Key_Escape || event.key === Qt.Key_Back) {
-            dismissForThisItem(); locallyHidden = true; requestHide(); event.accepted = true; return
+            dismissForThisItem(); locallyHidden = true; requestExit(); event.accepted = true; return
         }
     }
     onVisibleChanged: if (visible) Qt.callLater(function(){ setFocus(2); root.forceActiveFocus() })
@@ -181,6 +183,7 @@ FocusScope {
     function dismissForThisItem(){ dismissed = true }
     signal requestStartNow()
     signal requestHide()
+    signal requestExit()
 
     // Auto-start (hide d'abord, puis start)
     Timer {
