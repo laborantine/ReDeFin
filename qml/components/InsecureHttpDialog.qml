@@ -12,7 +12,48 @@ FocusScope {
     property string pendingUrl: ""
     property var _callback: null
 
-    function confirm(url, callback) {
+    // Cible optionnelle, renseignable par la page appelante si elle le souhaite.
+    // La signature confirm(url, callback) reste entierement compatible.
+    property var focusReturnTarget: null
+    property var _previousFocusItem: null
+    property int _focusGeneration: 0
+
+    // Le focus actif peut etre sur un enfant d'un FocusScope ou d'un Loader.
+    // Le reperer AVANT d'afficher la fenetre, sans dependance QtQuick.Window.
+    function _findActiveFocusItem(root, depth) {
+        if (!root || depth > 32) return null
+        if (root === warning) return null
+        var items = null
+        try { items = root.children } catch(e0) { items = null }
+        if (items) {
+            for (var i = 0; i < items.length; i++) {
+                var found = _findActiveFocusItem(items[i], depth + 1)
+                if (found) return found
+            }
+        }
+        try {
+            if (root.activeFocus && typeof root.forceActiveFocus === "function")
+                return root
+        } catch(e1) {}
+        return null
+    }
+
+    function _canRestoreFocus(item) {
+        if (!item || item === warning) return false
+        try {
+            if (typeof item.forceActiveFocus !== "function") return false
+            if (item.visible === false || item.enabled === false) return false
+            if (warning.parent && warning.parent.visible === false) return false
+            return true
+        } catch(e0) { return false }
+    }
+
+    function _restorePreviousFocus(item) {
+        if (!_canRestoreFocus(item)) return
+        try { item.forceActiveFocus() } catch(e0) {}
+    }
+
+    function confirm(url, callback, focusItem) {
         if (visible) return false
         if (!url || !Jellyfin.isWanHttpUrl(url)) {
             if (callback) callback(false)
@@ -22,6 +63,12 @@ FocusScope {
             if (callback) callback(true)
             return true
         }
+
+        // L'appelant peut fournir un item en 3e argument ou via la propriete.
+        // Sans cela, retrouver automatiquement le controle actuellement actif.
+        var explicitItem = (arguments.length >= 3 && focusItem) ? focusItem : focusReturnTarget
+        _previousFocusItem = explicitItem || _findActiveFocusItem(warning.parent, 0)
+        _focusGeneration++
         pendingUrl = String(url)
         _callback = callback
         visible = true
@@ -36,10 +83,24 @@ FocusScope {
         var approved = continueAnyway === true
                 && Jellyfin.grantWanHttpConsent(pendingUrl) === true
         var cb = _callback
+        var previousFocus = _previousFocusItem
         _callback = null
+        _previousFocusItem = null
         pendingUrl = ""
         visible = false
-        if (typeof cb === "function") cb(approved)
+
+        // Recuperer le focus AVANT que le callback reprenne la connexion ou
+        // affiche une erreur. Un deuxieme passage couvre le cycle Qt suivant.
+        var generation = ++_focusGeneration
+        _restorePreviousFocus(previousFocus)
+        try {
+            if (typeof cb === "function") cb(approved)
+        } finally {
+            Qt.callLater(function() {
+                if (!warning.visible && warning._focusGeneration === generation)
+                    warning._restorePreviousFocus(previousFocus)
+            })
+        }
     }
 
     Keys.priority: Keys.BeforeItem

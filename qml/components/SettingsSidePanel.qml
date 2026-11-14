@@ -27,8 +27,8 @@ FocusScope {
 
     /* === Personnalisation === */
     property real  panelWidthRatio: 0.18
-    // Affichage de la version publiée : 1.0-stable, fourni par clientId.js.
-    property string versionText: "ReDeFin " + ClientId.applicationVersion()
+    // Version affichée : ReDeFin v1.01-beta, fournie par clientId.js.
+    property string versionText: "ReDeFin v" + ClientId.applicationVersion()
     readonly property int panelWidth: Math.max(360, Math.round(width * panelWidthRatio))
 
     /* === Option: Afficher l’horloge === */

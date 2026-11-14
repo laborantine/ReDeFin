@@ -19,7 +19,7 @@ Item {
 
     // Version réellement exposée par le runtime Freebox / FreeStore.
     // Formats tolérés :
-    // 0.49.true / 0.49-beta / 0.49 / 0.50 / 0.51 / 1.0 / 1.0-stable / 0.9.7.1
+    // 0.49.true / 0.49-beta / 0.49 / 0.50 / 0.51 / 1.0 / 1.0-stable / 1.01-beta / v1.01-beta / 0.9.7.1
     property string currentVersion:
         Qt.application.version ? String(Qt.application.version) : "dev"
 
